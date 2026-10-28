@@ -8,15 +8,18 @@ const fixture = readFileSync(new URL("../fixtures/forms/mini-ats.html", import.m
 const FORM = "form#app";
 
 /**
- * Test-only state of the fake site: what was actually POSTed by the page, and a switch to make
- * `outcome` throw (as Playwright does when a navigation destroys the execution context).
+ * Test-only state of the fake site: what was actually POSTed by the page, and switches to make
+ * `outcome` throw (as Playwright does when a navigation destroys the execution context) or `submit` throw.
  */
 export const miniAts = {
   submissions: [] as Record<string, string>[],
   outcomeErrors: 0,
+  /** Makes `submit` throw right after clicking (the click itself still goes through). */
+  submitThrows: false,
   reset() {
     this.submissions = [];
     this.outcomeErrors = 0;
+    this.submitThrows = false;
   },
 };
 
@@ -88,6 +91,7 @@ export const miniAtsHandler: AtsHandler = {
 
   async submit(page) {
     await page.locator("#submit").click();
+    if (miniAts.submitThrows) throw new Error("Target page, context or browser has been closed");
   },
 
   async outcome(page): Promise<SubmitOutcome> {

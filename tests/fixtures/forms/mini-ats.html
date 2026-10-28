@@ -51,6 +51,24 @@
     document.getElementById("first").addEventListener("input", function (e) { e.target.value = ""; });
   }
 
+  // ?conditional=1: answering "Yes" to relocation reveals a required follow-up question.
+  if (params.has("conditional")) {
+    document.getElementById("reloc").addEventListener("change", function (e) {
+      if (e.target.value !== "y" || document.getElementById("cities")) return;
+      var submit = document.getElementById("submit");
+      var label = document.createElement("label");
+      label.htmlFor = "cities";
+      label.textContent = "Which cities would you consider?";
+      var input = document.createElement("input");
+      input.id = "cities";
+      input.name = "cities";
+      input.type = "text";
+      input.required = true;
+      form.insertBefore(label, submit);
+      form.insertBefore(input, submit);
+    });
+  }
+
   function send() {
     var data = {};
     new FormData(form).forEach(function (v, k) { data[k] = String(v); });

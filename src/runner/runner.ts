@@ -1,5 +1,5 @@
 import type { Page } from "playwright";
-import { addBlocker, addNeedsYou, resolveNeedsYouForJob } from "../answers/bank.js";
+import { addBlocker, addNeedsYou, clearBlockersForJob, resolveNeedsYouForJob } from "../answers/bank.js";
 import { resolveFields, type Resolution } from "../answers/resolve.js";
 import { atsNameFromUrl, detectAts, HANDLERS } from "../ats/registry.js";
 import type { AtsHandler, OpenResult, SubmitOutcome } from "../ats/types.js";
@@ -53,17 +53,29 @@ const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 const errorMessage = (err: unknown) =>
   (err instanceof Error ? err.message : String(err)).split("\n")[0]!.trim() || "Unexpected error";
 
+/** Statuses a run must never touch again: the job is done, or the user set it aside. */
+const FINAL: ReadonlySet<JobStatus> = new Set(["submitted", "applied-manually", "closed", "skipped", "duplicate-role"]);
+/** New questions can appear after answers (conditional fields); fill at most this many extra rounds. */
+const MAX_EXTRA_ROUNDS = 3;
+const UNKNOWN_SUBMISSION = "Submission state unknown — check before retrying";
+
+const isHuman = (o: SubmitOutcome) => o.kind === "captcha" || o.kind === "verification-code";
+
 /**
  * Applies to one job: opens its form through the matching ATS handler, resolves and fills every
- * field, verifies the values, then stops for review, for the user's input, or submits. Never submits
- * while a required field, a draft, or a CAPTCHA/code is unresolved. Always leaves the job in a final
- * status with a reason, and closes the browser page.
+ * field (and any questions the answers reveal), verifies the values, then stops for review, for the
+ * user's input, or submits. Never submits while a required field, a draft, or a CAPTCHA/code is
+ * unresolved. Always leaves the job in a final status with a reason, and closes the browser page.
+ * Jobs already done or set aside are left untouched; "submit-reviewed" only runs a job awaiting review.
  */
 export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "auto"): Promise<JobStatus> {
   const { db } = deps;
   const job = getJob(db, jobId);
   if (!job) throw new Error(`No job with id ${jobId}`);
+  if (FINAL.has(job.status)) return job.status;
+  if (mode === "submit-reviewed" && job.status !== "ready-to-review") return job.status;
 
+  clearBlockersForJob(db, job.id);
   const handler = detectAts(job.url, deps.handlers ?? HANDLERS);
   if (!handler) {
     const ats = atsNameFromUrl(job.url);
@@ -75,10 +87,14 @@ export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "a
   setStatus(db, job.id, "filling");
   incrementAttempts(db, job.id);
 
-  const settings = getSettings(db);
+  // The user is at the browser in these modes: show it and wait longer for them.
+  const userPresent = mode !== "auto";
   let session: { page: Page; close(): Promise<void> } | null = null;
-  let fields: FieldSpec[] = [];
-  let resolutions: Resolution[] = [];
+  const fields: FieldSpec[] = [];
+  const resolutions: Resolution[] = [];
+  const byId = new Map<string, FieldSpec>();
+  let submitClicked = false;
+  let beforeSubmit: Buffer | null = null;
 
   /** Saves what this run saw (with a screenshot) and sets the final status. */
   const end = async (status: JobStatus, reason: string | null, shot?: Buffer | null): Promise<JobStatus> => {
@@ -91,45 +107,83 @@ export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "a
     return status;
   };
 
+  /** Records a confirmed submission. A record that can't be written never changes the status. */
+  const endSubmitted = async (page: Page): Promise<JobStatus> => {
+    const confirmation = await screenshot(page);
+    let reason: string | null = null;
+    try {
+      saveRecord(job.id, {
+        screenshots: [beforeSubmit, confirmation].filter((s): s is Buffer => s !== null),
+        answers: resolutions.filter((r): r is Filled => r.status === "filled")
+          .map(r => ({ label: byId.get(r.fieldId)!.label, value: answerValue(r.answer), source: r.source })),
+        outcome: "submitted",
+      });
+    } catch (err) {
+      reason = `Submitted, but the record could not be saved: ${errorMessage(err)}`;
+    }
+    try { resolveNeedsYouForJob(db, job.id); } catch { /* the submission stands */ }
+    return end("submitted", reason, confirmation);
+  };
+
   try {
-    session = await deps.browser.open({ headless: mode === "interactive" ? false : settings.headless });
+    const settings = getSettings(db);
+    session = await deps.browser.open({ headless: userPresent ? false : settings.headless });
     const { page } = session;
 
     const opened = await handler.open(page, job.url);
     if (!opened.ok) return await end(...OPEN_FAILED[opened.reason](opened.detail));
 
-    fields = await handler.readFields(page);
-    if (!fields.length) return await end("failed", "No form fields found");
+    let batch = await handler.readFields(page);
+    if (!batch.length) return await end("failed", "No form fields found");
+    const ctx = await jobContext(job, handler, page);
+    let present = batch;
 
-    resolutions = await resolveFields({ db, llm: deps.llm }, fields, await jobContext(job, handler, page));
+    for (let round = 0; ; round++) {
+      for (const f of batch) { fields.push(f); byId.set(f.id, f); }
+      const res = await resolveFields({ db, llm: deps.llm }, batch, ctx);
+      resolutions.push(...res);
 
-    const blocked = resolutions.filter(r => r.status === "blocked");
-    if (blocked.length) {
-      for (const b of blocked) addBlocker(db, job.id, b.questionId, b.reason);
-      return await end("needs-you", `${new Set(blocked.map(b => b.questionId)).size} questions need you`);
+      const blocked = res.filter(r => r.status === "blocked");
+      if (blocked.length) {
+        for (const b of blocked) addBlocker(db, job.id, b.questionId, b.reason);
+        const n = new Set(blocked.map(b => b.questionId)).size;
+        return await end("needs-you", n === 1 ? "1 question needs you" : `${n} questions need you`);
+      }
+      const unanswered = res.find(r => r.status === "skip" && byId.get(r.fieldId)?.required);
+      if (unanswered) return await end("failed", `Required field "${byId.get(unanswered.fieldId)!.label}" has no answer`);
+
+      for (const r of res) if (r.status === "filled") await handler.fill(page, byId.get(r.fieldId)!, r.answer);
+
+      // Answers can reveal follow-up questions; read the form again and handle any new ones.
+      present = await handler.readFields(page);
+      batch = present.filter(f => !byId.has(f.id));
+      if (!batch.length) break;
+      if (round === MAX_EXTRA_ROUNDS) {
+        const extra = batch.find(f => f.required);
+        if (extra) return await end("failed", `New required questions kept appearing (last: "${extra.label}")`);
+        break;
+      }
     }
 
-    const byId = new Map(fields.map(f => [f.id, f]));
-    const unanswered = resolutions.find(r => r.status === "skip" && byId.get(r.fieldId)?.required);
-    if (unanswered) return await end("failed", `Required field "${byId.get(unanswered.fieldId)!.label}" has no answer`);
-
-    const filled = resolutions.filter((r): r is Filled => r.status === "filled");
-    for (const r of filled) await handler.fill(page, byId.get(r.fieldId)!, r.answer);
-    for (const r of filled) {
+    // Verify the fields still on the form (a conditional question may have been removed again).
+    const onForm = new Set(present.map(f => f.id));
+    for (const r of resolutions) {
+      if (r.status !== "filled" || !onForm.has(r.fieldId)) continue;
       const field = byId.get(r.fieldId)!;
       const got = await handler.readBack(page, field);
       // A blank optional field is allowed; a required one, or a field holding some other value, is not.
       if (!holds(field, r.answer, got) && (field.required || !isEmpty(got))) return await end("failed", `Could not fill "${field.label}"`);
     }
 
-    if (mode === "auto" && reviewApplies(settings, job.company)) return await end("ready-to-review", "Waiting for your review");
+    if (mode !== "submit-reviewed" && reviewApplies(settings, job.company)) return await end("ready-to-review", "Waiting for your review");
 
     if (dailyLimitReached(db, settings, deps.now())) {
       setStatus(db, job.id, "queued", "Daily limit reached");
       return "queued";
     }
 
-    const beforeSubmit = await screenshot(page);
+    beforeSubmit = await screenshot(page);
+    submitClicked = true;
     await handler.submit(page);
     const pollMs = deps.pollMs ?? POLL_MS;
     let outcome = await pollOutcome(handler, page, deps.submitWaitMs ?? SUBMIT_WAIT_MS, pollMs, o => o.kind === "pending");
@@ -139,22 +193,18 @@ export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "a
       await deps.notify("AI Applier needs you", `${job.company}: ${step.ask} in the browser window`);
       resolveNeedsYouForJob(db, job.id);
       addNeedsYou(db, { jobId: job.id, kind: step.kind, message: `${job.company} · ${job.title}: ${step.ask}` });
-      const humanWait = mode === "interactive" ? Math.max(deps.humanWaitMs ?? HUMAN_WAIT_MS, INTERACTIVE_WAIT_MS) : deps.humanWaitMs ?? HUMAN_WAIT_MS;
-      outcome = await pollOutcome(handler, page, humanWait, pollMs, o => o.kind === "pending" || o.kind === "captcha" || o.kind === "verification-code");
-      if (outcome.kind === "pending" || outcome.kind === "captcha" || outcome.kind === "verification-code") return await end("needs-you", step.reason);
+      // Nobody can solve anything in a hidden browser: hand it to the user right away.
+      if (!userPresent && settings.headless) return await end("needs-you", step.reason);
+      const humanWait = deps.humanWaitMs ?? HUMAN_WAIT_MS;
+      outcome = await pollOutcome(handler, page, userPresent ? Math.max(humanWait, INTERACTIVE_WAIT_MS) : humanWait, pollMs,
+        o => o.kind === "pending" || isHuman(o));
+      if (outcome.kind === "pending" || isHuman(outcome)) return await end("needs-you", step.reason);
       resolveNeedsYouForJob(db, job.id);
     }
 
     switch (outcome.kind) {
-      case "submitted": {
-        const confirmation = await screenshot(page);
-        saveRecord(job.id, {
-          screenshots: [beforeSubmit, confirmation].filter((s): s is Buffer => s !== null),
-          answers: filled.map(r => ({ label: byId.get(r.fieldId)!.label, value: answerValue(r.answer), source: r.source })),
-          outcome: "submitted",
-        });
-        return await end("submitted", null, confirmation);
-      }
+      case "submitted":
+        return await endSubmitted(page);
       case "validation-error":
         return await end("failed", outcome.messages.join("; ") || "The form reported an error");
       case "already-applied":
@@ -165,7 +215,14 @@ export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "a
         return await end("failed", "No confirmation after submitting");
     }
   } catch (err) {
-    return await end("failed", errorMessage(err));
+    if (!submitClicked || !session) return await end("failed", errorMessage(err));
+    // The application may already have gone out: never invite a blind retry.
+    const outcome = await handler.outcome(session.page).catch((): SubmitOutcome => ({ kind: "pending" }));
+    if (outcome.kind === "submitted") return await endSubmitted(session.page);
+    try {
+      addNeedsYou(db, { jobId: job.id, kind: "other", message: `${job.company} · ${job.title}: ${UNKNOWN_SUBMISSION} (${errorMessage(err)})` });
+    } catch { /* the status below still flags it */ }
+    return await end("needs-you", UNKNOWN_SUBMISSION);
   } finally {
     await session?.close().catch(() => {});
   }

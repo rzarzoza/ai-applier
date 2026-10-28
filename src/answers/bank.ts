@@ -67,6 +67,11 @@ export function addBlocker(db: Db, jobId: string, questionId: number, reason: "m
   db.prepare("INSERT OR REPLACE INTO job_blockers (job_id, question_id, reason) VALUES (?, ?, ?)").run(jobId, questionId, reason);
 }
 
+/** Removes every blocker recorded for the job (a new run records the ones that still apply). */
+export function clearBlockersForJob(db: Db, jobId: string): void {
+  db.prepare("DELETE FROM job_blockers WHERE job_id = ?").run(jobId);
+}
+
 export function blockersForJob(db: Db, jobId: string): { questionId: number; reason: string }[] {
   const rows = db.prepare("SELECT question_id, reason FROM job_blockers WHERE job_id = ? ORDER BY question_id").all(jobId) as unknown as { question_id: number; reason: string }[];
   return rows.map(r => ({ questionId: r.question_id, reason: r.reason }));

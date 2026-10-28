@@ -11,7 +11,7 @@ export function notificationScript(title: string, message: string): string {
 export function macNotify(title: string, message: string): Promise<void> {
   return new Promise(resolve => {
     try {
-      execFile("osascript", ["-e", notificationScript(title, message)], () => resolve());
+      execFile("osascript", ["-e", notificationScript(title, message)], { timeout: 10_000 }, () => resolve());
     } catch {
       resolve();
     }

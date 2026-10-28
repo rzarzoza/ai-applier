@@ -1,9 +1,10 @@
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { afterAll, beforeAll, beforeEach, expect, test } from "vitest";
 import { chromium, type Browser, type Page } from "playwright";
 import { openDb, type Db } from "../../src/db/db.js";
-import { blockersForJob, listOpenNeedsYou, listQuestions, setOverride } from "../../src/answers/bank.js";
+import { addBlocker, addNeedsYou, blockersForJob, createQuestion, listOpenNeedsYou, listQuestions, setOverride } from "../../src/answers/bank.js";
+import { paths } from "../../src/paths.js";
 import { getJob, setStatus, upsertPosting } from "../../src/jobs/repo.js";
 import type { Job } from "../../src/jobs/types.js";
 import { saveProfile, type Profile } from "../../src/profile/profile.js";
@@ -43,6 +44,7 @@ const CLASSES: Record<string, C> = {
   "Tell us about a project you are proud of": { category: "question", canonicalQuestion: "Describe a project you are proud of.", isFactual: false },
   "I certify that the information above is accurate": { category: "consent-required" },
   "Text me about new roles": { category: "optin-optional" },
+  "Which cities would you consider?": { category: "derived", derivedKey: "jobLocation", isFactual: true },
 };
 const classifyBy = (overrides: Record<string, C> = {}) => (req: { content: unknown }) => ({
   fields: (JSON.parse(String(req.content)) as { fields: { id: string; label: string }[] }).fields.map(f => {
@@ -158,7 +160,7 @@ test("unknown required question → needs-you with blocker, nothing filled or su
   expect(await runJob(deps, job.id)).toBe("needs-you");
   expect(blockersForJob(db, job.id)).toHaveLength(1);
   expect(fixtureSubmitCount()).toBe(0);
-  expect(getJob(db, job.id)!.statusReason).toBe("1 questions need you");
+  expect(getJob(db, job.id)!.statusReason).toBe("1 question needs you");
   const [q] = listQuestions(db).filter(x => x.id === blockersForJob(db, job.id)[0]!.questionId);
   expect(q!.canonical).toBe("Are you willing to relocate?");
   expectScreenshot(job.id);
@@ -247,11 +249,109 @@ test("captcha solved by the user while waiting → submitted and needs-you resol
   expect(listRecords(captchaJob.id)).toHaveLength(1);
 });
 
-test("interactive mode always opens a visible browser", async () => {
+test("interactive and submit-reviewed open a visible browser; interactive still stops for review", async () => {
+  saveSettings(db, { headless: true, reviewMode: "all" });
+  expect(await runJob(deps, job.id, "interactive")).toBe("ready-to-review");
+  expect(fixtureSubmitCount()).toBe(0);
+  expect(await runJob(deps, job.id, "submit-reviewed")).toBe("submitted");
+  saveSettings(db, { reviewMode: "off" });
+  const other = addJob("https://mini-ats.test/apply?other=1");
+  expect(await runJob(deps, other.id)).toBe("submitted");
+  expect(opened).toEqual([{ headless: false }, { headless: false }, { headless: true }]);
+});
+
+test("jobs that are done or set aside are never run again", async () => {
+  for (const status of ["submitted", "applied-manually", "closed", "skipped", "duplicate-role"] as const) {
+    setStatus(db, job.id, status, "kept");
+    for (const mode of ["auto", "interactive", "submit-reviewed"] as const) {
+      expect(await runJob(deps, job.id, mode), `${status}/${mode}`).toBe(status);
+    }
+    expect(getJob(db, job.id), status).toMatchObject({ status, statusReason: "kept", attempts: 0 });
+  }
+  expect(opened).toEqual([]);
+  expect(fixtureSubmitCount()).toBe(0);
+});
+
+test("submit-reviewed only runs a job that is awaiting review", async () => {
+  for (const status of ["queued", "needs-you", "failed"] as const) {
+    setStatus(db, job.id, status, "kept");
+    expect(await runJob(deps, job.id, "submit-reviewed"), status).toBe(status);
+  }
+  expect(opened).toEqual([]);
+  expect(getJob(db, job.id)!.attempts).toBe(0);
+});
+
+test("headless captcha goes straight to needs-you without waiting", async () => {
   saveSettings(db, { headless: true });
+  const captchaJob = addJob("https://mini-ats.test/apply?captcha=1");
+  const started = Date.now();
+  expect(await runJob({ ...deps, humanWaitMs: 20_000 }, captchaJob.id)).toBe("needs-you");
+  expect(Date.now() - started).toBeLessThan(10_000);
+  expect(notifications).toHaveLength(1);
+  expect(listOpenNeedsYou(db).map(n => n.kind)).toEqual(["captcha"]);
+  expect(getJob(db, captchaJob.id)!.statusReason).toBe("CAPTCHA");
+});
+
+test("submit-reviewed waits for the user past humanWaitMs", async () => {
+  saveSettings(db, { reviewMode: "all" });
+  const captchaJob = addJob("https://mini-ats.test/apply?captcha=1");
+  expect(await runJob(deps, captchaJob.id)).toBe("ready-to-review");
+  const solving = { ...deps, humanWaitMs: 50, notify: async (title: string, message: string) => {
+    notifications.push({ title, message });
+    setTimeout(() => void lastPage!.locator("#solve").click(), 500);
+  } };
+  expect(await runJob(solving, captchaJob.id, "submit-reviewed")).toBe("submitted");
+  expect(listOpenNeedsYou(db)).toEqual([]);
+});
+
+test("a run replaces stale blockers; a submission resolves open needs-you items", async () => {
+  const stale = createQuestion(db, { canonical: "An old question", kind: "global", isFactual: true });
+  addBlocker(db, job.id, stale.id, "missing");
+  saveProfile(db, { willingToRelocate: null });
+  expect(await runJob(deps, job.id)).toBe("needs-you");
+  const blockers = blockersForJob(db, job.id);
+  expect(blockers).toHaveLength(1);
+  expect(blockers[0]!.questionId).not.toBe(stale.id);
+
+  saveProfile(db, { willingToRelocate: true });
+  addNeedsYou(db, { jobId: job.id, kind: "captcha", message: "old captcha" });
   expect(await runJob(deps, job.id)).toBe("submitted");
-  expect(await runJob(deps, job.id, "interactive")).toBe("submitted");
-  expect(opened).toEqual([{ headless: true }, { headless: false }]);
+  expect(blockersForJob(db, job.id)).toEqual([]);
+  expect(listOpenNeedsYou(db)).toEqual([]);
+});
+
+test("a record that cannot be written never turns a submission into a failure", async () => {
+  mkdirSync(paths.records, { recursive: true });
+  writeFileSync(path.join(paths.records, job.id), "a file where the job's record folder should be");
+  expect(await runJob(deps, job.id)).toBe("submitted");
+  expect(fixtureSubmitCount()).toBe(1);
+  expect(getJob(db, job.id)!.statusReason).toMatch(/^Submitted, but the record could not be saved/);
+});
+
+test("an error after clicking submit ends needs-you, never plain failed", async () => {
+  miniAts.submitThrows = true;
+  const silent = addJob("https://mini-ats.test/apply?silent=1");
+  expect(await runJob(deps, silent.id)).toBe("needs-you");
+  expect(getJob(db, silent.id)!.statusReason).toBe("Submission state unknown — check before retrying");
+  expect(listOpenNeedsYou(db).map(n => n.kind)).toEqual(["other"]);
+  expectScreenshot(silent.id);
+});
+
+test("questions revealed by an answer are resolved and filled before submitting", async () => {
+  const cond = addJob("https://mini-ats.test/apply?conditional=1");
+  expect(await runJob(deps, cond.id)).toBe("submitted");
+  expect(miniAts.submissions[0]).toMatchObject({ reloc: "y", cities: "Austin, TX" });
+  const record = JSON.parse(readFileSync(path.join(listRecords(cond.id)[0]!, "record.json"), "utf8"));
+  expect(record.answers).toContainEqual({ label: "Which cities would you consider?", value: "Austin, TX", source: "derived" });
+});
+
+test("a revealed required question nobody can answer blocks the job", async () => {
+  llm.on("classify", classifyBy({ "Which cities would you consider?": { category: "question", canonicalQuestion: "Which cities would you consider?", isFactual: true } }));
+  const cond = addJob("https://mini-ats.test/apply?conditional=1");
+  expect(await runJob(deps, cond.id)).toBe("needs-you");
+  expect(getJob(db, cond.id)!.statusReason).toBe("1 question needs you");
+  expect(blockersForJob(db, cond.id)).toHaveLength(1);
+  expect(fixtureSubmitCount()).toBe(0);
 });
 
 test("open failures map to closed, failed or applied-manually; zero fields fails", async () => {

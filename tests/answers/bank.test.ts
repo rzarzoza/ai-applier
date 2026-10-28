@@ -2,7 +2,7 @@ import { expect, test } from "vitest";
 import { openDb } from "../../src/db/db.js";
 import { upsertPosting, getJob, setStatus } from "../../src/jobs/repo.js";
 import type { Posting } from "../../src/sources/types.js";
-import { addBlocker, addNeedsYou, addVariant, approveAnswer, blockersForJob, createQuestion, deleteQuestion, getOverrides, getQuestion, incrementUse, listOpenNeedsYou, listQuestions, resolveNeedsYouForJob, setDraft, setOverride } from "../../src/answers/bank.js";
+import { addBlocker, addNeedsYou, addVariant, approveAnswer, blockersForJob, clearBlockersForJob, createQuestion, deleteQuestion, getOverrides, getQuestion, incrementUse, listOpenNeedsYou, listQuestions, resolveNeedsYouForJob, setDraft, setOverride } from "../../src/answers/bank.js";
 import { answerQuestion, inboxItems } from "../../src/answers/inbox.js";
 
 const p = (n: number): Posting => ({ sourceId: "s", listingId: String(n), company: `Co${n}`, title: "Intern", locations: ["NYC"],
@@ -21,6 +21,16 @@ test("answering a question requeues only jobs with no remaining blockers", () =>
   expect(getJob(db, b.id)!.status).toBe("needs-you");
   expect(blockersForJob(db, b.id)).toEqual([{ questionId: q2.id, reason: "approval" }]);
   expect(getQuestion(db, q1.id)).toMatchObject({ status: "approved", answer: "No" });
+});
+
+test("clearBlockersForJob removes only that job's blockers", () => {
+  const db = openDb(":memory:");
+  const q1 = q(db, "Need sponsorship?");
+  const a = mkJob(db, 1), b = mkJob(db, 2);
+  addBlocker(db, a.id, q1.id, "missing"); addBlocker(db, b.id, q1.id, "missing");
+  clearBlockersForJob(db, a.id);
+  expect(blockersForJob(db, a.id)).toEqual([]);
+  expect(blockersForJob(db, b.id)).toEqual([{ questionId: q1.id, reason: "missing" }]);
 });
 
 test("inboxItems groups jobs per question, most-blocking first", () => {
