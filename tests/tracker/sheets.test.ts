@@ -55,3 +55,10 @@ test("every request carries a timeout signal", async () => {
   expect(signals.length).toBe(4);
   expect(signals.every(s => s instanceof AbortSignal)).toBe(true);
 });
+
+test("a token request that never answers times out instead of hanging the sync", async () => {
+  const fetchFake = vi.fn(async () => respond({}));
+  const client = googleSheetsClient("{}", { fetch: fetchFake as unknown as typeof fetch, token: () => new Promise<string>(() => {}), timeoutMs: 50 });
+  await expect(client.replaceTab("sid", "Applications", [])).rejects.toThrow("Timed out getting a Google access token");
+  expect(fetchFake).not.toHaveBeenCalled();
+});

@@ -17,27 +17,38 @@ export function spreadsheetIdFromUrl(url: string): string | null {
   return /^\/spreadsheets\/d\/([A-Za-z0-9_-]+)/.exec(u.pathname)?.[1] ?? null;
 }
 
-/** `fetch` and `token` are injectable for tests; production uses a service-account JWT. */
+/** Rejects with `message` if `p` hasn't settled within `ms`. */
+function withTimeout<T>(p: Promise<T>, ms: number, message: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(message)), ms); });
+  return Promise.race([p, timeout]).finally(() => clearTimeout(timer));
+}
+
+/** `fetch`, `token` and `timeoutMs` are injectable for tests; production uses a service-account JWT. */
 export function googleSheetsClient(
   serviceAccountJson: string,
-  deps: { fetch?: typeof fetch; token?: () => Promise<string> } = {},
+  deps: { fetch?: typeof fetch; token?: () => Promise<string>; timeoutMs?: number } = {},
 ): SheetsClient {
   const doFetch = deps.fetch ?? fetch;
-  const token = deps.token ?? (async () => {
+  const timeoutMs = deps.timeoutMs ?? TIMEOUT_MS;
+  const getToken = deps.token ?? (async () => {
     let key: { client_email: string; private_key: string };
     try { key = JSON.parse(serviceAccountJson); } catch { throw new Error(UNREADABLE_KEY); }
     if (!key || typeof key.client_email !== "string" || typeof key.private_key !== "string") throw new Error(UNREADABLE_KEY);
-    const t = (await new JWT({ email: key.client_email, key: key.private_key, scopes: [SCOPE] }).getAccessToken()).token;
+    const jwt = new JWT({ email: key.client_email, key: key.private_key, scopes: [SCOPE], transporterOptions: { timeout: timeoutMs } });
+    const t = (await jwt.getAccessToken()).token;
     if (!t) throw new Error("Could not get a Google access token");
     return t;
   });
+  // The token request has its own timeout too, but a hung one must never stall the tracker.
+  const token = () => withTimeout(getToken(), timeoutMs, "Timed out getting a Google access token");
 
   async function call(method: string, url: string, body?: unknown): Promise<any> {
     const res = await doFetch(url, {
       method,
       headers: { authorization: `Bearer ${await token()}`, "content-type": "application/json" },
       body: body === undefined ? undefined : JSON.stringify(body),
-      signal: AbortSignal.timeout(TIMEOUT_MS),
+      signal: AbortSignal.timeout(timeoutMs),
     });
     const text = await res.text();
     if (!res.ok) {
