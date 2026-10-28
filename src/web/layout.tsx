@@ -1,5 +1,13 @@
 import { raw } from "hono/html";
 import type { Child } from "hono/jsx";
+import type { Db } from "../db/db.js";
+import { getRunnerHalt, getSettings } from "../settings.js";
+
+/** The Layout's pause banner props: whether the runner is paused, and why if it paused itself. */
+export function pauseProps(db: Db): { paused: boolean; haltReason: string | null } {
+  const paused = getSettings(db).paused;
+  return { paused, haltReason: paused ? getRunnerHalt(db)?.reason ?? null : null };
+}
 
 const TABS: { href: string; label: string; key: string }[] = [
   { href: "/inbox", label: "Inbox", key: "inbox" },
@@ -48,7 +56,7 @@ table { width: 100%; border-collapse: collapse; font-size: 14px; } th, td { text
 .row a { color: var(--muted); text-decoration: none; } .row a.active { color: var(--text); font-weight: 600; }
 `;
 
-export function Layout(props: { active: string; inboxCount: number; paused?: boolean; children?: Child }) {
+export function Layout(props: { active: string; inboxCount: number; paused?: boolean; haltReason?: string | null; children?: Child }) {
   return (
     <html lang="en">
       <head>
@@ -67,7 +75,9 @@ export function Layout(props: { active: string; inboxCount: number; paused?: boo
             </a>
           ))}
         </nav>
-        {props.paused ? <div class="note" role="status">Paused — nothing will be applied. Turn off in Settings when your profile and resume are ready.</div> : null}
+        {props.paused && props.haltReason
+          ? <div class="note" role="status">Paused: {props.haltReason}. Turn off Paused in Settings once it's fixed.</div>
+          : props.paused ? <div class="note" role="status">Paused — nothing will be applied. Turn off in Settings when your profile and resume are ready.</div> : null}
         <main>{props.children}</main>
       </body>
     </html>

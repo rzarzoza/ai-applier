@@ -1,7 +1,6 @@
-import { getSettings } from "../../settings.js";
 import { listQuestions, type Question } from "../../answers/bank.js";
 import type { Db } from "../../db/db.js";
-import { Layout } from "../layout.js";
+import { Layout, pauseProps } from "../layout.js";
 import { inboxCount } from "./inbox.js";
 
 function BankRow(props: { q: Question }) {
@@ -32,7 +31,7 @@ function BankRow(props: { q: Question }) {
 export function BankPage(props: { db: Db; search?: string }) {
   const items = listQuestions(props.db, { search: props.search || undefined });
   return (
-    <Layout active="bank" inboxCount={inboxCount(props.db)} paused={getSettings(props.db).paused}>
+    <Layout active="bank" inboxCount={inboxCount(props.db)} {...pauseProps(props.db)}>
       <h1>Answer bank</h1>
       <form method="get" action="/bank" class="row">
         <input type="text" name="search" value={props.search ?? ""} placeholder="Search questions" />

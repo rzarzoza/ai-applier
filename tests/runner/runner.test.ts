@@ -8,7 +8,7 @@ import { paths } from "../../src/paths.js";
 import { getJob, setStatus, upsertPosting } from "../../src/jobs/repo.js";
 import type { Job } from "../../src/jobs/types.js";
 import { saveProfile, type Profile } from "../../src/profile/profile.js";
-import { saveSettings } from "../../src/settings.js";
+import { getRunnerHalt, getSettings, saveSettings } from "../../src/settings.js";
 import type { Posting } from "../../src/sources/types.js";
 import { persistentChromium, type BrowserProvider } from "../../src/runner/browser.js";
 import { notificationScript } from "../../src/runner/notify.js";
@@ -16,7 +16,9 @@ import { listRecords } from "../../src/runner/records.js";
 import type { Resolution } from "../../src/answers/resolve.js";
 import type { FieldAnswer, FieldSpec } from "../../src/forms/types.js";
 import { runJob, runNext, usedDocuments, type RunnerDeps } from "../../src/runner/runner.js";
+import Anthropic from "@anthropic-ai/sdk";
 import { inPage } from "../../src/forms/in-page.js";
+import { LlmOutputError } from "../../src/llm/llm.js";
 import { FakeLlm } from "../helpers/fake-llm.js";
 import { fixtureSubmitCount, miniAts, miniAtsHandler } from "../helpers/mini-ats-handler.js";
 
@@ -431,6 +433,62 @@ test("runNext returns null when paused", async () => {
   saveSettings(db, { paused: false });
   expect(await runNext(deps)).toBe("submitted");
   expect(await runNext(deps)).toBeNull(); // nothing left in the queue
+});
+
+test("API-wide LLM errors put the job back and pause the runner instead of failing it", async () => {
+  const cases: [Error, RegExp][] = [
+    [new Anthropic.AuthenticationError(401, undefined, "invalid x-api-key", new Headers()), /rejected the API key/],
+    [new Anthropic.PermissionDeniedError(403, undefined, "forbidden", new Headers()), /denied access/],
+    [new Anthropic.RateLimitError(429, undefined, "rate limited", new Headers()), /rate limit/],
+    [new Anthropic.APIConnectionError({ message: "fetch failed" }), /Can't reach the Anthropic API/],
+    [new Anthropic.InternalServerError(529, undefined, "overloaded", new Headers()), /overloaded/],
+    [new Error("Could not resolve authentication method. Expected one of apiKey..."), /Add your Anthropic API key/],
+  ];
+  for (const [err, reason] of cases) {
+    saveSettings(db, { paused: false });
+    llm.on("classify", () => { throw err; });
+    expect(await runNext(deps), err.message).toBe("queued");
+    expect(getJob(db, job.id), err.message).toMatchObject({ status: "queued", attempts: 0 });
+    expect(getSettings(db).paused).toBe(true);
+    expect(getRunnerHalt(db)?.reason).toMatch(reason);
+    expect(await runNext(deps)).toBeNull(); // paused: the queue waits
+  }
+  expect(fixtureSubmitCount()).toBe(0);
+});
+
+test("a halted review submission goes back to ready-to-review", async () => {
+  saveSettings(db, { reviewMode: "all" });
+  expect(await runJob(deps, job.id)).toBe("ready-to-review");
+  llm.on("classify", () => { throw new Anthropic.RateLimitError(429, undefined, "rate limited", new Headers()); });
+  // Classifications are cached; clear them so this run asks the LLM again.
+  db.prepare("DELETE FROM field_cache").run();
+  expect(await runJob(deps, job.id, "submit-reviewed")).toBe("ready-to-review");
+  expect(getJob(db, job.id)).toMatchObject({ status: "ready-to-review", statusReason: "Waiting for your review", attempts: 1 });
+});
+
+test("a browser that can't start pauses the runner and keeps the job queued", async () => {
+  const broken: BrowserProvider = { open: async () => { throw new Error("browserType.launchPersistentContext: Executable doesn't exist at /x/chrome\nmore"); } };
+  expect(await runNext({ ...deps, browser: broken })).toBe("queued");
+  expect(getJob(db, job.id)).toMatchObject({ status: "queued", attempts: 0 });
+  expect(getRunnerHalt(db)?.reason).toBe("The browser could not start: browserType.launchPersistentContext: Executable doesn't exist at /x/chrome");
+  expect(getSettings(db).paused).toBe(true);
+});
+
+test("an error that belongs to one job still fails only that job", async () => {
+  llm.on("classify", () => { throw new LlmOutputError('No parsed output for "classify"'); });
+  expect(await runNext(deps)).toBe("failed");
+  expect(getSettings(db).paused).toBe(false);
+  expect(getRunnerHalt(db)).toBeNull();
+});
+
+test("runNext with no API key pauses instead of taking a job", async () => {
+  expect(await runNext({ ...deps, hasApiKey: async () => false })).toBeNull();
+  expect(opened).toEqual([]);
+  expect(getJob(db, job.id)).toMatchObject({ status: "queued", attempts: 0 });
+  expect(getSettings(db).paused).toBe(true);
+  expect(getRunnerHalt(db)?.reason).toBe("Add your Anthropic API key in Settings");
+  saveSettings(db, { paused: false });
+  expect(await runNext({ ...deps, hasApiKey: async () => true })).toBe("submitted");
 });
 
 test("notification script quotes title and message for AppleScript", () => {

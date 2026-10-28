@@ -78,6 +78,11 @@ export async function startApp(opts: StartOptions = {}): Promise<{ url: string; 
   const runnerDeps = (): RunnerDeps => ({
     db, llm, browser: persistentChromium, notify: macNotify, now: () => new Date(), handlers: HANDLERS,
     onSubmitted: () => { void runSync(); },
+    hasApiKey: async () => {
+      if (process.env.ANTHROPIC_API_KEY) return true;
+      // A Keychain that can't be read is not proof the key is missing; a run will halt if it is.
+      try { return !!(await secrets.get(API_KEY_NAME)); } catch { return true; }
+    },
   });
   /** Every job run goes through the one queue: the persistent Chromium profile can only be opened once. */
   const runQueued = (task: () => ReturnType<typeof runNext>, what: string) =>

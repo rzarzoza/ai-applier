@@ -1,8 +1,7 @@
-import { getSettings } from "../../settings.js";
 import type { Db } from "../../db/db.js";
 import { listOpenNeedsYou } from "../../answers/bank.js";
 import { canDoItNow, inboxItems, type InboxItem } from "../../answers/inbox.js";
-import { Layout } from "../layout.js";
+import { Layout, pauseProps } from "../layout.js";
 
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 
@@ -74,7 +73,7 @@ export function InboxPage(props: { db: Db }) {
   const items = inboxItems(props.db);
   const needs = listOpenNeedsYou(props.db);
   return (
-    <Layout active="inbox" inboxCount={items.length + needs.length} paused={getSettings(props.db).paused}>
+    <Layout active="inbox" inboxCount={items.length + needs.length} {...pauseProps(props.db)}>
       <h1>Inbox</h1>
       {items.length === 0 ? <p class="empty">No questions waiting. Nothing is blocked on you.</p> : items.map(item => <QuestionCard item={item} />)}
       <h2>Needs you</h2>

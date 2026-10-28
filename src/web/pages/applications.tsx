@@ -1,4 +1,3 @@
-import { getSettings } from "../../settings.js";
 import path from "node:path";
 import { getOverrides } from "../../answers/bank.js";
 import type { Resolution } from "../../answers/resolve.js";
@@ -8,7 +7,7 @@ import { countByStatus, isUnknownSubmission, listJobs } from "../../jobs/repo.js
 import type { Job, JobStatus } from "../../jobs/types.js";
 import { paths } from "../../paths.js";
 import { getSnapshot } from "../../runner/records.js";
-import { Layout } from "../layout.js";
+import { Layout, pauseProps } from "../layout.js";
 import { inboxCount } from "./inbox.js";
 
 export const PAGE_SIZE = 50;
@@ -37,7 +36,7 @@ export function ApplicationsPage(props: { db: Db; status?: JobStatus; page: numb
   const jobs = listJobs(db, { status, limit: PAGE_SIZE, offset: (page - 1) * PAGE_SIZE });
   const link = (p: number) => `/applications?${status ? `status=${status}&` : ""}page=${p}`;
   return (
-    <Layout active="applications" inboxCount={inboxCount(db)} paused={getSettings(db).paused}>
+    <Layout active="applications" inboxCount={inboxCount(db)} {...pauseProps(db)}>
       <h1>Applications</h1>
       <div class="row">
         <a href="/applications" class={status ? "" : "active"}>All <span class="badge">{Object.values(counts).reduce((a, b) => a + b, 0)}</span></a>
@@ -163,7 +162,7 @@ export function JobDetailPage(props: { db: Db; job: Job; notice?: string }) {
   const editable = job.status === "ready-to-review";
   const href = safeHref(job.url);
   return (
-    <Layout active="applications" inboxCount={inboxCount(db)} paused={getSettings(db).paused}>
+    <Layout active="applications" inboxCount={inboxCount(db)} {...pauseProps(db)}>
       <h1>{job.company} · {job.title}</h1>
       <div class="meta">
         {job.chosenLocation ?? job.locations.join(", ")} · posted {day(job.datePosted)} · {job.ats ?? "ATS unknown"} ·{" "}

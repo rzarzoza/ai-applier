@@ -18,6 +18,20 @@ export interface Llm {
 }
 
 export class LlmRefusalError extends Error {}
+
+/**
+ * Why an LLM error means no job can run right now (a missing or rejected key, rate limits, the API
+ * being unreachable or overloaded), or null when the error belongs to the one request.
+ */
+export function llmHaltReason(err: unknown): string | null {
+  if (err instanceof Anthropic.AuthenticationError) return "Anthropic rejected the API key — check it in Settings";
+  if (err instanceof Anthropic.PermissionDeniedError) return "Anthropic denied access for this API key";
+  if (err instanceof Anthropic.RateLimitError) return "Anthropic rate limit reached — try again later";
+  if (err instanceof Anthropic.APIConnectionError) return "Can't reach the Anthropic API — check your connection";
+  if (err instanceof Anthropic.InternalServerError) return "The Anthropic API is unavailable or overloaded — try again later";
+  if (err instanceof Error && /could not resolve authentication method/i.test(err.message)) return "Add your Anthropic API key in Settings";
+  return null;
+}
 export class LlmOutputError extends Error {}
 
 const MODEL = "claude-opus-5-5";

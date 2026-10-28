@@ -69,6 +69,21 @@ test("every dashboard page shows the paused banner only while paused", async () 
   expect(await (await app.request("/inbox")).text()).not.toContain("Paused — nothing will be applied");
 });
 
+test("a runner halt shows its reason in the banner until the user turns Paused off", async () => {
+  const { db, app } = setupApp();
+  const { haltRunner, getRunnerHalt } = await import("../../src/settings.js");
+  haltRunner(db, "Anthropic rate limit reached — try again later");
+  for (const p of ["/inbox", "/applications", "/bank", "/profile", "/sources", "/settings"])
+    expect(await (await app.request(p)).text()).toContain("Paused: Anthropic rate limit reached — try again later");
+  // Saving other settings while still paused keeps the reason.
+  await app.request("/settings", form({ ...base, paused: "1" }));
+  expect(getRunnerHalt(db)).not.toBeNull();
+  await app.request("/settings", form(base));
+  expect(getSettings(db).paused).toBe(false);
+  expect(getRunnerHalt(db)).toBeNull();
+  expect(await (await app.request("/inbox")).text()).not.toContain("Paused");
+});
+
 // --- tracker spreadsheet ---
 const SA = JSON.stringify({ type: "service_account", client_email: "bot@proj.iam.gserviceaccount.com", private_key: "-----BEGIN PRIVATE KEY-----\nSECRETKEY\n-----END PRIVATE KEY-----\n" });
 const upload = (name: string, content: string, extra: Record<string, string> = {}) => {

@@ -15,7 +15,7 @@ import { importResume } from "../profile/resume.js";
 import { saveFilters } from "../filters/filters.js";
 import { addSource, listSources, setSourceEnabled } from "../sources/repo.js";
 import { getSecret, setSecret } from "../secrets.js";
-import { saveSettings, setJson, type Settings } from "../settings.js";
+import { clearRunnerHalt, saveSettings, setJson, type Settings } from "../settings.js";
 import { writeTrackerCsv } from "../tracker/csv.js";
 import { spreadsheetIdFromUrl } from "../tracker/sheets.js";
 import { SERVICE_ACCOUNT_SECRET, SHEET_URL_KEY, type SyncResult } from "../tracker/sync.js";
@@ -364,6 +364,7 @@ export function createApp(ctx: AppContext): Hono {
       reviewCompanies: str(form.reviewCompanies).split(",").map(s => s.trim()).filter(Boolean),
     };
     saveSettings(db, patch);
+    if (!patch.paused) clearRunnerHalt(db);
     const key = str(form.apiKey);
     if (key) {
       try {

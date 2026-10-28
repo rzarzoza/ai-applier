@@ -6,10 +6,10 @@ import { atsNameFromUrl, detectAts, HANDLERS } from "../ats/registry.js";
 import type { AtsHandler, OpenResult, SubmitOutcome } from "../ats/types.js";
 import type { Db } from "../db/db.js";
 import type { FieldAnswer, FieldSpec, JobContext } from "../forms/types.js";
-import { getJob, incrementAttempts, isUnknownSubmission, nextQueued, setAts, setStatus, setUsedDocuments, submittedSince, UNKNOWN_SUBMISSION } from "../jobs/repo.js";
+import { decrementAttempts, getJob, incrementAttempts, isUnknownSubmission, nextQueued, setAts, setStatus, setUsedDocuments, submittedSince, UNKNOWN_SUBMISSION } from "../jobs/repo.js";
 import type { Job, JobStatus } from "../jobs/types.js";
-import type { Llm } from "../llm/llm.js";
-import { getSettings, type Settings } from "../settings.js";
+import { llmHaltReason, type Llm } from "../llm/llm.js";
+import { getSettings, haltRunner, type Settings } from "../settings.js";
 import type { BrowserProvider } from "./browser.js";
 import { saveRecord, saveSnapshot } from "./records.js";
 
@@ -27,7 +27,12 @@ export interface RunnerDeps {
   submitWaitMs?: number; // default 30_000
   /** Called after a job ends submitted or applied-manually (e.g. to sync the tracker). Must not block; errors are ignored. */
   onSubmitted?(jobId: string): void;
+  /** Whether an Anthropic API key is available; when it says no, `runNext` pauses instead of taking a job. */
+  hasApiKey?(): Promise<boolean>;
 }
+
+/** A problem outside the job (the browser can't start) that would fail every job the same way. */
+class SetupError extends Error {}
 
 export type RunMode = "auto" | "submit-reviewed" | "interactive";
 
@@ -157,7 +162,11 @@ export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "a
 
   try {
     const settings = getSettings(db);
-    session = await deps.browser.open({ headless: userPresent ? false : settings.headless });
+    try {
+      session = await deps.browser.open({ headless: userPresent ? false : settings.headless });
+    } catch (err) {
+      throw new SetupError(`The browser could not start: ${errorMessage(err)}`);
+    }
     const { page } = session;
 
     const opened = await handler.open(page, job.url);
@@ -249,6 +258,14 @@ export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "a
         return await endUnknown("No confirmation after submitting");
     }
   } catch (err) {
+    const halt = err instanceof SetupError ? err.message : llmHaltReason(err);
+    if (halt && !submitClicked) {
+      // Every job would fail the same way: put this one back as it was and pause until it's fixed.
+      setStatus(db, job.id, job.status, job.statusReason);
+      decrementAttempts(db, job.id);
+      haltRunner(db, halt, deps.now());
+      return job.status;
+    }
     if (!submitClicked || !session) return await end("failed", errorMessage(err));
     const outcome = await handler.outcome(session.page).catch((): SubmitOutcome => ({ kind: "pending" }));
     if (outcome.kind === "submitted") return await endSubmitted(session.page);
@@ -273,13 +290,20 @@ export function flagInterruptedRuns(db: Db): string[] {
   return rows.map(j => j.id);
 }
 
-/** Runs the next queued job, unless the runner is paused, the queue is empty, or today's limit is reached. */
+/**
+ * Runs the next queued job, unless the runner is paused, the queue is empty, or today's limit is
+ * reached. With no API key available it pauses the runner instead of taking a job.
+ */
 export async function runNext(deps: RunnerDeps): Promise<JobStatus | null> {
   const settings = getSettings(deps.db);
   if (settings.paused) return null;
   const job = nextQueued(deps.db);
   if (!job) return null;
   if (dailyLimitReached(deps.db, settings, deps.now())) return null;
+  if (deps.hasApiKey && !(await deps.hasApiKey())) {
+    haltRunner(deps.db, "Add your Anthropic API key in Settings", deps.now());
+    return null;
+  }
   return runJob(deps, job.id, "auto");
 }
 

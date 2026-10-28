@@ -1,7 +1,7 @@
 import type { Db } from "../../db/db.js";
 import { getJson, getSettings } from "../../settings.js";
 import { SHEET_URL_KEY, SYNC_KEY, type TrackerSyncState } from "../../tracker/sync.js";
-import { Layout } from "../layout.js";
+import { Layout, pauseProps } from "../layout.js";
 import { inboxCount } from "./inbox.js";
 
 export function SettingsPage(props: {
@@ -13,7 +13,7 @@ export function SettingsPage(props: {
   const sheetUrl = props.urlDraft ?? getJson<string>(props.db, SHEET_URL_KEY, "");
   const sync = getJson<TrackerSyncState | null>(props.db, SYNC_KEY, null);
   return (
-    <Layout active="settings" inboxCount={inboxCount(props.db)} paused={getSettings(props.db).paused}>
+    <Layout active="settings" inboxCount={inboxCount(props.db)} {...pauseProps(props.db)}>
       <h1>Settings</h1>
       {props.notice ? <div class="card saved">{props.notice}</div> : null}
       {props.error ? <div class="note">{props.error}</div> : null}

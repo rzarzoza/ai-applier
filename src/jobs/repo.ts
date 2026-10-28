@@ -98,6 +98,11 @@ export function incrementAttempts(db: Db, id: string): void {
   db.prepare("UPDATE jobs SET attempts = attempts + 1, updated_at = ? WHERE id = ?").run(touch(), id);
 }
 
+/** Undoes `incrementAttempts` for a run that never got to try (the runner was halted). */
+export function decrementAttempts(db: Db, id: string): void {
+  db.prepare("UPDATE jobs SET attempts = MAX(attempts - 1, 0), updated_at = ? WHERE id = ?").run(touch(), id);
+}
+
 export function nextQueued(db: Db): Job | null {
   const r = db.prepare("SELECT * FROM jobs WHERE status = 'queued' ORDER BY date_posted DESC, rowid ASC LIMIT 1").get() as Row | undefined;
   return r ? toJob(r) : null;

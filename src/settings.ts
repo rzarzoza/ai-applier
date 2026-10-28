@@ -35,6 +35,24 @@ export function getSettings(db: Db): Settings {
   return { ...DEFAULT_SETTINGS, ...getJson<Partial<Settings>>(db, SETTINGS_KEY, {}) };
 }
 
+const HALT_KEY = "runnerHalt";
+
+export interface RunnerHalt { at: string; reason: string }
+
+/** Pauses the runner because of a problem no job can get past (shown as "Paused: <reason>"). */
+export function haltRunner(db: Db, reason: string, now: Date = new Date()): void {
+  saveSettings(db, { paused: true });
+  setJson(db, HALT_KEY, { at: now.toISOString(), reason } satisfies RunnerHalt);
+}
+
+export function getRunnerHalt(db: Db): RunnerHalt | null {
+  return getJson<RunnerHalt | null>(db, HALT_KEY, null);
+}
+
+export function clearRunnerHalt(db: Db): void {
+  db.prepare("DELETE FROM kv WHERE key = ?").run(HALT_KEY);
+}
+
 export function saveSettings(db: Db, patch: Partial<Settings>): Settings {
   const next = { ...getSettings(db), ...patch };
   setJson(db, SETTINGS_KEY, next);
