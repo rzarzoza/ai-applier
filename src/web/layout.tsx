@@ -4,7 +4,7 @@ import type { Child } from "hono/jsx";
 const TABS: { href: string; label: string; key: string }[] = [
   { href: "/inbox", label: "Inbox", key: "inbox" },
   { href: "/applications", label: "Applications", key: "applications" },
-  { href: "/answers", label: "Answer bank", key: "answers" },
+  { href: "/bank", label: "Answer bank", key: "bank" },
   { href: "/profile", label: "Profile & resume", key: "profile" },
   { href: "/sources", label: "Sources & filters", key: "sources" },
   { href: "/settings", label: "Settings", key: "settings" },
