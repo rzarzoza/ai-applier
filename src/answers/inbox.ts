@@ -4,10 +4,10 @@ import { approveAnswer, getQuestion, type Question } from "./bank.js";
 
 export interface InboxItem { question: Question; jobs: { id: string; company: string; title: string }[] }
 
-/** Unanswered (none/draft) questions that block at least one job, most-blocking first. */
+/** Questions (any status, including approved answers that didn't fit) that block at least one job, most-blocking first. */
 export function inboxItems(db: Db): InboxItem[] {
   const ids = db.prepare(`SELECT q.id FROM questions q JOIN job_blockers b ON b.question_id = q.id
-      WHERE q.status IN ('none', 'draft') GROUP BY q.id ORDER BY COUNT(*) DESC, q.id`).all() as unknown as { id: number }[];
+      GROUP BY q.id ORDER BY COUNT(*) DESC, q.id`).all() as unknown as { id: number }[];
   return ids.map(({ id }) => ({
     question: getQuestion(db, id)!,
     jobs: db.prepare(`SELECT j.id, j.company, j.title FROM job_blockers b JOIN jobs j ON j.id = b.job_id

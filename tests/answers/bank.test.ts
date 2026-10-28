@@ -41,9 +41,22 @@ test("inboxItems groups jobs per question, most-blocking first", () => {
   addBlocker(db, a.id, q2.id, "missing"); addBlocker(db, b.id, q2.id, "missing");
   approveAnswer(db, q3.id, "x"); addBlocker(db, a.id, q3.id, "approval");
   const items = inboxItems(db);
-  expect(items.map(i => i.question.id)).toEqual([q2.id, q1.id]);
+  expect(items.map(i => i.question.id)).toEqual([q2.id, q1.id, q3.id]);
   expect(items[0]!.jobs.map(j => j.id).sort()).toEqual([a.id, b.id].sort());
   expect(items[0]!.jobs[0]).toMatchObject({ company: expect.any(String), title: "Intern" });
+});
+
+test("inboxItems includes an approved question that still blocks a job, with its saved answer", () => {
+  const db = openDb(":memory:");
+  const q3 = createQuestion(db, { canonical: "Done", kind: "global", isFactual: false });
+  approveAnswer(db, q3.id, "saved");
+  const a = mkJob(db, 1);
+  addBlocker(db, a.id, q3.id, "approval");
+  const items = inboxItems(db);
+  expect(items).toHaveLength(1);
+  expect(items[0]!.question).toMatchObject({ id: q3.id, status: "approved", answer: "saved" });
+  answerQuestion(db, q3.id, "saved2");
+  expect(inboxItems(db)).toEqual([]);
 });
 
 test("addVariant dedupes labels", () => {
