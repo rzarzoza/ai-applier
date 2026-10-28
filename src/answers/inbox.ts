@@ -36,10 +36,11 @@ type BlockerRow = { id: string; company: string; title: string; label: string | 
 const toBlocked = (r: BlockerRow): BlockedJob =>
   ({ id: r.id, company: r.company, title: r.title, label: r.label, kind: r.kind, options: r.options_json ? (JSON.parse(r.options_json) as string[]) : null });
 
-function blockedJobsOf(db: Db, questionId: number, onlyWaiting: boolean): BlockedJob[] {
+/** The jobs still waiting on the user (needs-you) that the question blocks. */
+function blockedJobsOf(db: Db, questionId: number): BlockedJob[] {
   const rows = db.prepare(`SELECT j.id, j.company, j.title, b.field_label AS label, b.field_kind AS kind, b.options_json
       FROM job_blockers b JOIN jobs j ON j.id = b.job_id
-      WHERE b.question_id = ? ${onlyWaiting ? "AND j.status = 'needs-you'" : ""} ORDER BY j.rowid`).all(questionId) as unknown as BlockerRow[];
+      WHERE b.question_id = ? AND j.status = 'needs-you' ORDER BY j.rowid`).all(questionId) as unknown as BlockerRow[];
   return rows.map(toBlocked);
 }
 
@@ -52,7 +53,7 @@ export function inboxItems(db: Db): InboxItem[] {
   const ids = db.prepare(`SELECT q.id FROM questions q JOIN job_blockers b ON b.question_id = q.id
       JOIN jobs j ON j.id = b.job_id WHERE j.status = 'needs-you'
       GROUP BY q.id ORDER BY COUNT(*) DESC, q.id`).all() as unknown as { id: number }[];
-  return ids.map(({ id }) => ({ question: getQuestion(db, id)!, jobs: blockedJobsOf(db, id, true) }));
+  return ids.map(({ id }) => ({ question: getQuestion(db, id)!, jobs: blockedJobsOf(db, id) }));
 }
 
 /** The options of the field blocking the job (the question's own options for blockers stored without the field). */
@@ -74,7 +75,8 @@ export function answerFromInbox(db: Db, questionId: number, input: { text: strin
   { requeued: string[] } | { error: string } {
   const q = getQuestion(db, questionId);
   if (!q) return { error: "Unknown question" };
-  const blockers = blockedJobsOf(db, questionId, false);
+  // Decided on the jobs the card showed (still waiting); approving still clears every blocker of the question.
+  const blockers = blockedJobsOf(db, questionId);
   const pickFor = (b: BlockedJob, value: string) => (b.label ? blockerOptions(q, b)?.find(o => sameText(o, value)) : undefined);
 
   const chosen = Object.entries(input.choices ?? {}).filter(([, v]) => v.trim());
