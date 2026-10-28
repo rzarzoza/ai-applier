@@ -40,7 +40,12 @@ Answer ONLY when the answer follows directly from a stated profile field or expl
 - Mind polarity: answer what the field literally asks. A U.S. citizen answers "Yes" to "Are you a U.S. citizen, U.S. national, lawful permanent resident, or protected individual?"; someone who does not require sponsorship answers "No" to "Will you require sponsorship?".
 - For a follow-up such as "If you answered No above, explain… otherwise N/A", answer "N/A" only when the profile makes the earlier answer Yes; otherwise it is not answerable.
 - Employment fields (company, title, start or end date) in an employment or experience section refer to the applicant's most recent role on the resume, unless the section says otherwise. An end date is answerable only when the resume states it.
-- Keep the answer short: the value itself, not a sentence, unless the field is a free-text question that needs one.`;
+- Keep the answer short: the value itself, not a sentence, unless the field is a free-text question that needs one.
+
+Location and right-to-work questions:
+- A question about where the applicant is currently located, based, or lives (or whether they are in, near, or able to work in or commute to a place) is answered ONLY from profile.city, profile.state, and profile.country. Never answer it from profile.willingToRelocate: being willing to relocate does not mean being located there.
+- profile.willingToRelocate may answer a combined question such as "Are you located in X or willing to relocate to X?" only when the question explicitly offers relocation as an alternative, the answer is the plain "Yes" (or the option that means yes), and X is in the applicant's country (profile.country). If X is outside the applicant's country (for example London or the UK for an applicant in the USA), the question is not answerable.
+- A right-to-work, work-authorization, visa, or sponsorship question about a country other than the applicant's country (for example "Do you have the right to work in the UK?" for an applicant in the USA) is not answerable: the profile only states authorization for the applicant's own country (and profile.workAuthorizedUS for the United States).`;
 
 const DraftSchema = z.object({ answerable: z.boolean(), draft: z.string().nullable() });
 const FactSchema = z.object({ answerable: z.boolean(), answer: z.string().nullable(), basis: z.string().nullable() });
@@ -94,7 +99,10 @@ export async function factAnswer(llm: Llm, profile: Profile, canonical: string, 
   const answer = out.answer?.trim() || null;
   if (!out.answerable || !answer) return none;
   if (field.options?.length && !field.options.includes(answer)) return none;
-  return { answerable: true, answer, basis: out.basis?.trim() || null };
+  const basis = out.basis?.trim() || null;
+  const question = [canonical, field.label, field.description ?? ""].join("\n");
+  if (!placeGuard(question, answer, basis, profile)) return none;
+  return { answerable: true, answer, basis };
 }
 
 export async function reviseDraft(llm: Llm, profile: Profile, canonical: string, draft: string, instruction: string): Promise<string> {
@@ -119,4 +127,79 @@ export async function fillTemplate(llm: Llm, profile: Profile, template: string,
     content: JSON.stringify({ template, field: fieldInfo(field), job: jobInfo(job) }),
   });
   return out.text.trim();
+}
+
+// --- a backstop for the location and right-to-work rules in FACT_SYSTEM ---
+
+/** A question about where the applicant is (lives, is based, can be in person or commute). */
+const CURRENT_LOCATION = /\b(located|current(ly)? location|live|living|reside|residing|(?<!permanent )resident of|based (in|out of|near|around)|where are you based|commut(e|ing)|on-?site|in[- ]person|in (the|our|an?) office|(?<!legally )able to work (in|from|at|out of))\b/i;
+const OFFERS_RELOCATION = /\brelocat/i;
+const RIGHT_TO_WORK = /\b(right to work|work(ing)? (permit|authori[sz]ation|visa)|visa|sponsor(ship)?|(authori[sz]ed|eligible|entitled|permitted|allowed|legally able) to work|(work|employment) eligibility|citizen(ship)?|permanent resident)\b/i;
+const RELOCATION_BASIS = /willingToRelocate/i;
+const PLACE_BASIS = /profile\.(city|state|country|location|postalCode|addressLine)\b/;
+const PLAIN_YES = /^yes\b/i;
+
+/**
+ * Countries, with names and well-known places that identify them in a question. Not exhaustive: a place it does not
+ * know is left to the prompt's rules. (A bare "US" is left out: it is also the word "us".)
+ */
+const COUNTRIES: Record<string, RegExp> = {
+  "united states": /\b(united states|u\.s\.a?\.?|usa|america|alabama|alaska|arizona|arkansas|california|colorado|connecticut|delaware|florida|georgia|hawaii|idaho|illinois|indiana|iowa|kansas|kentucky|louisiana|maine|maryland|massachusetts|michigan|minnesota|mississippi|missouri|montana|nebraska|nevada|new hampshire|new jersey|new mexico|new york|north carolina|north dakota|ohio|oklahoma|oregon|pennsylvania|rhode island|south carolina|south dakota|tennessee|texas|utah|vermont|virginia|washington|wisconsin|wyoming|atlanta|austin|boston|chicago|dallas|denver|houston|los angeles|miami|nyc|philadelphia|phoenix|pittsburgh|portland|san diego|san francisco|bay area|san jose|seattle|silicon valley)\b/i,
+  "united kingdom": /\b(united kingdom|u\.k\.?|uk|great britain|britain|england|scotland|wales|northern ireland|london|greater london|manchester|birmingham|edinburgh|glasgow|bristol|leeds|belfast)\b/i,
+  canada: /\b(canada|toronto|vancouver|montr[eé]al|ottawa|calgary|waterloo|ontario|quebec|british columbia|alberta)\b/i,
+  ireland: /\b(ireland|dublin|cork)\b/i,
+  germany: /\b(germany|berlin|munich|m[uü]nchen|hamburg|frankfurt|cologne)\b/i,
+  france: /\b(france|paris|lyon)\b/i,
+  netherlands: /\b(netherlands|holland|amsterdam|rotterdam)\b/i,
+  spain: /\b(spain|madrid|barcelona)\b/i,
+  switzerland: /\b(switzerland|zurich|z[uü]rich|geneva)\b/i,
+  poland: /\b(poland|warsaw|krak[oó]w)\b/i,
+  sweden: /\b(sweden|stockholm)\b/i,
+  india: /\b(india|bangalore|bengaluru|hyderabad|mumbai|pune|delhi|chennai)\b/i,
+  singapore: /\bsingapore\b/i,
+  japan: /\b(japan|tokyo|osaka)\b/i,
+  "south korea": /\b(south korea|korea|seoul)\b/i,
+  china: /\b(china|beijing|shanghai|shenzhen)\b/i,
+  "hong kong": /\bhong kong\b/i,
+  taiwan: /\b(taiwan|taipei)\b/i,
+  australia: /\b(australia|sydney|melbourne)\b/i,
+  israel: /\b(israel|tel aviv)\b/i,
+  mexico: /\b(mexico|guadalajara|monterrey)\b/i,
+  brazil: /\b(brazil|s[aã]o paulo)\b/i,
+};
+
+/** The country a free-text country name (the profile's) refers to, or null when it is not one this guard knows. */
+function countryOf(name: string | null): string | null {
+  if (!name?.trim()) return null;
+  if (/^\s*u\.?s\.?\s*$/i.test(name)) return "united states";
+  const hits = Object.entries(COUNTRIES).filter(([, re]) => re.test(name));
+  return hits.length === 1 ? hits[0]![0] : null;
+}
+
+/** The known countries a question names (directly or through one of their places). */
+function countriesIn(text: string): Set<string> {
+  const t = text.replace(/\bnew mexico\b/gi, "USA"); // the U.S. state, not Mexico
+  return new Set(Object.entries(COUNTRIES).filter(([, re]) => re.test(t)).map(([c]) => c));
+}
+
+/**
+ * Whether a fact answer respects the location and right-to-work rules: right-to-work questions about another country
+ * are never answered; a current-location question is answered only from the profile's place fields; and relocation
+ * (profile.willingToRelocate) answers a location question only as an explicitly offered alternative with a plain "Yes",
+ * and never for a place outside the applicant's country.
+ */
+function placeGuard(question: string, answer: string, basis: string | null, profile: Profile): boolean {
+  const home = countryOf(profile.country);
+  const named = [...countriesIn(question)];
+  // Authorization is stated for the applicant's own country, and for the United States by profile.workAuthorizedUS.
+  const covered = new Set([home, "united states"].filter((c): c is string => c !== null));
+  if (RIGHT_TO_WORK.test(question) && named.some(c => !covered.has(c))) return false;
+
+  const fromRelocation = RELOCATION_BASIS.test(basis ?? "");
+  // Relocating abroad is never implied by a general willingness to relocate.
+  const abroad = home === null ? named.length > 0 : named.some(c => c !== home);
+  if (fromRelocation && abroad) return false;
+  if (!CURRENT_LOCATION.test(question)) return true;
+  if (!fromRelocation) return PLACE_BASIS.test(basis ?? "");
+  return OFFERS_RELOCATION.test(question) && PLAIN_YES.test(answer);
 }
