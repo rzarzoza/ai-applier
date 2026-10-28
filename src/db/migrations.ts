@@ -40,4 +40,45 @@ export const migrations: string[] = [
   );
   CREATE INDEX idx_jobs_status ON jobs (status);
   CREATE INDEX idx_jobs_role_key ON jobs (role_key);`,
+  `CREATE TABLE questions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    canonical TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    is_factual INTEGER NOT NULL,
+    answer TEXT,
+    draft TEXT,
+    status TEXT NOT NULL,
+    options TEXT,
+    use_count INTEGER NOT NULL DEFAULT 0
+  );
+  CREATE TABLE question_variants (
+    question_id INTEGER NOT NULL REFERENCES questions (id) ON DELETE CASCADE,
+    label TEXT NOT NULL,
+    PRIMARY KEY (question_id, label)
+  );
+  CREATE TABLE job_blockers (
+    job_id TEXT NOT NULL REFERENCES jobs (id) ON DELETE CASCADE,
+    question_id INTEGER NOT NULL REFERENCES questions (id) ON DELETE CASCADE,
+    reason TEXT NOT NULL,
+    PRIMARY KEY (job_id, question_id)
+  );
+  CREATE TABLE needs_you (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id TEXT NOT NULL REFERENCES jobs (id) ON DELETE CASCADE,
+    kind TEXT NOT NULL,
+    message TEXT NOT NULL,
+    resolved INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+  );
+  CREATE TABLE job_overrides (
+    job_id TEXT NOT NULL REFERENCES jobs (id) ON DELETE CASCADE,
+    field_label TEXT NOT NULL,
+    answer_json TEXT NOT NULL,
+    PRIMARY KEY (job_id, field_label)
+  );
+  CREATE TABLE field_cache (
+    key TEXT PRIMARY KEY,
+    classification_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  );`,
 ];
