@@ -201,7 +201,7 @@ export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "a
 
       const blocked = res.filter(r => r.status === "blocked");
       if (blocked.length) {
-        for (const b of blocked) addBlocker(db, job.id, b.questionId, b.reason);
+        for (const b of blocked) addBlocker(db, job.id, b.questionId, b.reason, byId.get(b.fieldId));
         resolveNeedsYouForJob(db, job.id); // this run supersedes any earlier CAPTCHA or code request
         const n = new Set(blocked.map(b => b.questionId)).size;
         return await end("needs-you", n === 1 ? "1 question needs you" : `${n} questions need you`);

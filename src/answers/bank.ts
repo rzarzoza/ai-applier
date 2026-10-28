@@ -1,5 +1,5 @@
 import type { Db } from "../db/db.js";
-import type { FieldAnswer } from "../forms/types.js";
+import type { FieldAnswer, FieldSpec } from "../forms/types.js";
 
 export interface Question {
   id: number; canonical: string; kind: "global" | "template"; isFactual: boolean; answer: string | null;
@@ -63,8 +63,10 @@ export function incrementUse(db: Db, id: number): void {
   db.prepare("UPDATE questions SET use_count = use_count + 1 WHERE id = ?").run(id);
 }
 
-export function addBlocker(db: Db, jobId: string, questionId: number, reason: "missing" | "approval"): void {
-  db.prepare("INSERT OR REPLACE INTO job_blockers (job_id, question_id, reason) VALUES (?, ?, ?)").run(jobId, questionId, reason);
+/** Records that the question blocks the job, with the blocking field's label, kind and options when known. */
+export function addBlocker(db: Db, jobId: string, questionId: number, reason: "missing" | "approval", field?: Pick<FieldSpec, "label" | "kind" | "options">): void {
+  db.prepare("INSERT OR REPLACE INTO job_blockers (job_id, question_id, reason, field_label, field_kind, options_json) VALUES (?, ?, ?, ?, ?, ?)")
+    .run(jobId, questionId, reason, field?.label ?? null, field?.kind ?? null, field?.options?.length ? JSON.stringify(field.options) : null);
 }
 
 /** Removes every blocker recorded for the job (a new run records the ones that still apply). */

@@ -1,6 +1,6 @@
 import type { Db } from "../../db/db.js";
 import { listOpenNeedsYou } from "../../answers/bank.js";
-import { canDoItNow, inboxItems, type InboxItem } from "../../answers/inbox.js";
+import { blockerOptions, canDoItNow, inboxItems, type InboxItem } from "../../answers/inbox.js";
 import { Layout, pauseProps } from "../layout.js";
 
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
@@ -20,16 +20,35 @@ export function QuestionCard(props: { item: InboxItem; error?: string }) {
   const approved = q.status === "approved";
   const current = approved ? q.answer ?? "" : q.draft ?? "";
   const hasDraft = !approved && !!q.draft;
-  const field = q.options
+  // Each blocking form may offer different options; one list when they agree, else a choice per job.
+  const lists = jobs.map(j => blockerOptions(q, j));
+  const shared = lists.every(l => JSON.stringify(l) === JSON.stringify(lists[0])) ? lists[0] ?? null : undefined;
+  const savedNotOffered = approved && q.answer !== null && !!shared && !shared.some(o => o.trim().toLowerCase() === q.answer!.trim().toLowerCase());
+  const field = shared
     ? (
       <select name="text">
-        {q.options.map(o => <option value={o} selected={o === current}>{o}</option>)}
+        {shared.map(o => <option value={o} selected={o === current}>{o}</option>)}
       </select>
     )
-    : <textarea name="text" required>{current}</textarea>;
+    : <textarea name="text" required={shared === null}>{current}</textarea>;
+  const perJob = shared === undefined ? jobs.filter((j, i) => lists[i] && j.label) : [];
   const answerForm = (
     <form hx-post={`/inbox/${q.id}/answer`} hx-target={`#q-${q.id}`} hx-swap="outerHTML">
       {field}
+      {perJob.length > 0 ? (
+        <div>
+          <div class="meta">These forms offer different options. Pick one per job, or leave it to the answer above:</div>
+          {perJob.map(j => (
+            <label class="meta">
+              {j.company} · {j.title}
+              <select name={`choice:${j.id}`}>
+                <option value="">Use the answer above</option>
+                {lists[jobs.indexOf(j)]!.map(o => <option value={o}>{o}</option>)}
+              </select>
+            </label>
+          ))}
+        </div>
+      ) : null}
       {q.kind === "template" ? (
         <label class="meta">
           <input type="hidden" name="kindChoice" value="1" />
@@ -44,7 +63,9 @@ export function QuestionCard(props: { item: InboxItem; error?: string }) {
       <h3>{q.canonical}</h3>
       <div class="meta">Blocking {plural(jobs.length, "job", "jobs")} · {shown}</div>
       {q.variants.length > 0 ? <div class="meta">Also asked as: {q.variants.join(" · ")}</div> : null}
-      {approved ? <div class="note">Your saved answer didn't fit this form — answer again</div> : null}
+      {savedNotOffered
+        ? <div class="note">Your saved answer “{q.answer}” isn't an option on {jobs.length === 1 ? "this form" : "these forms"} — what you pick is used for {jobs.length === 1 ? "this job" : "these jobs"} only</div>
+        : approved ? <div class="note">Your saved answer didn't fit this form — answer again</div> : null}
       {props.error ? <div class="note">{props.error}</div> : null}
       {hasDraft ? (
         <>

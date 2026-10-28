@@ -1,6 +1,6 @@
 import { expect, test, vi } from "vitest";
 import { openDb } from "../../src/db/db.js";
-import { addBlocker, addNeedsYou, addVariant, createQuestion, getQuestion } from "../../src/answers/bank.js";
+import { addBlocker, addNeedsYou, addVariant, approveAnswer, createQuestion, getOverrides, getQuestion } from "../../src/answers/bank.js";
 import { getJob, setStatus, upsertPosting } from "../../src/jobs/repo.js";
 import type { Posting } from "../../src/sources/types.js";
 import { createApp } from "../../src/web/server.js";
@@ -152,4 +152,63 @@ test("a possibly sent application shows an Open job link instead of Do it now", 
   expect(html).not.toContain("Do it now");
   expect(html).toContain(`href="/applications/${j.id}"`);
   expect(html).toContain("Open job");
+});
+
+const blockWith = (db: ReturnType<typeof openDb>, jobId: string, qId: number, options: string[] | null, label = "Authorized to work?") =>
+  addBlocker(db, jobId, qId, "missing", { label, kind: options ? "select" : "text", options: options ?? undefined });
+
+test("the card offers the blocking forms' own options when they agree", async () => {
+  const { db, app, mk } = setup();
+  const q = createQuestion(db, { canonical: "Authorized?", kind: "global", isFactual: true, options: ["Old A", "Old B"] });
+  blockWith(db, mk(1).id, q.id, ["Yes", "No"]); blockWith(db, mk(2).id, q.id, ["Yes", "No"]);
+  const html = await (await app.request("/inbox")).text();
+  expect(html).toContain('<option value="Yes"');
+  expect(html).not.toContain("Old A");
+  expect(html).not.toContain("choice:");
+});
+
+test("forms with different options get a free-text answer plus a choice per job", async () => {
+  const { db, app, mk } = setup();
+  const q = createQuestion(db, { canonical: "Authorized?", kind: "global", isFactual: true, options: ["Yes", "No"] });
+  const a = mk(1), b = mk(2), c = mk(3);
+  blockWith(db, a.id, q.id, ["Yes", "No"]);
+  blockWith(db, b.id, q.id, ["Y - I am authorized", "N - I am not"], "Work authorization");
+  blockWith(db, c.id, q.id, null);
+  const html = await (await app.request("/inbox")).text();
+  expect(html).toContain("<textarea");
+  expect(html).toContain(`name="choice:${a.id}"`);
+  expect(html).toContain(`name="choice:${b.id}"`);
+  expect(html).not.toContain(`name="choice:${c.id}"`);
+
+  const res = await app.request(`/inbox/${q.id}/answer`, form({ text: "Yes", [`choice:${b.id}`]: "y - i am authorized", [`choice:${a.id}`]: "" }));
+  expect(await res.text()).toContain("3 jobs re-queued");
+  expect(getQuestion(db, q.id)).toMatchObject({ status: "approved", answer: "Yes" });
+  expect(getOverrides(db, b.id)).toEqual({ "Work authorization": { type: "option", option: "Y - I am authorized" } });
+  expect(getOverrides(db, a.id)).toEqual({});
+});
+
+test("a saved answer that isn't one of the form's options is kept; the pick is saved for that job only", async () => {
+  const { db, app, mk } = setup();
+  const q = createQuestion(db, { canonical: "Authorized?", kind: "global", isFactual: true });
+  approveAnswer(db, q.id, "Yes");
+  const j = mk(1);
+  blockWith(db, j.id, q.id, ["Oui", "Non"]);
+  const html = await (await app.request("/inbox")).text();
+  expect(html).toContain("isn&#39;t an option on this form");
+  expect(await (await app.request(`/inbox/${q.id}/answer`, form({ text: "Oui" }))).text()).toContain("1 job re-queued");
+  expect(getQuestion(db, q.id)).toMatchObject({ status: "approved", answer: "Yes" });
+  expect(getOverrides(db, j.id)).toEqual({ "Authorized to work?": { type: "option", option: "Oui" } });
+  expect(getJob(db, j.id)!.status).toBe("queued");
+});
+
+test("a per-job choice that isn't one of that form's options is refused and changes nothing", async () => {
+  const { db, app, mk } = setup();
+  const q = createQuestion(db, { canonical: "Authorized?", kind: "global", isFactual: true });
+  const a = mk(1), b = mk(2);
+  blockWith(db, a.id, q.id, ["Yes", "No"]); blockWith(db, b.id, q.id, ["Y", "N"]);
+  const html = await (await app.request(`/inbox/${q.id}/answer`, form({ text: "Yes", [`choice:${b.id}`]: "Maybe" }))).text();
+  expect(html).toContain("not one of the options");
+  expect(getQuestion(db, q.id)!.status).toBe("none");
+  expect(getOverrides(db, b.id)).toEqual({});
+  expect(getJob(db, a.id)!.status).toBe("needs-you");
 });

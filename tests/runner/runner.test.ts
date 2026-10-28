@@ -17,6 +17,7 @@ import type { Resolution } from "../../src/answers/resolve.js";
 import type { FieldAnswer, FieldSpec } from "../../src/forms/types.js";
 import { runJob, runNext, usedDocuments, type RunnerDeps } from "../../src/runner/runner.js";
 import Anthropic from "@anthropic-ai/sdk";
+import { inboxItems } from "../../src/answers/inbox.js";
 import { inPage } from "../../src/forms/in-page.js";
 import { LlmOutputError } from "../../src/llm/llm.js";
 import { FakeLlm } from "../helpers/fake-llm.js";
@@ -233,6 +234,9 @@ test("unknown required question → needs-you with blocker, nothing filled or su
   expect(getJob(db, job.id)!.statusReason).toBe("1 question needs you");
   const [q] = listQuestions(db).filter(x => x.id === blockersForJob(db, job.id)[0]!.questionId);
   expect(q!.canonical).toBe("Are you willing to relocate?");
+  // The blocker keeps the form's own field, so the inbox can offer this form's options.
+  expect(inboxItems(db)[0]!.jobs).toEqual([{ id: job.id, company: "Mini Co", title: "Software Engineer Intern",
+    label: "Are you willing to relocate?", kind: "select", options: expect.arrayContaining(["Yes", "No"]) }]);
   expectScreenshot(job.id);
   // Nothing was typed into the page before stopping.
   expect(JSON.parse(snapshotRow(job.id)!.resolutions_json).filter((r: { status: string }) => r.status === "blocked")).toHaveLength(1);

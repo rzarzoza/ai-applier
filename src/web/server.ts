@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSyn
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Hono } from "hono";
-import { answerQuestion, canDoItNow, deleteQuestionAndRequeue, requeueWaitingForResume } from "../answers/inbox.js";
+import { answerFromInbox, answerQuestion, canDoItNow, deleteQuestionAndRequeue, requeueWaitingForResume } from "../answers/inbox.js";
 import { getQuestion, listQuestions, approveAnswer, resolveNeedsYouForJob, setDraft, setOverride } from "../answers/bank.js";
 import { reviseDraft } from "../answers/draft.js";
 import type { Db } from "../db/db.js";
@@ -81,10 +81,13 @@ export function createApp(ctx: AppContext): Hono {
     if (!getQuestion(db, id)) return c.text("Unknown question", 404);
     const form = await c.req.parseBody();
     const text = typeof form.text === "string" ? form.text.trim() : "";
-    if (!text) return c.html(card(id, "Type an answer first."));
+    const choices = Object.fromEntries(Object.entries(form)
+      .filter((e): e is [string, string] => e[0].startsWith("choice:") && typeof e[1] === "string")
+      .map(([k, v]) => [k.slice("choice:".length), v]));
     const kind = form.kind === "template" || form.kind === "global" ? form.kind : form.kindChoice ? "global" : undefined;
-    const { requeued } = answerQuestion(db, id, text, kind);
-    return c.html(SavedNotice({ requeued: requeued.length }));
+    const result = answerFromInbox(db, id, { text, kind, choices });
+    if ("error" in result) return c.html(card(id, result.error));
+    return c.html(SavedNotice({ requeued: result.requeued.length }));
   });
 
   app.post("/inbox/:id/use-draft", c => {
