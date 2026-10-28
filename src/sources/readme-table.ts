@@ -1,5 +1,5 @@
 import { conditionalGet } from "./http.js";
-import { normalizeUrl } from "./normalize.js";
+import { isSimplifyHost, normalizeUrl } from "./normalize.js";
 import type { Posting, SourceAdapter } from "./types.js";
 
 type Cols = { company: number; role: number; location: number; apply: number; age: number };
@@ -39,15 +39,6 @@ function findCols(headers: string[]): Cols | null {
     age: idx(/^(age|date)/i),
   };
   return cols.company >= 0 && cols.role >= 0 && cols.apply >= 0 ? cols : null;
-}
-
-function isSimplifyHost(url: string): boolean {
-  try {
-    const h = new URL(url).hostname.toLowerCase();
-    return h === "simplify.jobs" || h.endsWith(".simplify.jobs");
-  } catch {
-    return false;
-  }
 }
 
 function applyLink(cell: string): string | null {

@@ -1,5 +1,5 @@
 import { conditionalGet } from "./http.js";
-import { normalizeUrl } from "./normalize.js";
+import { isSimplifyHost, normalizeUrl } from "./normalize.js";
 import type { Posting, SourceAdapter } from "./types.js";
 
 interface RawListing {
@@ -18,15 +18,6 @@ interface RawListing {
 }
 
 const strings = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);
-
-function isSimplifyHost(url: string): boolean {
-  try {
-    const h = new URL(url).hostname.toLowerCase();
-    return h === "simplify.jobs" || h.endsWith(".simplify.jobs");
-  } catch {
-    return false;
-  }
-}
 
 export function parseSimplifyListings(json: unknown, sourceId: string): Posting[] {
   if (!Array.isArray(json)) throw new Error("listings.json: expected a top-level array");

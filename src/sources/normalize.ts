@@ -15,3 +15,13 @@ export function normalizeUrl(url: string): string {
   const path = u.pathname.replace(/\/+$/, "");
   return `${u.origin}${path}${kept.length ? "?" + kept.join("&") : ""}${u.hash}`;
 }
+
+/** True for simplify.jobs and its subdomains; we never apply through these links. */
+export function isSimplifyHost(url: string): boolean {
+  try {
+    const h = new URL(url).hostname.toLowerCase();
+    return h === "simplify.jobs" || h.endsWith(".simplify.jobs");
+  } catch {
+    return false;
+  }
+}
