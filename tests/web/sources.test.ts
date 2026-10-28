@@ -75,3 +75,19 @@ test("POST /filters saves lists, numbers and mode", async () => {
     locationMode: "all", postedWithinDays: null, excludeCompanies: ["Evil Corp"], titleRequire: ["intern"], titleBlock: ["senior"], degrees: ["Bachelor's"],
   });
 });
+
+test("Sources page shows each source's last poll error or OK with counts", async () => {
+  const { db, app } = setupApp();
+  const { setJson } = await import("../../src/settings.js");
+  setJson(db, "pollReports", {
+    "simplify-summer2027": { at: "2026-10-28T10:00:00.000Z", report: { sourceId: "simplify-summer2027", fetched: 300, newJobs: 12, queued: 5, skipped: 7, duplicates: 0, closed: 1 } },
+  });
+  let html = await (await app.request("/sources")).text();
+  expect(html).toContain("OK");
+  expect(html).toContain("300 fetched");
+  setJson(db, "pollReports", {
+    "simplify-summer2027": { at: "2026-10-28T10:00:00.000Z", report: { sourceId: "simplify-summer2027", fetched: 0, newJobs: 0, queued: 0, skipped: 0, duplicates: 0, closed: 0, error: "HTTP 500" } },
+  });
+  html = await (await app.request("/sources")).text();
+  expect(html).toContain("Last error: HTTP 500");
+});

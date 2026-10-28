@@ -38,3 +38,22 @@ test("unchecked boxes turn headless and paused off; blank daily limit means no l
   await app.request("/settings", form({ ...base, headless: "", dailyLimit: "" }));
   expect(getSettings(db)).toMatchObject({ paused: false, headless: false, dailyLimit: null });
 });
+
+test("GET /settings renders 'unknown' instead of failing when the Keychain read throws", async () => {
+  const { app, secrets } = setupApp();
+  secrets.get.mockRejectedValue(new Error("keychain locked"));
+  const res = await app.request("/settings");
+  expect(res.status).toBe(200);
+  expect(await res.text()).toContain("unknown");
+});
+
+test("POST /settings still saves other settings and shows an error when the Keychain write throws", async () => {
+  const { db, app, secrets } = setupApp();
+  secrets.set.mockRejectedValue(new Error("keychain locked"));
+  const res = await app.request("/settings", form({ ...base, pollMinutes: "45", apiKey: "sk-x" }));
+  expect(res.status).toBe(200);
+  const html = await res.text();
+  expect(html).toContain("Couldn&#39;t save the API key");
+  expect(html).not.toContain("sk-x");
+  expect(getSettings(db).pollMinutes).toBe(45);
+});

@@ -34,6 +34,8 @@ export interface AppContext {
   pollNow(): void;
   /** Keychain access; defaults to the real macOS Keychain. Tests inject fakes. */
   secrets?: { get(name: string): Promise<string | null>; set(name: string, value: string): Promise<void> };
+  /** Called after a new API key was stored, so the app can rebuild its LLM client. */
+  onApiKeySaved?(): void;
 }
 
 const API_KEY_NAME = "anthropic-api-key";
@@ -275,7 +277,11 @@ export function createApp(ctx: AppContext): Hono {
     return c.redirect("/sources", 303);
   });
 
-  app.get("/settings", async c => c.html(SettingsPage({ db, keySet: !!(await secrets.get(API_KEY_NAME)) })));
+  const keyState = async (): Promise<boolean | null> => {
+    try { return !!(await secrets.get(API_KEY_NAME)); } catch { return null; }
+  };
+
+  app.get("/settings", async c => c.html(SettingsPage({ db, keySet: await keyState() })));
 
   app.post("/settings", async c => {
     const form = await c.req.parseBody();
@@ -292,7 +298,15 @@ export function createApp(ctx: AppContext): Hono {
     };
     saveSettings(db, patch);
     const key = str(form.apiKey);
-    if (key) await secrets.set(API_KEY_NAME, key);
+    if (key) {
+      try {
+        await secrets.set(API_KEY_NAME, key);
+        ctx.onApiKeySaved?.();
+      } catch (e) {
+        const why = e instanceof Error ? e.message.split("\n")[0] : String(e);
+        return c.html(SettingsPage({ db, keySet: await keyState(), error: `Couldn't save the API key (other settings were saved): ${why}` }));
+      }
+    }
     return c.redirect("/settings", 303);
   });
 

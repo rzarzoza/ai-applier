@@ -1,5 +1,7 @@
 import type { Db } from "../../db/db.js";
 import { DEFAULT_FILTERS, evaluateFilters, getFilters, type FilterRules } from "../../filters/filters.js";
+import { getJson } from "../../settings.js";
+import type { PollReport } from "../../sources/poller.js";
 import { listJobs } from "../../jobs/repo.js";
 import { listSources } from "../../sources/repo.js";
 import type { Posting } from "../../sources/types.js";
@@ -49,6 +51,7 @@ export function SourcesPage(props: { db: Db; notice?: string; error?: string }) 
   const sources = listSources(props.db);
   const rules = getFilters(props.db);
   const now = new Date();
+  const reports = getJson<Record<string, { at: string; report: PollReport }>>(props.db, "pollReports", {});
   const preview = previewCount(props.db, rules, now);
   return (
     <Layout active="sources" inboxCount={inboxCount(props.db)}>
@@ -61,6 +64,11 @@ export function SourcesPage(props: { db: Db; notice?: string; error?: string }) 
           <strong>{s.id}</strong> <span class="meta">({s.kind})</span>
           <div class="meta">{s.url}</div>
           <div class="meta">Last polled: {s.lastPolledAt ?? "not polled yet"}</div>
+          {reports[s.id] ? (
+            reports[s.id]!.report.error
+              ? <div class="note">Last error: {reports[s.id]!.report.error}</div>
+              : <div class="meta">OK: {reports[s.id]!.report.fetched} fetched, {reports[s.id]!.report.newJobs} new, {reports[s.id]!.report.queued} queued, {reports[s.id]!.report.skipped} skipped</div>
+          ) : null}
           <form method="post" action={`/sources/${s.id}/toggle`} class="row">
             <input type="hidden" name="enabled" value={s.enabled ? "0" : "1"} />
             <button type="submit">{s.enabled ? "Disable" : "Enable"}</button>
