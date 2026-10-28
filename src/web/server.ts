@@ -16,7 +16,8 @@ import { saveFilters } from "../filters/filters.js";
 import { refilterJobs } from "../sources/poller.js";
 import { addSource, listSources, setSourceEnabled } from "../sources/repo.js";
 import { getSecret, setSecret } from "../secrets.js";
-import { clearRunnerHalt, saveSettings, setJson, type Settings } from "../settings.js";
+import { saveSettings, setJson, type Settings } from "../settings.js";
+import { pauseRunner, resumeRunner } from "../runner/pause.js";
 import { writeTrackerCsv } from "../tracker/csv.js";
 import { spreadsheetIdFromUrl } from "../tracker/sheets.js";
 import { SERVICE_ACCOUNT_SECRET, SHEET_URL_KEY, type SyncResult } from "../tracker/sync.js";
@@ -103,6 +104,23 @@ export function createApp(ctx: AppContext): Hono {
   }
 
   if (ctx.live) liveRoutes(app, { ...ctx, live: ctx.live });
+
+  /** Back to the dashboard page the request came from (same host only), else Home. */
+  const back = (referer: string | undefined, host: string | undefined) => {
+    try {
+      const u = new URL(referer ?? "");
+      if (u.host === host && u.pathname.startsWith("/")) return u.pathname + u.search;
+    } catch { /* no usable referer */ }
+    return "/";
+  };
+  app.post("/runner/pause", c => {
+    pauseRunner(db);
+    return c.redirect(back(c.req.header("referer"), c.req.header("host")), 303);
+  });
+  app.post("/runner/resume", c => {
+    resumeRunner(db);
+    return c.redirect(back(c.req.header("referer"), c.req.header("host")), 303);
+  });
 
   const home = () => ({ db, requested: ctx.requestedRuns?.() ?? [], parked: ctx.live?.parkedIds() ?? [] });
   app.get("/", c => c.html(HomePage(home())));
@@ -449,7 +467,7 @@ export function createApp(ctx: AppContext): Hono {
       reviewCompanies: str(form.reviewCompanies).split(",").map(s => s.trim()).filter(Boolean),
     };
     saveSettings(db, patch);
-    if (!patch.paused) clearRunnerHalt(db);
+    if (!patch.paused) resumeRunner(db);
     const key = str(form.apiKey);
     if (key) {
       try {

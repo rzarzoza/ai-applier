@@ -3,8 +3,9 @@ import path from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, expect, test } from "vitest";
 import type { Browser, Page } from "playwright";
 import { blockersForJob, getOverrides, listOpenNeedsYou, listQuestions } from "../../src/answers/bank.js";
-import { getJob, setStatus } from "../../src/jobs/repo.js";
-import { saveSettings } from "../../src/settings.js";
+import { getJob, PAUSED_MID_RUN, setStatus } from "../../src/jobs/repo.js";
+import { resumeRunner } from "../../src/runner/pause.js";
+import { getSettings, saveSettings } from "../../src/settings.js";
 import type { AtsHandler } from "../../src/ats/types.js";
 import { listRecords } from "../../src/runner/records.js";
 import { JOB_BUSY, runJob } from "../../src/runner/runner.js";
@@ -243,4 +244,45 @@ test("never two runs on one job: a rebuild of a job another run holds fails at o
   await rebuilding;
   expect(await hand).toBe("needs-you");
   expect(locks.isHeld(j.id)).toBe(false);
+});
+
+test("pausing mid-run stops the auto run after the field being filled, parks its tab as filled so far, and resuming queues it again", async () => {
+  const j = s.addJob();
+  const filled: string[] = [];
+  s.deps.handlers = [{ ...miniAtsHandler, async fill(page, field, answer) {
+    await miniAtsHandler.fill(page, field, answer);
+    filled.push(field.label);
+    if (filled.length === 1) saveSettings(s.db, { paused: true }); // the user presses Pause while the first field is typed
+  } }];
+  expect(await runJob(s.deps, j.id)).toBe("needs-you");
+  expect(filled).toHaveLength(1); // the field being typed finished; no other was started
+  expect(getJob(s.db, j.id)).toMatchObject({ status: "needs-you", statusReason: PAUSED_MID_RUN, attempts: 0 });
+  expect(listOpenNeedsYou(s.db).map(n => n.message)).toEqual([expect.stringContaining(PAUSED_MID_RUN)]);
+  expect(s.manager.isParked(j.id)).toBe(true);
+  expect(await parkedPage(j.id).locator("#first").inputValue()).toBe("Luis");
+  expect(fixtureSubmitCount()).toBe(0);
+
+  expect(resumeRunner(s.db)).toEqual([j.id]);
+  expect(getSettings(s.db).paused).toBe(false);
+  expect(getJob(s.db, j.id)!.status).toBe("queued");
+  expect(listOpenNeedsYou(s.db)).toEqual([]);
+  expect(await s.manager.sweep(keepEligible)).toEqual([j.id]);
+  // Run again, it goes all the way.
+  s.deps.handlers = [miniAtsHandler];
+  expect(await runJob(s.deps, j.id)).toBe("submitted");
+});
+
+test("a pause after the last field stops the run before it submits; runs the user asked for are not paused", async () => {
+  const j = s.addJob();
+  s.deps.handlers = [{ ...miniAtsHandler, async readBack(page, field) {
+    saveSettings(s.db, { paused: true }); // pressed while the answers are being checked
+    return miniAtsHandler.readBack(page, field);
+  } }];
+  expect(await runJob(s.deps, j.id)).toBe("needs-you");
+  expect(getJob(s.db, j.id)!.statusReason).toBe(PAUSED_MID_RUN);
+  expect(fixtureSubmitCount()).toBe(0);
+  // A rebuild (the user is waiting on it) still runs while paused.
+  await s.manager.unpark(j.id);
+  expect(await runJob(s.deps, j.id, "rebuild")).toBe("needs-you");
+  expect(s.manager.isParked(j.id)).toBe(true);
 });

@@ -14,7 +14,7 @@ import { readOptions as readOptionsField } from "../forms/fill.js";
 import { inPage } from "../forms/in-page.js";
 import type { FieldAnswer, FieldSpec, JobContext } from "../forms/types.js";
 import {
-  canOpenLive, decrementAttempts, getJob, HAND_UNCONFIRMED, incrementAttempts, isUnknownSubmission, nextQueued, RESUME_NEEDED, setAts, setStatus,
+  canOpenLive, decrementAttempts, getJob, HAND_UNCONFIRMED, incrementAttempts, isUnknownSubmission, nextQueued, PAUSED_MID_RUN, RESUME_NEEDED, setAts, setStatus,
   setUsedDocuments, submittedSince, UNKNOWN_SUBMISSION,
 } from "../jobs/repo.js";
 import type { Job, JobStatus } from "../jobs/types.js";
@@ -58,6 +58,9 @@ export interface RunOptions {
 
 /** Why a rebuild did not start: another run (Open & finish, Do it now, Submit...) has the job right now. */
 export const JOB_BUSY = "This application is being worked on in another run — try again once it's done";
+
+/** Thrown between fields or before submitting once the runner was paused during an auto run (see runJob). */
+class PausedStop extends Error {}
 
 /** A problem outside the job (the browser can't start) that would fail every job the same way. */
 class SetupError extends Error {}
@@ -145,7 +148,11 @@ export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "a
   }
 }
 
-/** runJob, holding the job's lock. */
+/**
+ * runJob, holding the job's lock. An auto run checks the runner's Paused switch between fields and before submitting:
+ * once paused, it stops there and leaves the job waiting on the user (PAUSED_MID_RUN) with its tab parked as filled so
+ * far; resuming the runner queues it again (see resumeRunner).
+ */
 async function runLocked(deps: RunnerDeps, jobId: string, mode: RunMode, opts: RunOptions): Promise<JobStatus> {
   const { db } = deps;
   const { signal } = opts;
@@ -262,6 +269,10 @@ async function runLocked(deps: RunnerDeps, jobId: string, mode: RunMode, opts: R
     return end("needs-you", reason);
   };
 
+  /** Stops an auto run here once the runner was paused (the step before it finished). */
+  const checkPaused = () => {
+    if (mode === "auto" && getSettings(db).paused) throw new PausedStop();
+  };
   const onAbort = () => { void session?.page.close().catch(() => {}); };
 
   try {
@@ -380,10 +391,16 @@ async function runLocked(deps: RunnerDeps, jobId: string, mode: RunMode, opts: R
       };
       const { files, rest } = fillOrder(byId, filled);
       if (files.length) step("Uploading resume");
-      for (const r of files) await attempt(r);
+      for (const r of files) {
+        checkPaused();
+        await attempt(r);
+      }
       if (files.length) await handler.afterUpload?.(page);
       step("Filling fields");
-      for (const r of rest) await attempt(r);
+      for (const r of rest) {
+        checkPaused();
+        await attempt(r);
+      }
       return failures;
     };
 
@@ -664,6 +681,7 @@ async function runLocked(deps: RunnerDeps, jobId: string, mode: RunMode, opts: R
       return "queued";
     }
 
+    checkPaused();
     beforeSubmit = await screenshot(page);
     step("Submitting");
     submitClicked = true;
@@ -705,6 +723,15 @@ async function runLocked(deps: RunnerDeps, jobId: string, mode: RunMode, opts: R
   } catch (err) {
     // A rebuild leaves the job as it was: whoever asked for it shows why it failed.
     if (rebuild) throw err;
+    if (err instanceof PausedStop) {
+      // Not a failed attempt: the job waits, filled so far, until the runner is resumed (which queues it again).
+      decrementAttempts(db, job.id);
+      try {
+        resolveNeedsYouForJob(db, job.id);
+        addNeedsYou(db, { jobId: job.id, kind: "other", message: `${job.company} · ${job.title}: ${PAUSED_MID_RUN}` });
+      } catch { /* the status below still says it */ }
+      return await end("needs-you", PAUSED_MID_RUN);
+    }
     const halt = err instanceof SetupError ? err.message : llmHaltReason(err);
     if (halt && !submitClicked) {
       // Every job would fail the same way: put this one back as it was and pause until it's fixed.

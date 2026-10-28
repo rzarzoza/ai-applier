@@ -170,3 +170,45 @@ test("errors from the Keychain that echo the secret never reach the page", async
   const b = await (await app.request("/settings", form({ ...base, apiKey: "sk-topsecret" }))).text();
   expect(b).not.toContain("sk-topsecret");
 });
+
+test("the top bar's Pause / Resume pill toggles the runner from any page and goes back to it", async () => {
+  const { db, app } = setupApp();
+  const { getJob, PAUSED_MID_RUN, setStatus, upsertPosting } = await import("../../src/jobs/repo.js");
+  for (const p of ["/", "/inbox", "/applications", "/bank", "/profile", "/sources", "/settings"]) {
+    const html = await (await app.request(p)).text();
+    expect(html).toMatch(/<form class="run-toggle" method="post" action="\/runner\/pause">/);
+    expect(html).not.toContain("chip-amber run-chip");
+  }
+  const paused = await app.request("/runner/pause", { method: "POST", headers: { host: "localhost", referer: "http://localhost/bank?search=x" } });
+  expect(paused.status).toBe(303);
+  expect(paused.headers.get("location")).toBe("/bank?search=x");
+  expect(getSettings(db).paused).toBe(true);
+  const html = await (await app.request("/bank")).text();
+  expect(html).toContain('<span class="chip chip-amber run-chip">Paused</span>');
+  expect(html).toMatch(/action="\/runner\/resume">[\s\S]*>Resume</);
+  // Resuming queues again a job the pause stopped mid-run; a foreign referer goes Home.
+  const { job } = upsertPosting(db, { sourceId: "s", listingId: "1", company: "Acme", title: "Intern", locations: ["NYC"], category: null,
+    terms: [], degrees: [], sponsorship: null, url: "https://acme.test/1", datePosted: new Date(), active: true });
+  setStatus(db, job.id, "needs-you", PAUSED_MID_RUN);
+  const resumed = await app.request("/runner/resume", { method: "POST", headers: { host: "localhost", referer: "http://evil.test/x" } });
+  expect(resumed.headers.get("location")).toBe("/");
+  expect(getSettings(db).paused).toBe(false);
+  expect(getJob(db, job.id)!.status).toBe("queued");
+});
+
+test("the Pause / Resume routes are Host/Origin guarded", async () => {
+  const { createApp } = await import("../../src/web/server.js");
+  const { FakeLlm } = await import("../helpers/fake-llm.js");
+  const { openDb } = await import("../../src/db/db.js");
+  const db = openDb(":memory:");
+  const { vi } = await import("vitest");
+  const app = createApp({ db, llm: new FakeLlm(), runInteractive: vi.fn(), runReviewed: vi.fn(), runHandFinish: vi.fn(), pollNow: vi.fn(), localPort: () => 4310 });
+  const post = (path: string, headers: Record<string, string>) => app.request(new Request(`http://127.0.0.1:4310${path}`, { method: "POST", headers }));
+  expect((await post("/runner/pause", { host: "127.0.0.1:4310", origin: "http://evil.test" })).status).toBe(403);
+  expect((await post("/runner/pause", { host: "evil.test:4310", origin: "http://127.0.0.1:4310" })).status).toBe(403);
+  expect(getSettings(db).paused).toBe(false);
+  expect((await post("/runner/pause", { host: "127.0.0.1:4310", origin: "http://127.0.0.1:4310" })).status).toBe(303);
+  expect(getSettings(db).paused).toBe(true);
+  expect((await post("/runner/resume", { host: "127.0.0.1:4310", origin: "http://evil.test" })).status).toBe(403);
+  expect(getSettings(db).paused).toBe(true);
+});

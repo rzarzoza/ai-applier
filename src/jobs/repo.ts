@@ -37,6 +37,12 @@ export const SKIPPED_BY_YOU = "Skipped by you";
 /** The needs-you reason for a job whose form needs a resume file and none is uploaded. */
 export const RESUME_NEEDED = "Upload your resume in Profile";
 
+/**
+ * The needs-you reason of a job whose auto run stopped because the runner was paused mid-run (between two fields or
+ * before submitting): its tab stays open with what was filled, and resuming the runner queues it again.
+ */
+export const PAUSED_MID_RUN = "Paused — resume to continue";
+
 /** The needs-you reason for a job whose application may already have gone out. */
 export const UNKNOWN_SUBMISSION = "Submission state unknown — check before retrying";
 export const UNKNOWN_SUBMISSION_PREFIX = "Submission state unknown";

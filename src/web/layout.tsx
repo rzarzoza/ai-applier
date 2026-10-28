@@ -71,6 +71,10 @@ a:hover { text-decoration: underline; }
 .tab.active { color: var(--active); }
 .tab.active::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 2px; background: var(--active); }
 .tab-icon { position: relative; }
+.run-toggle { display: flex; align-items: center; gap: 8px; margin: 0 0 0 4px; flex: none; }
+.run-toggle button { padding: 3px 12px; font-size: 13px; }
+.run-toggle button.resume { background: var(--warning); border-color: var(--warning); color: var(--card); }
+.run-toggle button.resume:hover { box-shadow: none; filter: brightness(1.08); }
 .nav-badge { position: absolute; top: -4px; right: -9px; min-width: 16px; height: 16px; padding: 0 4px; border-radius: 8px;
   background: #cc1016; color: #fff; font-size: 11px; font-weight: 600; line-height: 16px; text-align: center; box-shadow: 0 0 0 2px var(--card); }
 
@@ -244,6 +248,7 @@ tr:last-child td { border-bottom: 0; }
   .topnav-inner { padding: 0 16px; gap: 8px; }
   .tabs { flex: 1; justify-content: space-between; }
   .tab { flex: 1; padding: 0; }
+  .run-chip { display: none; }
   .tab-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
   main { padding: 16px; }
   .alert-bar-inner { padding: 10px 16px; }
@@ -294,6 +299,7 @@ export function Layout(props: { active: string; inboxCount: number; paused?: boo
                 </a>
               ))}
             </nav>
+            <RunToggle paused={!!props.paused} />
           </div>
         </header>
         {props.paused ? (
@@ -302,8 +308,8 @@ export function Layout(props: { active: string; inboxCount: number; paused?: boo
               <Icon name="alert" size={20} />
               <span>
                 {props.haltReason
-                  ? <>Paused: {props.haltReason}. Turn off Paused in <a href="/settings">Settings</a> once it's fixed.</>
-                  : <>Paused — nothing will be applied. Turn off in <a href="/settings">Settings</a> when your profile and resume are ready.</>}
+                  ? <>Paused: {props.haltReason}. Press Resume in the top bar once it's fixed.</>
+                  : <>Paused — nothing will be applied. Press Resume in the top bar when your profile and resume are ready.</>}
               </span>
             </div>
           </div>
@@ -311,6 +317,21 @@ export function Layout(props: { active: string; inboxCount: number; paused?: boo
         <main>{props.children}</main>
       </body>
     </html>
+  );
+}
+
+/**
+ * The runner's Pause / Resume pill in the top bar (every page). Pausing lets the job being filled finish its current
+ * step, then stops it; resuming queues again any job a pause stopped. Posts to /runner/pause or /runner/resume.
+ */
+export function RunToggle(props: { paused: boolean }) {
+  return (
+    <form class="run-toggle" method="post" action={props.paused ? "/runner/resume" : "/runner/pause"}>
+      {props.paused ? <span class="chip chip-amber run-chip">Paused</span> : null}
+      {props.paused
+        ? <button type="submit" class="resume" title="Start applying again">Resume</button>
+        : <button type="submit" title="Stop applying: the current job finishes its current step, then stops">Pause</button>}
+    </form>
   );
 }
 
