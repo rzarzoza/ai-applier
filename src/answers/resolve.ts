@@ -8,7 +8,7 @@ import { addVariant, createQuestion, getOverrides, getQuestion, incrementUse, li
 import { classifyFields, normalizeLabel, withCompanyPlaceholder, type Classification, type DerivedKey } from "./classify.js";
 import { draftAnswer, factAnswer, fillTemplate } from "./draft.js";
 import { matchQuestion } from "./match.js";
-import { entityProfileField, findOtherOption, isOtherOption } from "./other.js";
+import { entityProfileField, findOtherOption } from "./other.js";
 
 export type FillSource = "override" | "profile" | "derived" | "consent" | "resume" | "bank" | "template";
 
@@ -147,10 +147,8 @@ async function fromValue(ctx: Ctx, field: FieldSpec, value: Value, source: FillS
   if (v !== null) {
     const answer = await adaptAnswer(ctx.llm, v, field, ctx.job);
     const name = typeof v === "string" ? v.trim() : Array.isArray(v) ? v.join(", ") : "";
-    if (answer) {
-      const other = entity && answer.type === "option" && isOtherOption(answer.option) && name ? name : undefined;
-      return filled(field, answer, source, { entity: entity || undefined, other });
-    }
+    // adaptAnswer never maps a name onto "Other": only the fallback below picks it, for a name the list truly lacks.
+    if (answer) return filled(field, answer, source, { entity: entity || undefined });
     const otherOption = entity && name ? findOtherOption(field.options ?? []) : null;
     if (otherOption && field.kind === "combobox") return filled(field, { type: "text", text: name }, source, { entity: true });
     if (otherOption) return filled(field, { type: "option", option: otherOption }, source, { entity: true, other: name });

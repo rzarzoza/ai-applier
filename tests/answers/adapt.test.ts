@@ -115,3 +115,26 @@ test("adaptAnswer maps a place only onto that place; an LLM pick lacking the cit
   // A non-place answer to a location question still maps when an option states it.
   expect(await adaptAnswer(noLlm, "No preference", loc(["New York, NY", "No preference"]), job)).toEqual({ type: "option", option: "No preference" });
 });
+
+test("adaptAnswer never maps a real value onto an Other-like option, whoever proposes it", async () => {
+  const school = (options: string[], kind: FieldSpec["kind"] = "select"): FieldSpec =>
+    ({ id: "s", label: "Which institution do you attend? If not listed select Other", kind, required: true, options });
+  const llm = new FakeLlm().on("adapt", () => ({ option: "Other" }));
+  expect(await adaptAnswer(llm, "Rice University", school(["Harvard University", "Stanford University", "Other"]), job)).toBeNull();
+  expect(llm.calls).toHaveLength(1);
+  const llm2 = new FakeLlm().on("adapt", () => ({ option: "Other (School Not Listed)" }));
+  expect(await adaptAnswer(llm2, "Rice University", school(["Harvard University", "Other (School Not Listed)"], "radio"), job)).toBeNull();
+  // Deterministic containment would have taken "Other" for a value mentioning "other".
+  const none = new FakeLlm().on("adapt", () => ({ option: null }));
+  expect(await adaptAnswer(none, "The Other School of Design", school(["Harvard University", "Other"]), job)).toBeNull();
+  // Multi-select: an Other among the LLM's picks rejects the mapping.
+  const multi = new FakeLlm().on("adapt", () => ({ options: ["Java", "Other"] }));
+  const langs: FieldSpec = { id: "c", label: "Languages", kind: "checkbox-group", required: true, options: ["Python", "Java", "Other"] };
+  expect(await adaptAnswer(multi, "Rust, Go", langs, job)).toBeNull();
+  // A value that itself says "Other" still maps onto the Other option.
+  expect(await adaptAnswer(new FakeLlm(), "Other", school(["Harvard University", "Other"]), job)).toEqual({ type: "option", option: "Other" });
+  // A real match is unaffected.
+  const rice = new FakeLlm().on("adapt", () => ({ option: "William Marsh Rice University" }));
+  expect(await adaptAnswer(rice, "Rice University", school(["William Marsh Rice University", "Other"]), job))
+    .toEqual({ type: "option", option: "William Marsh Rice University" });
+});

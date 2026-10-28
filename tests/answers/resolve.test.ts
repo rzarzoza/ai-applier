@@ -484,3 +484,19 @@ test("a matched factual question still unanswered gets a fact draft; an approved
   expect(await resolveFields({ db, llm }, fields, { ...job, jobId: "j2" }))
     .toEqual([{ fieldId: "start", status: "filled", answer: { type: "text", text: "May 1st 2027" }, source: "bank" }]);
 });
+
+test("a native school select without the user's school but with Other reaches the Other fallback, even when the LLM proposes Other", async () => {
+  const db = setup();
+  saveProfile(db, { school: "Rice University" });
+  const llm = new FakeLlm()
+    .on("classify", classifyAs({ school: { category: "profile", profileKey: "school", isFactual: true } }))
+    // The worst case: the mapping step itself proposes "Other". adaptAnswer rejects it; the fallback picks the most specific Other.
+    .on("adapt", () => ({ option: "Other" }));
+  const res = await resolveFields({ db, llm }, [
+    f("school", "Which institution do you attend? If not listed select Other", "select", { options: ["Harvard University", "Other", "Other school"] }),
+  ], job);
+  expect(res).toEqual([
+    { fieldId: "school", status: "filled", answer: { type: "option", option: "Other school" }, source: "profile", entity: true, other: "Rice University" },
+  ]);
+  expect(llm.calls.filter(c => c.name === "adapt")).toHaveLength(1);
+});

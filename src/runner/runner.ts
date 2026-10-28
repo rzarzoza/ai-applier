@@ -4,7 +4,7 @@ import { addBlocker, addNeedsYou, clearBlockersForJob, getOverrides, getQuestion
 import { adaptAnswer, nameVariants, pickOption } from "../answers/adapt.js";
 import { normalizeLabel, withCompanyPlaceholder } from "../answers/classify.js";
 import { answerQuestion, canHandFinish } from "../answers/inbox.js";
-import { distinctiveWords, findOtherOption, followUpBox, isOtherOption, looksLikeFollowUp, otherEligible } from "../answers/other.js";
+import { distinctiveWords, findOtherOption, followUpBox, looksLikeFollowUp, otherEligible } from "../answers/other.js";
 import { resolveFields, type Extra, type FillSource, type Preset, type Resolution } from "../answers/resolve.js";
 import { atsNameFromUrl, detectAts, HANDLERS } from "../ats/registry.js";
 import type { AtsHandler, OpenResult, SubmitOutcome } from "../ats/types.js";
@@ -289,7 +289,6 @@ export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "a
         if (adapted && !same) {
           await handler.fill(page, field, adapted);
           r.answer = adapted;
-          if (eligible && adapted.type === "option" && isOtherOption(adapted.option)) r.other = value;
           return null;
         }
         if (eligible && !same) {

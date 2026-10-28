@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { FieldAnswer, FieldSpec, JobContext } from "../forms/types.js";
 import type { Llm } from "../llm/llm.js";
+import { isOtherOption } from "./other.js";
 
 const OPTION_KINDS = new Set<FieldSpec["kind"]>(["select", "combobox", "radio"]);
 const TEXT_KINDS = new Set<FieldSpec["kind"]>(["text", "textarea", "email", "tel", "url", "number", "date"]);
@@ -153,7 +154,7 @@ const ADAPT_OPTION_SYSTEM = `You map a job applicant's stored answer onto one op
 
 You receive the field's question, its options, and the stored answer. Return the option that states the same thing as the stored answer, copied exactly as it appears in the options list.
 
-Return null when no option means the same as the stored answer, or when more than one option could. This matters most for factual answers (work authorization, sponsorship, citizenship, dates, GPA, demographics, prior employment): pick an option only if it is clearly equivalent, and never pick one that changes the meaning, polarity, or scope of the stored answer. A wrong option is worse than none.`;
+Return null when no option means the same as the stored answer, or when more than one option could. This matters most for factual answers (work authorization, sponsorship, citizenship, dates, GPA, demographics, prior employment): pick an option only if it is clearly equivalent, and never pick one that changes the meaning, polarity, or scope of the stored answer. A wrong option is worse than none. Never pick a catch-all option such as "Other", "Not listed" or "None of the above" for a specific stored answer: return null instead.`;
 
 const ADAPT_OPTIONS_SYSTEM = `You map a job applicant's stored answer onto the options of a multi-select application form field.
 
@@ -172,13 +173,21 @@ const TextSchema = z.object({ text: z.string() });
 const asText = (value: string | boolean | string[]): string =>
   typeof value === "boolean" ? (value ? "Yes" : "No") : Array.isArray(value) ? value.join(", ") : value;
 
+/**
+ * Whether `option` may stand for the stored value: an "Other"-like option ("Other", "Not listed", "Other (please
+ * specify)"...) only when the value itself says "Other". Mapping a real value onto "Other" changes the answer; only the
+ * explicit Other fallback (answers/other.ts, for names a list truly lacks) may pick it.
+ */
+const mayStandFor = (value: string | boolean | string[], option: string) => !isOtherOption(option) || isOtherOption(asText(value));
+
 function fieldContext(field: FieldSpec, job: JobContext) {
   return { question: field.label, description: field.description ?? null, company: job.company, jobTitle: job.title };
 }
 
 /**
  * Converts a stored value into an answer for this field: deterministic where possible, otherwise one
- * low-effort LLM call. Returns null when the value cannot be expressed in the field without guessing.
+ * low-effort LLM call. Returns null when the value cannot be expressed in the field without guessing. Never maps a value
+ * onto an "Other"-like option (unless the value itself says "Other"): that is the caller's explicit fallback to make.
  */
 export async function adaptAnswer(llm: Llm, value: string | boolean | string[], field: FieldSpec, job: JobContext): Promise<FieldAnswer | null> {
   const options = field.options ?? [];
@@ -191,17 +200,17 @@ export async function adaptAnswer(llm: Llm, value: string | boolean | string[], 
   if (field.kind === "checkbox-group") {
     if (!options.length) return null;
     const whole = typeof value === "string" ? pickOption(value, options) : null;
-    if (whole) return { type: "options", options: [whole] };
+    if (whole && mayStandFor(value, whole)) return { type: "options", options: [whole] };
     const parts: (string | boolean)[] = Array.isArray(value) ? value
       : typeof value === "string" ? value.split(/[,;\n]/).map(s => s.trim()).filter(Boolean) : [value];
     const picked = parts.map(p => pickOption(p, options));
-    if (picked.length && picked.every(p => p !== null)) return { type: "options", options: [...new Set(picked as string[])] };
+    if (picked.length && picked.every((p, i) => p !== null && mayStandFor(parts[i]!, p))) return { type: "options", options: [...new Set(picked as string[])] };
     const out = await llm.structured({
       name: "adapt", schema: OptionsSchema, system: ADAPT_OPTIONS_SYSTEM, effort: "low",
       content: JSON.stringify({ ...fieldContext(field, job), options, storedAnswer: asText(value) }),
     });
     const chosen = out.options ?? [];
-    if (!chosen.length || !chosen.every(o => options.includes(o))) return null;
+    if (!chosen.length || !chosen.every(o => options.includes(o) && mayStandFor(value, o))) return null;
     return { type: "options", options: [...new Set(chosen)] };
   }
 
@@ -209,25 +218,25 @@ export async function adaptAnswer(llm: Llm, value: string | boolean | string[], 
     // A place resolves to the real place or to nothing: no containment guess ("Houston County, Alabama" for
     // "Houston"), and an LLM pick must still name the city (and state) — never an unrelated place.
     const picked = pickLocation(value, options);
-    if (picked) return { type: "option", option: picked };
+    if (picked && mayStandFor(value, picked)) return { type: "option", option: picked };
     const place = parsePlace(value);
     const out = await llm.structured({
       name: "adapt", schema: OptionSchema, system: ADAPT_OPTION_SYSTEM, effort: "low",
       content: JSON.stringify({ ...fieldContext(field, job), options, storedAnswer: value }),
     });
-    const ok = out.option !== null && options.includes(out.option) && !!place && placeMatches(place, out.option);
+    const ok = out.option !== null && options.includes(out.option) && !!place && placeMatches(place, out.option) && mayStandFor(value, out.option);
     return ok ? { type: "option", option: out.option! } : null;
   }
 
   if (OPTION_KINDS.has(field.kind) && options.length) {
     const flat = Array.isArray(value) ? value.join(", ") : value;
     const picked = pickOption(flat, options);
-    if (picked) return { type: "option", option: picked };
+    if (picked && mayStandFor(value, picked)) return { type: "option", option: picked };
     const out = await llm.structured({
       name: "adapt", schema: OptionSchema, system: ADAPT_OPTION_SYSTEM, effort: "low",
       content: JSON.stringify({ ...fieldContext(field, job), options, storedAnswer: asText(value) }),
     });
-    return out.option !== null && options.includes(out.option) ? { type: "option", option: out.option } : null;
+    return out.option !== null && options.includes(out.option) && mayStandFor(value, out.option) ? { type: "option", option: out.option } : null;
   }
 
   // A combobox with no known options is a typeahead: type the value and let the filler pick.
