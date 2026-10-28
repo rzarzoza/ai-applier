@@ -33,4 +33,6 @@ export async function setSecret(name: string, value: string, runner: Runner = ru
   const quote = (v: string) => `"${v.replace(/[\\"]/g, "\\$&")}"`;
   const command = `add-generic-password -U -s ${SERVICE} -a ${quote(name)} -w ${quote(value)}\n`;
   await runner(SECURITY, ["-i"], command);
+  // `security -i` can exit 0 when its command failed, so confirm the value really is stored.
+  if ((await getSecret(name, runner)) !== value) throw new Error("Keychain write could not be verified");
 }
