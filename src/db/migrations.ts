@@ -81,4 +81,11 @@ export const migrations: string[] = [
     classification_json TEXT NOT NULL,
     created_at TEXT NOT NULL
   );`,
+  `CREATE TABLE job_snapshots (
+    job_id TEXT PRIMARY KEY REFERENCES jobs (id) ON DELETE CASCADE,
+    fields_json TEXT NOT NULL,
+    resolutions_json TEXT NOT NULL,
+    screenshot_path TEXT,
+    created_at TEXT NOT NULL
+  );`,
 ];

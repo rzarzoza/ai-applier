@@ -1,0 +1,85 @@
+<!doctype html>
+<html>
+<head><title>Mini ATS - Software Engineer Intern</title></head>
+<body>
+<section id="description">
+  <h1>Software Engineer Intern</h1>
+  <p>Build developer tools at Mini Co with a small, friendly team.</p>
+</section>
+
+<form id="app" onsubmit="return false">
+  <label for="first">First Name</label>
+  <input id="first" name="first" type="text" required>
+
+  <label for="email">Email</label>
+  <input id="email" name="email" type="email" required>
+
+  <label for="phone">Phone</label>
+  <input id="phone" name="phone" type="tel" required>
+
+  <label for="reloc">Are you willing to relocate?</label>
+  <select id="reloc" name="reloc" required>
+    <option value="">Select...</option>
+    <option value="y">Yes</option>
+    <option value="n">No</option>
+  </select>
+
+  <label for="project">Tell us about a project you are proud of</label>
+  <textarea id="project" name="project"></textarea>
+
+  <label><input type="checkbox" name="certify" required> I certify that the information above is accurate</label>
+  <label><input type="checkbox" name="sms"> Text me about new roles</label>
+
+  <button type="button" id="submit">Submit application</button>
+</form>
+
+<div id="challenge" hidden>
+  <iframe title="captcha challenge" srcdoc="<p>Select every bus</p>"></iframe>
+  <button type="button" id="solve">Solve</button>
+</div>
+<div id="oops" hidden>Something went wrong on our side</div>
+<div id="thanks" hidden><h2>Thank you for applying</h2></div>
+
+<script>
+(function () {
+  var params = new URLSearchParams(location.search);
+  var form = document.getElementById("app");
+  var phone = document.getElementById("phone");
+
+  // ?sabotage=1: the first-name box refuses to keep a value.
+  if (params.has("sabotage")) {
+    document.getElementById("first").addEventListener("input", function (e) { e.target.value = ""; });
+  }
+
+  function send() {
+    var data = {};
+    new FormData(form).forEach(function (v, k) { data[k] = String(v); });
+    fetch("/submit", { method: "POST", body: JSON.stringify(data) }).then(function () {
+      form.hidden = true;
+      document.getElementById("thanks").hidden = false;
+    });
+  }
+
+  document.getElementById("submit").addEventListener("click", function () {
+    document.querySelectorAll(".error").forEach(function (e) { e.remove(); });
+    if (params.has("silent")) return;
+    if (params.has("oops")) { document.getElementById("oops").hidden = false; return; }
+    if (!/^\d+$/.test(phone.value)) {
+      var s = document.createElement("span");
+      s.className = "error";
+      s.textContent = "Invalid phone";
+      phone.after(s);
+      return;
+    }
+    if (params.has("captcha")) { document.getElementById("challenge").hidden = false; return; }
+    send();
+  });
+
+  document.getElementById("solve").addEventListener("click", function () {
+    document.getElementById("challenge").hidden = true;
+    send();
+  });
+})();
+</script>
+</body>
+</html>
