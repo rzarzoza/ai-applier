@@ -369,24 +369,38 @@ test("file uploads: the resume when there is one; otherwise required files need 
   expect(listQuestions(db)).toEqual([]);
 });
 
-test("a saved question with exactly the same wording matches without asking the LLM", async () => {
+test("a saved question with exactly the same canonical text matches without asking the LLM", async () => {
   const db = setup();
   const q = createQuestion(db, { canonical: "Do you hold a security clearance?", kind: "global", isFactual: true });
   approveAnswer(db, q.id, "No");
   const v = createQuestion(db, { canonical: "Expected graduation date", kind: "global", isFactual: true });
-  addVariant(db, v.id, "When do you graduate at Acme?");
+  addVariant(db, v.id, "When do you expect to graduate?");
   approveAnswer(db, v.id, "May 2028");
-  const llm = new FakeLlm().on("classify", classifyAs({
-    cl: { category: "question", canonicalQuestion: "do you hold a security clearance", isFactual: true },
-    grad: { category: "question", canonicalQuestion: "When will you graduate?", isFactual: true },
-  }));
+  const llm = new FakeLlm()
+    .on("classify", classifyAs({
+      cl: { category: "question", canonicalQuestion: "do you hold a security clearance", isFactual: true },
+      grad: { category: "question", canonicalQuestion: "When do you expect to graduate?", isFactual: true },
+    }))
+    .on("match", () => ({ matchId: null, confidence: "low" }));
   const res = await resolveFields({ db, llm }, [
-    f("cl", "Clearance?", "radio", { options: ["Yes", "No"] }),
-    f("grad", "When do you graduate at Acme? *", "text"),
+    f("cl", "Do you currently hold a clearance?", "radio", { options: ["Yes", "No"] }),
+    // Matching a variant's wording is not enough: only canonical text short-circuits.
+    f("grad", "When do you expect to graduate?", "text"),
   ], job);
-  expect(llm.calls.map(c => c.name)).toEqual(["classify"]);
-  expect(res).toEqual([
-    { fieldId: "cl", status: "filled", answer: { type: "option", option: "No" }, source: "bank" },
-    { fieldId: "grad", status: "filled", answer: { type: "text", text: "May 2028" }, source: "bank" },
-  ]);
+  expect(llm.calls.map(c => c.name)).toEqual(["classify", "match"]);
+  expect(res[0]).toEqual({ fieldId: "cl", status: "filled", answer: { type: "option", option: "No" }, source: "bank" });
+  expect(res[1]).toMatchObject({ status: "blocked" });
+});
+
+test("short generic labels never short-circuit the matcher, even with the same canonical text", async () => {
+  const db = setup();
+  const q = createQuestion(db, { canonical: "Please explain", kind: "global", isFactual: true });
+  approveAnswer(db, q.id, "I was relocating for family reasons.");
+  const llm = new FakeLlm()
+    .on("classify", classifyAs({ why: { category: "question", canonicalQuestion: "Please explain", isFactual: true } }))
+    .on("match", () => ({ matchId: null, confidence: "low" }));
+  const res = await resolveFields({ db, llm }, [f("why", "Please explain", "textarea")], job);
+  expect(llm.calls.map(c => c.name)).toEqual(["classify", "match"]);
+  expect(res[0]).toMatchObject({ status: "blocked" });
+  expect(getQuestion(db, q.id)!.useCount).toBe(0);
 });

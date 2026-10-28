@@ -107,6 +107,7 @@ test("POST /filters re-checks queued jobs and requeues filter-skipped jobs that 
   incrementAttempts(db, ran);
   const inactive = mkJob(6, { locations: ["San Francisco, CA"], active: false }, "skipped", "location matches an excluded location");
   const sameRole = mkJob(7, { company: "Co2", locations: ["San Francisco, CA"] }, "skipped", "location matches an excluded location");
+  const oldQueued = mkJob(8, { locations: ["San Francisco, CA"], datePosted: new Date(Date.now() - 20 * 86_400_000) }, "queued");
   const res = await app.request("/filters", form({
     categories: "Software", excludeCountries: "", includeLocations: "San Francisco", locationMode: "any", postedWithinDays: "14",
   }));
@@ -119,6 +120,7 @@ test("POST /filters re-checks queued jobs and requeues filter-skipped jobs that 
   expect(status(ran)).toBe("skipped");
   expect(status(inactive)).toBe("skipped");
   expect(status(sameRole)).toBe("duplicate-role"); // Co2's role is already queued
+  expect(status(oldQueued)).toBe("queued"); // posting age only applies at intake
 });
 
 test("POST /filters never requeues a degree-filtered job whose degrees weren't recorded", async () => {

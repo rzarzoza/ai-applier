@@ -31,9 +31,10 @@ export function jobPosting(job: Job): Posting {
 /**
  * Checks a queued job against the current filters: one that no longer passes is skipped with the
  * reason; one that passes keeps (or gets) the location the filters choose. Returns whether it passes.
+ * Posting age is an intake rule only: a job queued in time never ages out of the queue.
  */
 export function recheckQueued(db: Db, job: Job, rules: FilterRules, now: Date): boolean {
-  const result = evaluateFilters(jobPosting(job), rules, now);
+  const result = evaluateFilters(jobPosting(job), { ...rules, postedWithinDays: null }, now);
   if (!result.pass) { setStatus(db, job.id, "skipped", result.reason); return false; }
   if (job.chosenLocation !== result.location) setChosenLocation(db, job.id, result.location);
   return true;
@@ -54,7 +55,8 @@ function queueIfPassing(db: Db, job: Job, rules: FilterRules, now: Date): "queue
 }
 
 /**
- * Applies changed filters to existing jobs: queued jobs that no longer pass are skipped, and jobs the
+ * Applies changed filters to existing jobs: queued jobs that no longer pass are skipped (posting age
+ * aside, see `recheckQueued`), and jobs the
  * filters skipped before they ever ran are queued if they now pass (never ones the user skipped, nor
  * ones whose degree requirements weren't recorded while a degree rule is set).
  */

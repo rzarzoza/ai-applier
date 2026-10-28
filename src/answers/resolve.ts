@@ -166,8 +166,7 @@ async function fromBank(ctx: Ctx, field: FieldSpec, c: Classification): Promise<
   const canonical = c.canonicalQuestion ?? cleanLabel(field.label);
   const isFactual = c.isFactual;
 
-  const label = cleanLabel(field.label);
-  const matchId = await matchQuestion(llm, canonical, isFactual, listQuestions(db), [label, withCompanyPlaceholder(label, job.company)]);
+  const matchId = await matchQuestion(llm, canonical, isFactual, listQuestions(db), field.label);
   const matched = matchId === null ? null : getQuestion(db, matchId);
   if (matched) {
     addVariant(db, matched.id, field.label);

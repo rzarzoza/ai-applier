@@ -558,6 +558,11 @@ test("runNext skips queued jobs that no longer pass the filters and runs the nex
   expect(miniAts.submissions).toHaveLength(1);
 });
 
+test("posting age is an intake rule: an old queued job still runs", async () => {
+  db.prepare("UPDATE jobs SET date_posted = ? WHERE id = ?").run(new Date(Date.now() - 20 * 86_400_000).toISOString(), job.id);
+  expect(await runNext(deps)).toBe("submitted");
+});
+
 test("runNext with no API key pauses instead of taking a job", async () => {
   expect(await runNext({ ...deps, hasApiKey: async () => false })).toBeNull();
   expect(opened).toEqual([]);
