@@ -15,7 +15,7 @@ test("greenhouse matches its board hosts and gh_jid links only", () => {
     "https://boards.greenhouse.io/embed/job_app?token=6866538002",
     "https://careers.withwaymo.com/jobs?gh_jid=8304574",
   ]) expect(detectAts(u)?.name, u).toBe("greenhouse");
-  for (const u of ["https://jobs.ashbyhq.com/x/y", "https://evil.com/greenhouse.io/jobs/1", "not a url", ""]) expect(detectAts(u), u).toBeNull();
+  for (const u of ["https://acme.wd1.myworkdayjobs.com/x/job/y", "https://evil.com/greenhouse.io/jobs/1", "not a url", ""]) expect(detectAts(u), u).toBeNull();
 });
 
 test("detectAts uses the given handler list", () => {
