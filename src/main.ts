@@ -183,7 +183,7 @@ export async function startApp(opts: StartOptions = {}): Promise<{ url: string; 
       while (!stopped) {
         pollNow();
         await pollInFlight();
-        await sleep(getSettings(db).pollMinutes * 60_000);
+        await sleep(Math.min(Math.max(getSettings(db).pollMinutes, 1), 1440) * 60_000);
       }
     })());
     loops.push((async () => {

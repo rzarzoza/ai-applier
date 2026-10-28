@@ -437,7 +437,7 @@ export function createApp(ctx: AppContext): Hono {
     const mode = str(form.reviewMode);
     if (mode !== "off" && mode !== "all" && mode !== "companies") return c.text("Invalid review mode", 400);
     const poll = Number(str(form.pollMinutes));
-    if (!Number.isInteger(poll) || poll < 1) return c.text("Poll minutes must be a whole number of at least 1", 400);
+    if (!Number.isInteger(poll) || poll < 1 || poll > 1440) return c.text("Poll minutes must be a whole number from 1 to 1440", 400);
     const limitRaw = str(form.dailyLimit);
     const limit = limitRaw === "" ? null : Number(limitRaw);
     if (limit !== null && (!Number.isInteger(limit) || limit < 1)) return c.text("Daily limit must be a whole number of at least 1", 400);
