@@ -2,13 +2,14 @@ import { expect, test } from "vitest";
 import { getJson, getSettings, setJson } from "../../src/settings.js";
 import { form, setupApp } from "./helpers.js";
 
-const base = { reviewMode: "companies", reviewCompanies: "Acme, Globex", dailyLimit: "15", pollMinutes: "60", headless: "1", apiKey: "" };
+const base = { reviewMode: "companies", reviewCompanies: "Acme, Globex", dailyLimit: "15", pollMinutes: "60", apiKey: "" };
 
 test("POST /settings persists values and does not call setSecret without a key", async () => {
   const { db, app, secrets } = setupApp();
   const res = await app.request("/settings", form(base));
   expect(res.status).toBe(303);
-  expect(getSettings(db)).toMatchObject({ reviewMode: "companies", reviewCompanies: ["Acme", "Globex"], dailyLimit: 15, pollMinutes: 60, headless: true, paused: false });
+  expect(getSettings(db)).toMatchObject({ reviewMode: "companies", reviewCompanies: ["Acme", "Globex"], dailyLimit: 15, pollMinutes: 60, paused: false });
+  expect(getSettings(db)).not.toHaveProperty("headless");
   expect(secrets.set).not.toHaveBeenCalled();
 });
 
@@ -31,12 +32,13 @@ test("GET /settings shows 'not set' when there is no key; invalid values are rej
   expect(getSettings(db).pollMinutes).toBe(30);
 });
 
-test("unchecked boxes turn headless and paused off; blank daily limit means no limit", async () => {
+test("an unchecked box turns paused off; blank daily limit means no limit; there is no headless setting", async () => {
   const { db, app } = setupApp();
   await app.request("/settings", form({ ...base, paused: "1" }));
   expect(getSettings(db).paused).toBe(true);
-  await app.request("/settings", form({ ...base, headless: "", dailyLimit: "" }));
-  expect(getSettings(db)).toMatchObject({ paused: false, headless: false, dailyLimit: null });
+  await app.request("/settings", form({ ...base, dailyLimit: "" }));
+  expect(getSettings(db)).toMatchObject({ paused: false, dailyLimit: null });
+  expect(await (await app.request("/settings")).text()).not.toMatch(/headless/i);
 });
 
 test("GET /settings renders 'unknown' instead of failing when the Keychain read throws", async () => {

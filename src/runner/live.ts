@@ -209,6 +209,11 @@ export class LiveService {
     }
   }
 
+  /** Brings the job's parked tab to the front of the Chrome window; false when nothing is parked. */
+  front(jobId: string): Promise<boolean> {
+    return this.deps.manager.front(jobId);
+  }
+
   /** Closes the job's parked page. */
   async close(jobId: string): Promise<void> {
     await this.deps.manager.unpark(jobId);

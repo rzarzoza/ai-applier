@@ -46,9 +46,6 @@ export function SettingsPage(props: {
           </label>
         </div>
         <label class="check">
-          <input type="checkbox" name="headless" value="1" checked={s.headless} /> Run the browser headless
-        </label>
-        <label class="check">
           <input type="checkbox" name="paused" value="1" checked={s.paused} /> Paused
         </label>
         <hr class="divider" />

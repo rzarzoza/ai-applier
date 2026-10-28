@@ -218,6 +218,10 @@ export function OpeningBrowser() {
   return <span class="working">Opening browser…</span>;
 }
 
+export function BroughtToFront() {
+  return <span class="working">Brought to the front of the Chrome window.</span>;
+}
+
 export function OpeningHandFinish() {
   return <span class="working">Opening the application in a browser window…</span>;
 }

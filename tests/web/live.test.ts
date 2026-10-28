@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, beforeEach, expect, test, vi } from "vitest";
 import type { Browser } from "playwright";
-import { getOverrides } from "../../src/answers/bank.js";
+import { addNeedsYou, getOverrides } from "../../src/answers/bank.js";
 import { getJob, setStatus, UNKNOWN_SUBMISSION } from "../../src/jobs/repo.js";
 import { createApp } from "../../src/web/server.js";
 import { FakeLlm } from "../helpers/fake-llm.js";
@@ -140,20 +140,31 @@ test("the job page shows the live panel when its page is parked, and asks for a 
   expect(html).not.toContain("/live/");
 });
 
-test("Pop out closes the parked page and opens the job in a window; Close just closes it", async () => {
+test("Pop out brings the parked tab to the front (no second browser); Close just closes it", async () => {
   const j = await s.needsYouJob();
   const page = s.manager.get(j.id)!.page;
+  const front = vi.spyOn(page, "bringToFront");
   const res = await app.request(`/live/${j.id}/pop-out`, { method: "POST" });
   expect(res.status).toBe(200);
-  expect(await res.text()).toContain("Opening the application in a browser window…");
-  expect(page.isClosed()).toBe(true);
-  expect(runHandFinish).toHaveBeenCalledWith(j.id);
-  s.live.rebuild(j.id);
-  await until(() => s.manager.isParked(j.id));
+  expect(await res.text()).toContain("Brought to the front of the Chrome window.");
+  expect(front).toHaveBeenCalledOnce();
+  expect(page.isClosed()).toBe(false);
+  expect(runHandFinish).not.toHaveBeenCalled();
+  expect(runInteractive).not.toHaveBeenCalled();
+  // Do it now and Open & finish bring the parked tab forward too, instead of opening the job again.
+  setStatus(s.db, j.id, "needs-you", "CAPTCHA");
+  addNeedsYou(s.db, { jobId: j.id, kind: "captcha", message: "Mini Co: solve the CAPTCHA" });
+  expect(await (await app.request(`/needs-you/${j.id}/do-it-now`, { method: "POST" })).text()).toContain("Brought to the front");
+  expect(front).toHaveBeenCalledTimes(2);
+  expect(runInteractive).not.toHaveBeenCalled();
   const html = await (await app.request(`/live/${j.id}/close`, { method: "POST" })).text();
   expect(html).toContain("Open here");
   expect(s.manager.isParked(j.id)).toBe(false);
   expect(getJob(s.db, j.id)!.status).toBe("needs-you");
+  // Nothing parked: Pop out has nothing to show, and Do it now opens the job again.
+  expect((await app.request(`/live/${j.id}/pop-out`, { method: "POST" })).status).toBe(409);
+  await app.request(`/needs-you/${j.id}/do-it-now`, { method: "POST" });
+  expect(runInteractive).toHaveBeenCalledWith(j.id);
 });
 
 test("refill puts the user's values back and attach-resume attaches the profile's resume", async () => {

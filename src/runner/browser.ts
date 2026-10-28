@@ -1,8 +1,7 @@
-import { chromium, type Page } from "playwright";
+import type { Page } from "playwright";
 import type { Resolution } from "../answers/resolve.js";
 import type { AtsHandler } from "../ats/types.js";
 import type { FieldAnswer, FieldSpec } from "../forms/types.js";
-import { paths } from "../paths.js";
 
 /** A field of a parked page whose value the live view keeps an eye on (see LiveService). */
 export interface WatchField {
@@ -33,26 +32,13 @@ export interface BrowserSession {
 }
 
 export interface BrowserProvider {
-  open(opts: { headless: boolean }): Promise<BrowserSession>;
+  /** A page (tab) for one run. With `front`, it is brought to the front of the window: the user is about to use it. */
+  open(opts?: { front?: boolean }): Promise<BrowserSession>;
   /**
-   * True when the provider keeps pages for the dashboard's live view: runs it can show there never need a visible
-   * window (only "Pop out" and "Do it now" ask for one).
+   * True when the provider keeps pages for the dashboard's live view: a run that needs the user (a CAPTCHA, a code) hands
+   * its page over right away instead of waiting for them.
    */
   readonly keepsPages?: boolean;
   /** Closes the page kept for the job, if any (a new run of the job replaces it). */
   unpark?(jobId: string): Promise<void>;
 }
-
-/** Chromium with a persistent profile at `BROWSER_PROFILE_DIR`, so cookies and portal sessions survive between runs. */
-export const persistentChromium: BrowserProvider = {
-  async open({ headless }) {
-    const context = await chromium.launchPersistentContext(paths.browserProfile, { headless });
-    try {
-      const page = context.pages()[0] ?? (await context.newPage());
-      return { page, close: () => context.close() };
-    } catch (err) {
-      await context.close().catch(() => {});
-      throw err;
-    }
-  },
-};

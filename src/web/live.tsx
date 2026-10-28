@@ -1,6 +1,5 @@
 import { streamSSE } from "hono/streaming";
 import type { Hono } from "hono";
-import { canDoItNow, canHandFinish } from "../answers/inbox.js";
 import type { Db } from "../db/db.js";
 import { canOpenLive, getJob } from "../jobs/repo.js";
 import type { Job } from "../jobs/types.js";
@@ -18,6 +17,8 @@ export interface LiveControl {
   refill(jobId: string): Promise<number | null>;
   attachResume(jobId: string): Promise<boolean | null>;
   close(jobId: string): Promise<void>;
+  /** Brings the job's parked tab to the front of the Chrome window; false when nothing is parked. */
+  front(jobId: string): Promise<boolean>;
 }
 
 export type PanelState =
@@ -48,7 +49,7 @@ const enc = encodeURIComponent;
  * The job page's Application panel: the parked page's live screen with its toolbar (Refill, Attach resume, Pop out,
  * Close) and a paste box, or what is happening instead (rebuilding, failed, closed).
  */
-export function LivePanel(props: { job: Job; state: PanelState; popOut: boolean }) {
+export function LivePanel(props: { job: Job; state: PanelState }) {
   const { job, state } = props;
   const id = enc(job.id);
   const head = (
@@ -96,7 +97,8 @@ export function LivePanel(props: { job: Job; state: PanelState; popOut: boolean 
         <div class="live-tools">
           <button class="tertiary" hx-post={`/live/${id}/refill`} hx-target="#live-msg" hx-swap="innerHTML">Refill from my answers</button>
           <button class="tertiary" hx-post={`/live/${id}/attach-resume`} hx-target="#live-msg" hx-swap="innerHTML">Attach resume</button>
-          {props.popOut ? <button class="tertiary" hx-post={`/live/${id}/pop-out`} hx-target="#live-panel" hx-swap="outerHTML">Pop out</button> : null}
+          <button class="tertiary" hx-post={`/live/${id}/pop-out`} hx-target="#live-msg" hx-swap="innerHTML"
+            title="Show this application's tab in the Chrome window">Pop out</button>
           <button class="tertiary" hx-post={`/live/${id}/close`} hx-target="#live-panel" hx-swap="outerHTML">Close</button>
         </div>
       </div>
@@ -119,11 +121,8 @@ export function LivePanel(props: { job: Job; state: PanelState; popOut: boolean 
 /** Renders the panel fragment for the job (used by htmx). */
 async function panelHtml(db: Db, live: LiveControl, jobId: string, opts: { start: boolean; requested?: readonly string[] }) {
   const job = getJob(db, jobId)!;
-  return <LivePanel job={job} state={await panelState(live, jobId, opts)} popOut={canPopOut(db, jobId)} />;
+  return <LivePanel job={job} state={await panelState(live, jobId, opts)} />;
 }
-
-/** "Pop out" re-opens the job in a visible window: by hand-finish, or Do it now for a CAPTCHA, code or login. */
-const canPopOut = (db: Db, jobId: string) => canHandFinish(db, jobId) || canDoItNow(db, jobId);
 
 const isInput = (e: unknown): e is LiveInput => {
   if (!e || typeof e !== "object") return false;
@@ -135,9 +134,7 @@ const isInput = (e: unknown): e is LiveInput => {
  * The live view's endpoints, all for jobs the live view may show (canOpenLive; 409 otherwise): the panel fragment, a
  * rebuild, the screen stream (Server-Sent Events), input, refill, attach resume, pop out and close.
  */
-export function liveRoutes(app: Hono, ctx: {
-  db: Db; live: LiveControl; requestedRuns?(): readonly string[]; runHandFinish(jobId: string): void; runInteractive(jobId: string): void;
-}) {
+export function liveRoutes(app: Hono, ctx: { db: Db; live: LiveControl; requestedRuns?(): readonly string[] }) {
   const { db, live } = ctx;
   const check = (jobId: string): [string, 404 | 409] | null => {
     const job = getJob(db, jobId);
@@ -250,11 +247,9 @@ export function liveRoutes(app: Hono, ctx: {
     const id = c.req.param("id");
     const bad = check(id);
     if (bad) return c.text(...bad);
-    const run = canHandFinish(db, id) ? ctx.runHandFinish : canDoItNow(db, id) ? ctx.runInteractive : null;
-    if (!run) return c.text("This application can't be opened in a window", 409);
-    await live.close(id);
-    run(id);
-    return c.html(<LivePanel job={getJob(db, id)!} state={{ kind: "opening" }} popOut={false} />);
+    // The application is a tab of the app's Chrome window: bring it forward there (no second browser).
+    if (!(await live.front(id).catch(() => false))) return c.text("The application isn't open", 409);
+    return c.html(<>Brought to the front of the Chrome window.</>);
   });
 
   app.post("/live/:id/close", async c => {

@@ -244,14 +244,14 @@ export function JobDetailPage(props: { db: Db; job: Job; notice?: string; live?:
           <p class="meta" style="margin-top:10px">
             Finish the application in the panel below: everything the app knows is filled in and the fields left for you are
             outlined. What you type is saved as you go, and once you press the site's own submit button it's recorded and your
-            answers are saved to your answer bank. Pop out opens it in a separate browser window instead.
+            answers are saved to your answer bank. Pop out brings its tab to the front of the Chrome window instead.
           </p>
         ) : null}
       </section>
       {live ? (
         <>
           <style>{raw(LIVE_CSS)}</style>
-          <LivePanel job={job} state={live} popOut={canHandFinish(db, job.id) || canDoItNow(db, job.id)} />
+          <LivePanel job={job} state={live} />
           <script>{raw(LIVE_SCRIPT)}</script>
         </>
       ) : null}

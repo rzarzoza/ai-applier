@@ -59,7 +59,7 @@ test("at most 10 pages stay parked: the 11th closes the least recently viewed", 
   const fake: AtsHandler = { ...miniAtsHandler };
   const pages: Page[] = [];
   for (let i = 0; i < 11; i++) {
-    const session = await s.manager.open({ headless: true });
+    const session = await s.manager.open();
     pages.push(session.page);
     expect(session.park!(`job-${i}`, { handler: fake, fields: [], resolutions: [], watch: [], notes: [] })).toBe(true);
     if (i === 9) s.manager.touch("job-0"); // job-0 was just viewed: job-1 is now the least recently viewed

@@ -37,7 +37,7 @@ export async function launchBrowser(): Promise<Browser> {
 }
 
 /**
- * A database, a SessionManager whose shared and "visible" contexts live in `browser`, a LiveService polling every
+ * A database, a SessionManager whose shared context lives in `browser`, a LiveService polling every
  * 50ms, and runner deps using them. `pages` lists every page the manager handed out.
  */
 export function liveSetup(browser: Browser, opts: { cap?: number } = {}) {
@@ -53,7 +53,7 @@ export function liveSetup(browser: Browser, opts: { cap?: number } = {}) {
       ctx.on("page", p => pages.push(p));
       return ctx;
     },
-    launchVisible: () => chromium.launch(),
+    keepLastTab: false,
   });
   const submitted: string[] = [];
   const deps: RunnerDeps = {

@@ -154,9 +154,11 @@ export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "a
   const userPresent = mode !== "auto" && !rebuild;
   /** Fill what the app can and leave the rest to the user, never submitting (hand-finish and rebuild). */
   const hand = mode === "hand-finish" || rebuild;
-  // With a live view, the user sees and drives the page in the dashboard: only Pop out and Do it now need a window.
-  const visible = mode === "hand-finish" || mode === "interactive" ||
-    (!deps.browser.keepsPages && !rebuild && (mode === "submit-reviewed" || !getSettings(db).headless));
+  // The user is at the browser for these runs: their tab comes to the front of the window.
+  const front = mode === "hand-finish" || mode === "interactive";
+  // Whether to wait here for the user to solve a CAPTCHA or enter a code. With a live view, a run hands the page over
+  // instead (the user deals with it in the dashboard or the Chrome window) unless the user is already at it.
+  const waitsForUser = front || (!deps.browser.keepsPages && !rebuild);
   /** Set once a rebuild filled and highlighted the form: only then is its page worth parking. */
   let rebuilt = false;
   const startedAt = deps.now().toISOString();
@@ -237,7 +239,7 @@ export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "a
     step("Opening application");
     const settings = getSettings(db);
     try {
-      session = await deps.browser.open({ headless: !visible });
+      session = await deps.browser.open({ front });
     } catch (err) {
       throw new SetupError(`The browser could not start: ${errorMessage(err)}`);
     }
@@ -643,8 +645,8 @@ export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "a
       await deps.notify("AI Applier needs you", `${job.company}: ${human.ask} in the browser window`);
       resolveNeedsYouForJob(db, job.id);
       addNeedsYou(db, { jobId: job.id, kind: human.kind, message: `${job.company} · ${job.title}: ${human.ask}` });
-      // Nobody can solve anything in a hidden browser: hand it to the user right away (the live view shows it).
-      if (!visible) return await end("needs-you", human.reason);
+      // Nobody is at the tab: hand it to the user right away (the live view and the Chrome window show it).
+      if (!waitsForUser) return await end("needs-you", human.reason);
       const humanWait = deps.humanWaitMs ?? HUMAN_WAIT_MS;
       step("Waiting for you (CAPTCHA/code)");
       outcome = await pollOutcome(handler, page, userPresent ? Math.max(humanWait, INTERACTIVE_WAIT_MS) : humanWait, pollMs,

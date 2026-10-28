@@ -10,7 +10,7 @@ import type { Job } from "../../src/jobs/types.js";
 import { saveProfile, type Profile } from "../../src/profile/profile.js";
 import { getRunnerHalt, getSettings, saveSettings } from "../../src/settings.js";
 import type { Posting } from "../../src/sources/types.js";
-import { persistentChromium, type BrowserProvider } from "../../src/runner/browser.js";
+import type { BrowserProvider } from "../../src/runner/browser.js";
 import { notificationScript } from "../../src/runner/notify.js";
 import { listRecords } from "../../src/runner/records.js";
 import type { Resolution } from "../../src/answers/resolve.js";
@@ -26,10 +26,10 @@ import { fixtureSubmitCount, miniAts, miniAtsHandler } from "../helpers/mini-ats
 
 // --- a throwaway headless browser per run; every request not served by the mini handler is aborted ---
 let browser: Browser;
-let opened: { headless: boolean }[];
+let opened: { front?: boolean }[];
 let lastPage: Page | null;
 const provider: BrowserProvider = {
-  async open(opts) {
+  async open(opts = {}) {
     opened.push(opts);
     const context = await browser.newContext();
     await context.route("**/*", r => r.abort());
@@ -130,7 +130,7 @@ test("auto mode fills and submits; record saved", async () => {
   ]));
   expect(record.answers).toHaveLength(5); // the optional project question and SMS opt-in stay blank
   expect(readdirSync(dir).filter(f => f.endsWith(".png"))).toHaveLength(2); // filled form + confirmation
-  expect(opened).toEqual([{ headless: false }]);
+  expect(opened).toEqual([{ front: false }]);
   expect(lastPage!.isClosed()).toBe(true);
 });
 
@@ -567,15 +567,15 @@ test("captcha solved by the user while waiting → submitted and needs-you resol
   expect(listRecords(captchaJob.id)).toHaveLength(1);
 });
 
-test("interactive and submit-reviewed open a visible browser; interactive still stops for review", async () => {
-  saveSettings(db, { headless: true, reviewMode: "all" });
+test("interactive brings its tab to the front; interactive still stops for review", async () => {
+  saveSettings(db, { reviewMode: "all" });
   expect(await runJob(deps, job.id, "interactive")).toBe("ready-to-review");
   expect(fixtureSubmitCount()).toBe(0);
   expect(await runJob(deps, job.id, "submit-reviewed")).toBe("submitted");
   saveSettings(db, { reviewMode: "off" });
   const other = addJob("https://mini-ats.test/apply?other=1");
   expect(await runJob(deps, other.id)).toBe("submitted");
-  expect(opened).toEqual([{ headless: false }, { headless: false }, { headless: true }]);
+  expect(opened).toEqual([{ front: true }, { front: false }, { front: false }]);
 });
 
 test("jobs that are done or set aside are never run again", async () => {
@@ -599,11 +599,10 @@ test("submit-reviewed only runs a job that is awaiting review", async () => {
   expect(getJob(db, job.id)!.attempts).toBe(0);
 });
 
-test("headless captcha goes straight to needs-you without waiting", async () => {
-  saveSettings(db, { headless: true });
+test("with a live view, an auto run's captcha goes straight to needs-you without waiting", async () => {
   const captchaJob = addJob("https://mini-ats.test/apply?captcha=1");
   const started = Date.now();
-  expect(await runJob({ ...deps, humanWaitMs: 20_000 }, captchaJob.id)).toBe("needs-you");
+  expect(await runJob({ ...deps, browser: { ...provider, keepsPages: true }, humanWaitMs: 20_000 }, captchaJob.id)).toBe("needs-you");
   expect(Date.now() - started).toBeLessThan(10_000);
   expect(notifications).toHaveLength(1);
   expect(listOpenNeedsYou(db).map(n => n.kind)).toEqual(["captcha"]);
@@ -818,14 +817,6 @@ test("runNext with no API key pauses instead of taking a job", async () => {
 
 test("notification script quotes title and message for AppleScript", () => {
   expect(notificationScript('Say "hi"', "back\\slash")).toBe('display notification "back\\\\slash" with title "Say \\"hi\\""');
-});
-
-test("persistent Chromium opens a page in the profile directory and closes", async () => {
-  const { page, close } = await persistentChromium.open({ headless: true });
-  await page.setContent("<p>ok</p>");
-  expect(await page.locator("p").innerText()).toBe("ok");
-  await close();
-  expect(page.isClosed()).toBe(true);
 });
 
 test("runner records resume_used and cover_letter_used on submit and calls onSubmitted", async () => {
@@ -1089,7 +1080,7 @@ test("hand-finish fills what it can, highlights the open questions without typin
   expect(Object.values(answers).find(q => /phone/i.test(q.canonical))).toMatchObject({ status: "approved", answer: "5559876543" });
   const record = JSON.parse(readFileSync(path.join(listRecords(j.id)[0]!, "record.json"), "utf8"));
   expect(record.answers).toEqual(expect.arrayContaining([{ label: "Phone", value: "5559876543", source: "you" }]));
-  expect(opened).toEqual([{ headless: false }]);
+  expect(opened).toEqual([{ front: true }]);
   expect(lastPage!.isClosed()).toBe(true);
   expect(getRunnerCurrent(db)).toBeNull();
 });

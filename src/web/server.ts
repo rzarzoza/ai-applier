@@ -27,7 +27,7 @@ import { BankPage } from "./pages/bank.js";
 import { PROFILE_FIELDS, ProfilePage } from "./pages/profile.js";
 import { SettingsPage } from "./pages/settings.js";
 import { PreviewFragment, SourcesPage, parseFilterForm, previewCount } from "./pages/sources.js";
-import { ApproveSuggestionsPage, CardFragment, InboxPage, OpeningBrowser, OpeningHandFinish, SavedNotice } from "./pages/inbox.js";
+import { ApproveSuggestionsPage, BroughtToFront, CardFragment, InboxPage, OpeningBrowser, OpeningHandFinish, SavedNotice } from "./pages/inbox.js";
 import { HomeLists, HomePage, NowCard } from "./pages/home.js";
 import { liveRoutes, panelState, type LiveControl } from "./live.js";
 
@@ -109,11 +109,12 @@ export function createApp(ctx: AppContext): Hono {
   app.get("/home/now", c => c.html(NowCard(home())));
   app.get("/home/lists", c => c.html(HomeLists(home())));
 
-  app.post("/applications/:id/hand-finish", c => {
+  app.post("/applications/:id/hand-finish", async c => {
     const jobId = c.req.param("id");
     if (!getJob(db, jobId)) return c.text("Unknown job", 404);
     if (!canHandFinish(db, jobId))
       return c.text("Only a job waiting for your input can be finished by hand (a CAPTCHA, code or login uses Do it now; a possibly sent application needs checking first)", 409);
+    if (await ctx.live?.front(jobId).catch(() => false)) return c.html(BroughtToFront());
     ctx.runHandFinish(jobId);
     return c.html(OpeningHandFinish());
   });
@@ -186,10 +187,12 @@ export function createApp(ctx: AppContext): Hono {
     return c.html(card(id));
   });
 
-  app.post("/needs-you/:jobId/do-it-now", c => {
+  app.post("/needs-you/:jobId/do-it-now", async c => {
     const jobId = c.req.param("jobId");
     if (!getJob(db, jobId)) return c.text("Unknown job", 404);
     if (!canDoItNow(db, jobId)) return c.text("This job is not waiting for a CAPTCHA, code or login — open it instead", 409);
+    // Its page is still open as a tab of the app's Chrome window: bring that forward instead of opening it again.
+    if (await ctx.live?.front(jobId).catch(() => false)) return c.html(BroughtToFront());
     ctx.runInteractive(jobId);
     return c.html(OpeningBrowser());
   });
@@ -442,7 +445,7 @@ export function createApp(ctx: AppContext): Hono {
     const limit = limitRaw === "" ? null : Number(limitRaw);
     if (limit !== null && (!Number.isInteger(limit) || limit < 1)) return c.text("Daily limit must be a whole number of at least 1", 400);
     const patch: Partial<Settings> = {
-      reviewMode: mode, dailyLimit: limit, pollMinutes: poll, headless: !!str(form.headless), paused: !!str(form.paused),
+      reviewMode: mode, dailyLimit: limit, pollMinutes: poll, paused: !!str(form.paused),
       reviewCompanies: str(form.reviewCompanies).split(",").map(s => s.trim()).filter(Boolean),
     };
     saveSettings(db, patch);

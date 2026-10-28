@@ -16,7 +16,6 @@ export interface Settings {
   reviewCompanies: string[];
   dailyLimit: number | null;
   pollMinutes: number;
-  headless: boolean;
   paused: boolean;
 }
 
@@ -25,14 +24,15 @@ export const DEFAULT_SETTINGS: Settings = {
   reviewCompanies: [],
   dailyLimit: null,
   pollMinutes: 30,
-  headless: false,
   paused: false,
 };
 
 const SETTINGS_KEY = "settings";
 
 export function getSettings(db: Db): Settings {
-  return { ...DEFAULT_SETTINGS, ...getJson<Partial<Settings>>(db, SETTINGS_KEY, {}) };
+  // The browser is always a visible Chrome window now: an older "headless" setting is ignored (and dropped on save).
+  const { headless: _headless, ...stored } = getJson<Partial<Settings> & { headless?: unknown }>(db, SETTINGS_KEY, {});
+  return { ...DEFAULT_SETTINGS, ...stored };
 }
 
 const HALT_KEY = "runnerHalt";
