@@ -27,6 +27,17 @@ export function canDoItNow(db: Db, jobId: string): boolean {
 }
 
 /**
+ * Whether "Open & finish" may open the job's form for the user to complete and submit by hand: it is waiting on the
+ * user (needs-you), its application was not possibly sent already, and it is not waiting for a CAPTCHA, code or login
+ * (those use "Do it now").
+ */
+export function canHandFinish(db: Db, jobId: string): boolean {
+  const job = getJob(db, jobId);
+  if (!job || job.status !== "needs-you" || isUnknownSubmission(job)) return false;
+  return !openNeedsYouForJob(db, jobId).some(n => AT_THE_BROWSER.has(n.kind));
+}
+
+/**
  * A job a question blocks, with the blocking field exactly as the form shows it: label, kind, options,
  * and description (section heading or helper text). Label and kind are null on blockers stored before
  * they were recorded; description is null when the form has none.

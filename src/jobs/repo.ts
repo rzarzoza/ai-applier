@@ -40,8 +40,14 @@ export const RESUME_NEEDED = "Upload your resume in Profile";
 /** The needs-you reason for a job whose application may already have gone out. */
 export const UNKNOWN_SUBMISSION = "Submission state unknown — check before retrying";
 export const UNKNOWN_SUBMISSION_PREFIX = "Submission state unknown";
+/**
+ * The needs-you reason of a job the user finished by hand ("Open & finish") whose page never confirmed the submission
+ * although the form may have been sent. It counts as a possibly sent application, like UNKNOWN_SUBMISSION.
+ */
+export const HAND_UNCONFIRMED = "Finished by hand? Not confirmed — check before retrying";
 /** Its application may have been sent: never re-run it without the user confirming it wasn't. */
-export const isUnknownSubmission = (j: Job) => j.status === "needs-you" && !!j.statusReason?.startsWith(UNKNOWN_SUBMISSION_PREFIX);
+export const isUnknownSubmission = (j: Job) =>
+  j.status === "needs-you" && (!!j.statusReason?.startsWith(UNKNOWN_SUBMISSION_PREFIX) || j.statusReason === HAND_UNCONFIRMED);
 
 export function getJob(db: Db, id: string): Job | null {
   const r = db.prepare("SELECT * FROM jobs WHERE id = ?").get(id) as Row | undefined;
@@ -114,9 +120,23 @@ export function decrementAttempts(db: Db, id: string): void {
   db.prepare("UPDATE jobs SET attempts = MAX(attempts - 1, 0), updated_at = ? WHERE id = ?").run(touch(), id);
 }
 
+/** The runner's order for queued jobs: newest posting first. */
+const QUEUE_ORDER = "ORDER BY date_posted DESC, rowid ASC";
+
 export function nextQueued(db: Db): Job | null {
-  const r = db.prepare("SELECT * FROM jobs WHERE status = 'queued' ORDER BY date_posted DESC, rowid ASC LIMIT 1").get() as Row | undefined;
+  const r = db.prepare(`SELECT * FROM jobs WHERE status = 'queued' ${QUEUE_ORDER} LIMIT 1`).get() as Row | undefined;
   return r ? toJob(r) : null;
+}
+
+/** The next `limit` queued jobs, in the order the runner takes them. */
+export function upNext(db: Db, limit: number): Job[] {
+  return (db.prepare(`SELECT * FROM jobs WHERE status = 'queued' ${QUEUE_ORDER} LIMIT ?`).all(limit) as unknown as Row[]).map(toJob);
+}
+
+/** Jobs in the status, most recently changed first. */
+export function recentWithStatus(db: Db, status: JobStatus, limit: number): Job[] {
+  const order = status === "submitted" ? "submitted_at DESC, updated_at DESC" : "updated_at DESC";
+  return (db.prepare(`SELECT * FROM jobs WHERE status = ? ORDER BY ${order}, rowid DESC LIMIT ?`).all(status, limit) as unknown as Row[]).map(toJob);
 }
 
 /** Jobs set aside as duplicates of the role, still listed by their source, oldest first. */
@@ -139,7 +159,7 @@ export function submittedSince(db: Db, since: Date): number {
 /** Whether an application to the company went out: submitted, applied manually, or possibly sent (state unknown). */
 export function hasSubmittedToCompany(db: Db, company: string): boolean {
   const r = db.prepare(`SELECT 1 AS x FROM jobs WHERE lower(company) = lower(?) AND (status IN ('submitted', 'applied-manually')
-      OR (status = 'needs-you' AND substr(status_reason, 1, ?) = ?)) LIMIT 1`)
-    .get(company, UNKNOWN_SUBMISSION_PREFIX.length, UNKNOWN_SUBMISSION_PREFIX);
+      OR (status = 'needs-you' AND (substr(status_reason, 1, ?) = ? OR status_reason = ?))) LIMIT 1`)
+    .get(company, UNKNOWN_SUBMISSION_PREFIX.length, UNKNOWN_SUBMISSION_PREFIX, HAND_UNCONFIRMED);
   return r !== undefined;
 }

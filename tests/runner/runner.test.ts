@@ -5,7 +5,7 @@ import { chromium, type Browser, type Page } from "playwright";
 import { openDb, type Db } from "../../src/db/db.js";
 import { addBlocker, addNeedsYou, approveAnswer, blockersForJob, createQuestion, listOpenNeedsYou, listQuestions, setOverride } from "../../src/answers/bank.js";
 import { paths } from "../../src/paths.js";
-import { getJob, setStatus, upsertPosting } from "../../src/jobs/repo.js";
+import { getJob, isUnknownSubmission, setStatus, upsertPosting } from "../../src/jobs/repo.js";
 import type { Job } from "../../src/jobs/types.js";
 import { saveProfile, type Profile } from "../../src/profile/profile.js";
 import { getRunnerHalt, getSettings, saveSettings } from "../../src/settings.js";
@@ -17,7 +17,8 @@ import type { Resolution } from "../../src/answers/resolve.js";
 import type { FieldAnswer, FieldSpec } from "../../src/forms/types.js";
 import { fillOrder, runJob, runNext, usedDocuments, type RunnerDeps } from "../../src/runner/runner.js";
 import Anthropic from "@anthropic-ai/sdk";
-import { inboxItems } from "../../src/answers/inbox.js";
+import { canHandFinish, inboxItems } from "../../src/answers/inbox.js";
+import { getRunnerCurrent } from "../../src/runner/current.js";
 import { inPage } from "../../src/forms/in-page.js";
 import { LlmOutputError } from "../../src/llm/llm.js";
 import { FakeLlm } from "../helpers/fake-llm.js";
@@ -939,4 +940,179 @@ test("a work-authorization question offering Other never picks it, even when the
   expect(picked(attempts, AUTH)).toEqual(["Authorized via OPT"]);
   expect(llm.calls.filter(c => c.name === "variants")).toHaveLength(0);
   expect(fixtureSubmitCount()).toBe(0);
+});
+
+// --- the dashboard's "Applying now" step tracking ---
+
+test("the runner records its current job and step while it runs, and clears them at the end", async () => {
+  const seen: (string | undefined)[] = [];
+  const at = () => { const c = getRunnerCurrent(db); seen.push(c?.step); expect(c?.jobId).toBe(job.id); };
+  llm.on("classify", req => { at(); return classifyBy()(req); });
+  deps.handlers = [{
+    ...miniAtsHandler,
+    async open(page, url) { at(); return miniAtsHandler.open(page, url); },
+    async readFields(page) { at(); return miniAtsHandler.readFields(page); },
+    async fill(page, field, answer) { at(); return miniAtsHandler.fill(page, field, answer); },
+    async readBack(page, field) { at(); return miniAtsHandler.readBack(page, field); },
+    async submit(page) { at(); return miniAtsHandler.submit(page); },
+    async outcome(page) { at(); return miniAtsHandler.outcome(page); },
+  }];
+  expect(await runJob(deps, job.id)).toBe("submitted");
+  const steps = seen.filter((s, i) => s !== seen[i - 1]);
+  expect(steps).toEqual(["Opening application", "Reading the form", "Working out answers", "Filling fields", "Checking answers",
+    "Submitting", "Waiting for confirmation"]);
+  expect(getRunnerCurrent(db)).toBeNull();
+  expect(db.prepare("SELECT 1 FROM kv WHERE key = 'runnerCurrent'").get()).toBeUndefined();
+});
+
+test("the current step is cleared even when a run fails, and the resume upload and human wait have their own steps", async () => {
+  const failing = addJob("https://mini-ats.test/empty");
+  expect(await runJob(deps, failing.id)).toBe("failed");
+  expect(getRunnerCurrent(db)).toBeNull();
+
+  withResume();
+  const steps: string[] = [];
+  const captchaJob = addJob("https://mini-ats.test/apply?file=Resume%2FCV&captcha=1");
+  deps.handlers = [{ ...miniAtsHandler, async afterUpload(page) { steps.push(getRunnerCurrent(db)!.step); return miniAtsHandler.afterUpload!(page); } }];
+  const run = { ...deps, humanWaitMs: 400, notify: async () => { setTimeout(() => steps.push(getRunnerCurrent(db)!.step), 100); } };
+  expect(await runJob(run, captchaJob.id)).toBe("needs-you");
+  expect(steps).toEqual(["Uploading resume", "Waiting for you (CAPTCHA/code)"]);
+  expect(getRunnerCurrent(db)).toBeNull();
+});
+
+// --- "Open & finish": the user completes a needs-you form by hand ---
+
+/** Resolves once the run is waiting for the user to finish the form. */
+async function untilWaitingForUser(jobId: string): Promise<Page> {
+  for (let i = 0; i < 400; i++) {
+    const c = getRunnerCurrent(db);
+    if (c?.jobId === jobId && c.step === "Waiting for you to finish and submit" && lastPage) return lastPage;
+    await new Promise(r => setTimeout(r, 25));
+  }
+  throw new Error("the run never started waiting for the user");
+}
+const outline = (page: Page, sel: string) => page.locator(sel).evaluate(inPage((e: HTMLElement) => e.style.outline));
+
+/** A needs-you job whose relocation and phone questions only the user can answer. */
+function needsYouJob(url = "https://mini-ats.test/apply"): { job: Job; spy: { submits: number; fills: string[] } } {
+  saveProfile(db, { willingToRelocate: null, phone: null });
+  const j = addJob(url);
+  setStatus(db, j.id, "needs-you", "2 questions need you");
+  addNeedsYou(db, { jobId: j.id, kind: "other", message: "Mini Co · Software Engineer Intern: questions need you" });
+  const spy = { submits: 0, fills: [] as string[] };
+  deps.handlers = [{
+    ...miniAtsHandler,
+    async fill(page, field, answer) { spy.fills.push(field.label); return miniAtsHandler.fill(page, field, answer); },
+    async submit(page) { spy.submits++; return miniAtsHandler.submit(page); },
+  }];
+  return { job: getJob(db, j.id)!, spy };
+}
+
+test("hand-finish fills what it can, highlights the open questions without typing in them, and the user's submission is recorded and learned", async () => {
+  const { job: j, spy } = needsYouJob();
+  const hand = { ...deps, pollMs: 50, handFinishWaitMs: 20_000 };
+  const running = runJob(hand, j.id, "hand-finish");
+  const page = await untilWaitingForUser(j.id);
+
+  // Answered fields are filled; the two open questions are outlined and left empty.
+  expect(await page.locator("#first").inputValue()).toBe("Luis");
+  expect(await outline(page, "#reloc")).toContain("solid");
+  expect(await outline(page, "#phone")).toContain("solid");
+  expect(await outline(page, "#first")).toBe("");
+  expect(await page.locator("#reloc").inputValue()).toBe("");
+  expect(await page.locator("#phone").inputValue()).toBe("");
+  expect(spy.fills).not.toContain("Are you willing to relocate?");
+  expect(spy.fills).not.toContain("Phone");
+  expect(getJob(db, j.id)!.status).toBe("filling");
+
+  // The user answers and clicks the site's own submit button.
+  await page.locator("#reloc").selectOption({ label: "No" });
+  await page.locator("#phone").fill("5559876543");
+  await new Promise(r => setTimeout(r, 150));
+  await page.locator("#submit").click();
+
+  expect(await running).toBe("submitted");
+  expect(spy.submits).toBe(0);
+  expect(miniAts.submissions).toEqual([expect.objectContaining({ first: "Luis", reloc: "n", phone: "5559876543", certify: "on" })]);
+  expect(getJob(db, j.id)).toMatchObject({ status: "submitted" });
+  expect(listOpenNeedsYou(db)).toEqual([]);
+  expect(db.prepare("SELECT COUNT(*) AS n FROM needs_you WHERE job_id = ? AND resolved = 0").get(j.id)).toEqual({ n: 0 });
+  const answers = Object.fromEntries(listQuestions(db).map(q => [q.canonical, q]));
+  expect(answers["Are you willing to relocate?"]).toMatchObject({ status: "approved", answer: "No" });
+  expect(Object.values(answers).find(q => /phone/i.test(q.canonical))).toMatchObject({ status: "approved", answer: "5559876543" });
+  const record = JSON.parse(readFileSync(path.join(listRecords(j.id)[0]!, "record.json"), "utf8"));
+  expect(record.answers).toEqual(expect.arrayContaining([{ label: "Phone", value: "5559876543", source: "you" }]));
+  expect(opened).toEqual([{ headless: false }]);
+  expect(lastPage!.isClosed()).toBe(true);
+  expect(getRunnerCurrent(db)).toBeNull();
+});
+
+test("hand-finish answers free other jobs blocked on the same questions", async () => {
+  const { job: j } = needsYouJob();
+  const other = addJob("https://mini-ats.test/apply?other=2");
+  const hand = { ...deps, pollMs: 50, handFinishWaitMs: 20_000 };
+  // Block the other job on the same questions by running it once.
+  expect(await runJob(deps, other.id)).toBe("needs-you");
+  const running = runJob(hand, j.id, "hand-finish");
+  const page = await untilWaitingForUser(j.id);
+  await page.locator("#reloc").selectOption({ label: "Yes" });
+  await page.locator("#phone").fill("5559876543");
+  await new Promise(r => setTimeout(r, 150));
+  await page.locator("#submit").click();
+  expect(await running).toBe("submitted");
+  expect(getJob(db, other.id)!.status).toBe("queued");
+});
+
+test("closing the window before submitting leaves the job waiting on the user, learning nothing", async () => {
+  const { job: j, spy } = needsYouJob();
+  const running = runJob({ ...deps, pollMs: 50, handFinishWaitMs: 20_000 }, j.id, "hand-finish");
+  const page = await untilWaitingForUser(j.id);
+  await page.locator("#phone").fill("5550000000");
+  await new Promise(r => setTimeout(r, 150));
+  await page.close();
+  expect(await running).toBe("needs-you");
+  expect(getJob(db, j.id)!.statusReason).toBe("Closed before submitting");
+  expect(spy.submits).toBe(0);
+  expect(fixtureSubmitCount()).toBe(0);
+  expect(listQuestions(db).filter(q => q.status === "approved")).toEqual([]);
+  // The open questions still show in the inbox, and the job can be finished by hand again.
+  expect(blockersForJob(db, j.id)).toHaveLength(2);
+  expect(inboxItems(db).flatMap(i => i.jobs.map(x => x.id))).toContain(j.id);
+  expect(canHandFinish(db, j.id)).toBe(true);
+});
+
+test("a window closed after the form may have been sent is flagged as possibly sent, never finishable again", async () => {
+  const { job: j } = needsYouJob("https://mini-ats.test/apply?oops=1");
+  const running = runJob({ ...deps, pollMs: 50, handFinishWaitMs: 20_000 }, j.id, "hand-finish");
+  const page = await untilWaitingForUser(j.id);
+  await page.locator("#reloc").selectOption({ label: "Yes" });
+  await page.locator("#phone").fill("5559876543");
+  await page.locator("#submit").click();
+  await new Promise(r => setTimeout(r, 200));
+  await page.close();
+  expect(await running).toBe("needs-you");
+  const after = getJob(db, j.id)!;
+  expect(after.statusReason).toBe("Finished by hand? Not confirmed — check before retrying");
+  expect(isUnknownSubmission(after)).toBe(true);
+  expect(canHandFinish(db, j.id)).toBe(false);
+  expect(listOpenNeedsYou(db).map(n => n.message).join()).toContain("Finished by hand? Not confirmed");
+  expect(listQuestions(db).filter(q => q.status === "approved")).toEqual([]);
+});
+
+test("hand-finish times out into the same endings", async () => {
+  const { job: j } = needsYouJob();
+  expect(await runJob({ ...deps, pollMs: 50, handFinishWaitMs: 300 }, j.id, "hand-finish")).toBe("needs-you");
+  expect(getJob(db, j.id)!.statusReason).toBe("Closed before submitting");
+});
+
+test("hand-finish only runs jobs waiting on the user's input, never a possibly sent one or one waiting for a CAPTCHA", async () => {
+  setStatus(db, job.id, "queued");
+  expect(await runJob(deps, job.id, "hand-finish")).toBe("queued");
+  setStatus(db, job.id, "needs-you", "Submission state unknown — check before retrying");
+  expect(await runJob(deps, job.id, "hand-finish")).toBe("needs-you");
+  setStatus(db, job.id, "needs-you", "CAPTCHA");
+  addNeedsYou(db, { jobId: job.id, kind: "captcha", message: "solve" });
+  expect(await runJob(deps, job.id, "hand-finish")).toBe("needs-you");
+  expect(opened).toEqual([]);
+  expect(getJob(db, job.id)!.attempts).toBe(0);
 });

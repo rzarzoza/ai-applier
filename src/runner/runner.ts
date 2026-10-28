@@ -1,18 +1,20 @@
 import path from "node:path";
-import type { Page } from "playwright";
-import { addBlocker, addNeedsYou, clearBlockersForJob, getOverrides, resolveNeedsYouForJob } from "../answers/bank.js";
+import type { Frame, Page, Request } from "playwright";
+import { addBlocker, addNeedsYou, clearBlockersForJob, getOverrides, getQuestion, resolveNeedsYouForJob } from "../answers/bank.js";
 import { adaptAnswer, nameVariants, pickOption } from "../answers/adapt.js";
-import { normalizeLabel } from "../answers/classify.js";
+import { normalizeLabel, withCompanyPlaceholder } from "../answers/classify.js";
+import { answerQuestion, canHandFinish } from "../answers/inbox.js";
 import { distinctiveWords, findOtherOption, followUpBox, isOtherOption, looksLikeFollowUp, otherEligible } from "../answers/other.js";
 import { resolveFields, type Extra, type FillSource, type Preset, type Resolution } from "../answers/resolve.js";
 import { atsNameFromUrl, detectAts, HANDLERS } from "../ats/registry.js";
 import type { AtsHandler, OpenResult, SubmitOutcome } from "../ats/types.js";
 import type { Db } from "../db/db.js";
 import { readOptions as readOptionsField } from "../forms/fill.js";
+import { inPage } from "../forms/in-page.js";
 import type { FieldAnswer, FieldSpec, JobContext } from "../forms/types.js";
 import {
-  decrementAttempts, getJob, incrementAttempts, isUnknownSubmission, nextQueued, RESUME_NEEDED, setAts, setStatus, setUsedDocuments,
-  submittedSince, UNKNOWN_SUBMISSION,
+  decrementAttempts, getJob, HAND_UNCONFIRMED, incrementAttempts, isUnknownSubmission, nextQueued, RESUME_NEEDED, setAts, setStatus,
+  setUsedDocuments, submittedSince, UNKNOWN_SUBMISSION,
 } from "../jobs/repo.js";
 import type { Job, JobStatus } from "../jobs/types.js";
 import { llmHaltReason, type Llm } from "../llm/llm.js";
@@ -20,6 +22,7 @@ import { getFilters } from "../filters/filters.js";
 import { getSettings, haltRunner, type Settings } from "../settings.js";
 import { recheckQueued } from "../sources/poller.js";
 import type { BrowserProvider } from "./browser.js";
+import { clearRunnerCurrent, getRunnerCurrent, setRunnerCurrent, type RunnerStep } from "./current.js";
 import { getSnapshot, saveRecord, saveSnapshot, type Snapshot } from "./records.js";
 
 export interface RunnerDeps {
@@ -34,6 +37,8 @@ export interface RunnerDeps {
   pollMs?: number; // default 5_000
   /** How long to wait for the page to confirm a submission. */
   submitWaitMs?: number; // default 30_000
+  /** In "hand-finish" mode, how long to wait for the user to complete the form and submit it. */
+  handFinishWaitMs?: number; // default 30 minutes
   /** Called after a job ends submitted or applied-manually (e.g. to sync the tracker). Must not block; errors are ignored. */
   onSubmitted?(jobId: string): void;
   /** Whether an Anthropic API key is available; when it says no, `runNext` pauses instead of taking a job. */
@@ -43,13 +48,22 @@ export interface RunnerDeps {
 /** A problem outside the job (the browser can't start) that would fail every job the same way. */
 class SetupError extends Error {}
 
-export type RunMode = "auto" | "submit-reviewed" | "interactive";
+/**
+ * "hand-finish" opens the form of a job waiting on the user, fills what the app can, highlights what is left, and waits
+ * for the user to finish and click the site's own submit button: the app never submits in this mode.
+ */
+export type RunMode = "auto" | "submit-reviewed" | "interactive" | "hand-finish";
 
 const HUMAN_WAIT_MS = 600_000;
 const POLL_MS = 5_000;
 const SUBMIT_WAIT_MS = 30_000;
 /** In interactive mode the user is at the browser, so wait much longer for them. */
 const INTERACTIVE_WAIT_MS = 60 * 60_000;
+/** How long "hand-finish" waits for the user to submit, and how often it checks the page meanwhile. */
+const HAND_FINISH_WAIT_MS = 30 * 60_000;
+const HAND_POLL_MS = 3_000;
+/** The needs-you reason of a hand-finish run whose window was closed (or timed out) before anything was sent. */
+export const CLOSED_BEFORE_SUBMITTING = "Closed before submitting";
 
 type Filled = Extract<Resolution, { status: "filled" }>;
 type HumanStep = Extract<SubmitOutcome, { kind: "captcha" | "verification-code" }>["kind"];
@@ -97,7 +111,9 @@ const couldNotFill = (f: { field: FieldSpec; reason?: string }) =>
  * field filled first (resume upload first), so its screenshot shows what is left. Never submits while a required field, a draft, or a CAPTCHA/code is
  * unresolved. Always leaves the job in a final status with a reason, and closes the browser page.
  * Jobs already done or set aside are left untouched; "submit-reviewed" only runs a job awaiting review,
- * and "interactive" never re-runs a job whose application may already have been sent.
+ * and "interactive" never re-runs a job whose application may already have been sent. "hand-finish" only runs a job
+ * that canHandFinish allows, and leaves the submitting to the user (see awaitHandFinish below).
+ * While it runs, the job and its current step are kept in kv `runnerCurrent` for the dashboard.
  */
 export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "auto"): Promise<JobStatus> {
   const { db } = deps;
@@ -107,6 +123,7 @@ export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "a
   if (mode === "submit-reviewed" && job.status !== "ready-to-review") return job.status;
   // Only the confirmed Retry on the job's page may re-run a possibly sent application.
   if (mode === "interactive" && isUnknownSubmission(job)) return job.status;
+  if (mode === "hand-finish" && !canHandFinish(db, job.id)) return job.status;
 
   clearBlockersForJob(db, job.id);
   const handler = detectAts(job.url, deps.handlers ?? HANDLERS);
@@ -122,6 +139,16 @@ export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "a
 
   // The user is at the browser in these modes: show it and wait longer for them.
   const userPresent = mode !== "auto";
+  const hand = mode === "hand-finish";
+  const startedAt = deps.now().toISOString();
+  const step = (s: RunnerStep) => setRunnerCurrent(db, { jobId: job.id, step: s, startedAt, mode });
+  /** Hand-finish: the fields left for the user, each with the bank question it answers (when it is one). */
+  const forUser = new Map<string, { field: FieldSpec; questionId: number | null }>();
+  const leaveToUser = (field: FieldSpec, questionId: number | null = null) => {
+    if (!forUser.has(field.id)) forUser.set(field.id, { field, questionId });
+  };
+  /** Hand-finish: what the user typed into those fields, added to the submission's record. */
+  const handAnswers: { label: string; value: unknown; source: string }[] = [];
   let session: { page: Page; close(): Promise<void> } | null = null;
   const fields: FieldSpec[] = [];
   const resolutions: Resolution[] = [];
@@ -163,8 +190,11 @@ export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "a
     try {
       saveRecord(job.id, {
         screenshots: [beforeSubmit, confirmation].filter((s): s is Buffer => s !== null),
-        answers: resolutions.filter((r): r is Filled => r.status === "filled")
-          .map(r => ({ label: byId.get(r.fieldId)!.label, value: answerValue(r.answer), source: r.source })),
+        answers: [
+          ...resolutions.filter((r): r is Filled => r.status === "filled")
+            .map(r => ({ label: byId.get(r.fieldId)!.label, value: answerValue(r.answer), source: r.source as string })),
+          ...handAnswers,
+        ],
         outcome: "submitted",
       });
     } catch (err) {
@@ -180,15 +210,16 @@ export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "a
   };
 
   /** The application may already have gone out: flag it for the user and never invite a blind retry. */
-  const endUnknown = (detail: string): Promise<JobStatus> => {
+  const endUnknown = (detail: string, reason: string = UNKNOWN_SUBMISSION): Promise<JobStatus> => {
     try {
       resolveNeedsYouForJob(db, job.id);
-      addNeedsYou(db, { jobId: job.id, kind: "other", message: `${job.company} · ${job.title}: ${UNKNOWN_SUBMISSION} (${detail})` });
+      addNeedsYou(db, { jobId: job.id, kind: "other", message: `${job.company} · ${job.title}: ${reason} (${detail})` });
     } catch { /* the status below still flags it */ }
-    return end("needs-you", UNKNOWN_SUBMISSION);
+    return end("needs-you", reason);
   };
 
   try {
+    step("Opening application");
     const settings = getSettings(db);
     try {
       session = await deps.browser.open({ headless: userPresent ? false : settings.headless });
@@ -297,8 +328,10 @@ export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "a
         if (i >= 0) resolutions[i] = { fieldId: r.fieldId, status: "skip" };
       };
       const { files, rest } = fillOrder(byId, filled);
+      if (files.length) step("Uploading resume");
       for (const r of files) await attempt(r);
       if (files.length) await handler.afterUpload?.(page);
+      step("Filling fields");
       for (const r of rest) await attempt(r);
       return failures;
     };
@@ -310,6 +343,7 @@ export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "a
      * field holding some other value, is not.
      */
     const verify = async (onForm: ReadonlySet<string>): Promise<{ field: FieldSpec; reason?: string } | null> => {
+      step("Checking answers");
       const mismatches = async () => {
         const out: { r: Filled; field: FieldSpec; got: Awaited<ReturnType<AtsHandler["readBack"]>> }[] = [];
         for (const r of resolutions) {
@@ -377,9 +411,93 @@ export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "a
       return { present, failed };
     };
 
+    /**
+     * Hand-finish: once every answer the app has is filled, highlights the fields left for the user and waits for them
+     * to complete the form and click the site's own submit button (never clicked here). Meanwhile, every few seconds,
+     * the values of those fields are read back (the last non-empty one per field is kept: the page may navigate away
+     * on submit) and the page is checked for a confirmation. A confirmed submission is recorded like any other, and
+     * each question the user answered by hand is approved in the bank with what they typed or picked. A window closed
+     * (or a wait timed out) after the form may have been sent is flagged as a possibly sent application.
+     */
+    const awaitHandFinish = async (present: FieldSpec[]): Promise<JobStatus> => {
+      const onForm = new Set(present.map(f => f.id));
+      // A late script may have cleared an answer: fill it again, else leave it to the user too.
+      const unfilled = await verify(onForm);
+      if (unfilled) leaveToUser(unfilled.field);
+      const todo = [...forUser.values()].filter(t => onForm.has(t.field.id));
+      const root = await handler.root(page);
+      await root.evaluate(inPage(highlightFields), todo.map(t => t.field.id)).catch(() => {});
+      step("Waiting for you to finish and submit");
+
+      // Anything that may mean the form went out: a form post or a navigation of the page.
+      let maybeSent = false;
+      const onRequest = (req: Request) => {
+        if (req.method() !== "GET" && ["document", "xhr", "fetch"].includes(req.resourceType())) maybeSent = true;
+      };
+      const onNavigate = (frame: Frame) => { if (frame === page.mainFrame()) maybeSent = true; };
+      page.on("request", onRequest);
+      page.on("framenavigated", onNavigate);
+      const captured = new Map<string, string | string[] | boolean>();
+      const capture = async () => {
+        const current = await handler.root(page).catch(() => null);
+        if (!current) return;
+        for (const t of todo) {
+          if (t.field.kind === "file") continue;
+          try {
+            if (!(await current.locator(`[data-aa-id="${t.field.id}"]`).count())) continue;
+            const got = await withTimeout(handler.readBack(page, t.field), 2_000);
+            if (got !== null && !isEmpty(got)) captured.set(t.field.id, got);
+          } catch { /* gone or busy: keep the last value read */ }
+        }
+      };
+      const pollMs = deps.pollMs ?? HAND_POLL_MS;
+      const deadline = Date.now() + (deps.handFinishWaitMs ?? HAND_FINISH_WAIT_MS);
+      let outcome: SubmitOutcome = { kind: "pending" };
+      try {
+        while (!page.isClosed() && Date.now() < deadline) {
+          await capture();
+          if (page.isClosed()) break;
+          outcome = await handler.outcome(page).catch((): SubmitOutcome => ({ kind: "pending" }));
+          if (outcome.kind === "submitted" || outcome.kind === "already-applied") break;
+          // A CAPTCHA, code or error message only shows once submit was clicked; the user deals with it here.
+          if (outcome.kind !== "pending" && outcome.kind !== "validation-error") maybeSent = true;
+          await sleep(Math.min(pollMs, Math.max(0, deadline - Date.now())));
+        }
+      } finally {
+        page.off("request", onRequest);
+        page.off("framenavigated", onNavigate);
+      }
+
+      if (outcome.kind === "already-applied") return await end("applied-manually", "Already applied");
+      if (outcome.kind !== "submitted") {
+        if (maybeSent) return await endUnknown(page.isClosed() ? "the window was closed before the page confirmed it" : "no confirmation from the page", HAND_UNCONFIRMED);
+        return await end("needs-you", CLOSED_BEFORE_SUBMITTING);
+      }
+      for (const t of todo) {
+        const got = captured.get(t.field.id);
+        if (got !== undefined) handAnswers.push({ label: t.field.label, value: got, source: "you" });
+      }
+      const status = await endSubmitted(page);
+      // Only answers that went out with a confirmed application are worth keeping.
+      const saved = new Set<number>();
+      for (const t of todo) {
+        const got = captured.get(t.field.id);
+        const text = got === undefined ? null : bankText(got);
+        if (t.questionId === null || saved.has(t.questionId) || !text) continue;
+        try {
+          const q = getQuestion(db, t.questionId);
+          if (!q) continue;
+          answerQuestion(db, q.id, q.kind === "template" ? withCompanyPlaceholder(text, job.company) : text);
+          saved.add(q.id);
+        } catch { /* the submission stands */ }
+      }
+      return status;
+    };
+
     const opened = await handler.open(page, job.url);
     if (!opened.ok) return await end(...OPEN_FAILED[opened.reason](opened.detail));
 
+    step("Reading the form");
     let batch = await handler.readFields(page);
     if (!batch.length) return await end("failed", "No form fields found");
     ctx = await jobContext(job, handler, page);
@@ -395,11 +513,31 @@ export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "a
       const blankBoxes = batch.filter(f => deferred.has(f.id) && !held.includes(f) && !f.required);
       const toResolve = batch.filter(f => !held.includes(f) && !blankBoxes.includes(f));
       for (const f of [...toResolve, ...blankBoxes]) { fields.push(f); byId.set(f.id, f); }
+      step("Working out answers");
       const res: Resolution[] = [
         ...await resolveFields({ db, llm: deps.llm }, toResolve, ctx!, reviewed?.preset),
         ...blankBoxes.map((f): Resolution => ({ fieldId: f.id, status: "skip" })),
       ];
       resolutions.push(...res);
+
+      if (hand) {
+        // Everything the app has an answer for is filled; the rest is the user's (never typed into, never failed).
+        for (const r of res) {
+          const f = byId.get(r.fieldId)!;
+          if (r.status === "blocked") {
+            addBlocker(db, job.id, r.questionId, r.reason, f);
+            leaveToUser(f, r.questionId);
+          } else if (r.status === "needs-file" || (r.status === "skip" && f.required)) leaveToUser(f);
+        }
+        const answered = res.filter((r): r is Filled => r.status === "filled");
+        for (const failure of await fillAll(answered)) if (failure.field.required) leaveToUser(failure.field);
+        const after = await fillOthers(answered);
+        if (after.failed) leaveToUser(after.failed.field);
+        present = after.present;
+        batch = present.filter(f => !byId.has(f.id));
+        if (!batch.length || round === MAX_EXTRA_ROUNDS) break;
+        continue;
+      }
 
       const files = res.filter(r => r.status === "needs-file");
       const otherFile = files.find(r => !r.resume);
@@ -448,10 +586,13 @@ export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "a
       }
     }
 
+    if (hand) return await awaitHandFinish(present);
+
     // Verify the fields still on the form (a conditional question may have been removed again).
     const unfilled = await verify(new Set(present.map(f => f.id)));
     if (unfilled) return await end("failed", couldNotFill(unfilled));
 
+    step("Waiting for review gate");
     if (reviewed) {
       const unseen = resolutions.some(r => r.status === "filled" && r.source !== "override" && !reviewed.includes(byId.get(r.fieldId)!, r.answer));
       if (unseen) return await end("ready-to-review", withNotes("Form changed since review"));
@@ -463,25 +604,28 @@ export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "a
     }
 
     beforeSubmit = await screenshot(page);
+    step("Submitting");
     submitClicked = true;
     await handler.submit(page);
+    step("Waiting for confirmation");
     const pollMs = deps.pollMs ?? POLL_MS;
     let outcome = await pollOutcome(handler, page, deps.submitWaitMs ?? SUBMIT_WAIT_MS, pollMs, o => o.kind === "pending");
 
     if (outcome.kind === "captcha" || outcome.kind === "verification-code") {
-      const step = HUMAN[outcome.kind];
-      await deps.notify("AI Applier needs you", `${job.company}: ${step.ask} in the browser window`);
+      const human = HUMAN[outcome.kind];
+      await deps.notify("AI Applier needs you", `${job.company}: ${human.ask} in the browser window`);
       resolveNeedsYouForJob(db, job.id);
-      addNeedsYou(db, { jobId: job.id, kind: step.kind, message: `${job.company} · ${job.title}: ${step.ask}` });
+      addNeedsYou(db, { jobId: job.id, kind: human.kind, message: `${job.company} · ${job.title}: ${human.ask}` });
       // Nobody can solve anything in a hidden browser: hand it to the user right away.
-      if (!userPresent && settings.headless) return await end("needs-you", step.reason);
+      if (!userPresent && settings.headless) return await end("needs-you", human.reason);
       const humanWait = deps.humanWaitMs ?? HUMAN_WAIT_MS;
+      step("Waiting for you (CAPTCHA/code)");
       outcome = await pollOutcome(handler, page, userPresent ? Math.max(humanWait, INTERACTIVE_WAIT_MS) : humanWait, pollMs,
         o => o.kind === "pending" || isHuman(o));
       // The user may have solved it and sent the form without the page confirming: never invite a blind retry.
-      if (page.isClosed()) return await endUnknown(`The browser window was closed during the ${step.reason.toLowerCase()} wait`);
-      if (isHuman(outcome)) return await end("needs-you", step.reason);
-      if (outcome.kind === "pending") return await endUnknown(`No confirmation after the ${step.reason.toLowerCase()} wait`);
+      if (page.isClosed()) return await endUnknown(`The browser window was closed during the ${human.reason.toLowerCase()} wait`);
+      if (isHuman(outcome)) return await end("needs-you", human.reason);
+      if (outcome.kind === "pending") return await endUnknown(`No confirmation after the ${human.reason.toLowerCase()} wait`);
       resolveNeedsYouForJob(db, job.id);
     }
 
@@ -512,7 +656,39 @@ export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "a
     return await endUnknown(errorMessage(err));
   } finally {
     await session?.close().catch(() => {});
+    if (getRunnerCurrent(db)?.jobId === job.id) clearRunnerCurrent(db);
   }
+}
+
+/** Runs inside the page: outlines the controls left for the user and scrolls the first one into view. */
+function highlightFields(ids: string[]): void {
+  let first: Element | null = null;
+  for (const id of ids) {
+    for (const el of Array.from(document.querySelectorAll(`[data-aa-id="${CSS.escape(id)}"]`))) {
+      const box = el instanceof HTMLInputElement && (el.type === "radio" || el.type === "checkbox") ? el.closest("label") ?? el : el;
+      for (const target of new Set([el, box])) {
+        const s = (target as HTMLElement).style;
+        s.setProperty("outline", "3px solid #e7a33e", "important");
+        s.setProperty("outline-offset", "2px", "important");
+      }
+      if (!first) first = box;
+    }
+  }
+  first?.scrollIntoView({ block: "center" });
+}
+
+/** Resolves to the promise's value, or rejects after `ms`. */
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([p, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("timed out")), ms); })])
+    .finally(() => clearTimeout(timer));
+}
+
+/** The bank answer for a value read off a field: the text typed, the option picked, or the options ticked. */
+function bankText(got: string | string[] | boolean): string | null {
+  if (typeof got === "boolean") return got ? "Yes" : null;
+  const text = (Array.isArray(got) ? got.join(", ") : got).trim();
+  return text || null;
 }
 
 /**
