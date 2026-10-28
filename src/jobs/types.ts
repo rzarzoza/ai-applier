@@ -20,6 +20,8 @@ export interface Job {
   statusReason: string | null;
   ats: string | null;
   roleKey: string;
+  /** The posting's degree requirements; null for jobs stored before they were recorded. */
+  degrees: string[] | null;
   attempts: number;
   submittedAt: Date | null;
   updatedAt: Date;

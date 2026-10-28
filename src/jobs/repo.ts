@@ -9,7 +9,7 @@ interface Row {
   id: string; source_id: string; listing_id: string; company: string; title: string; locations: string;
   chosen_location: string | null; category: string | null; terms: string; url: string; url_norm: string;
   date_posted: string; active: number; status: JobStatus; status_reason: string | null; ats: string | null;
-  role_key: string; attempts: number; submitted_at: string | null; updated_at: string;
+  role_key: string; attempts: number; submitted_at: string | null; updated_at: string; degrees: string | null;
 }
 
 const ALL_STATUSES: JobStatus[] = [
@@ -23,12 +23,16 @@ function toJob(r: Row): Job {
     locations: JSON.parse(r.locations) as string[], chosenLocation: r.chosen_location, category: r.category,
     terms: JSON.parse(r.terms) as string[], url: r.url, urlNorm: r.url_norm, datePosted: new Date(r.date_posted),
     active: r.active === 1, status: r.status, statusReason: r.status_reason, ats: r.ats, roleKey: r.role_key,
+    degrees: r.degrees === null ? null : (JSON.parse(r.degrees) as string[]),
     attempts: r.attempts, submittedAt: r.submitted_at ? new Date(r.submitted_at) : null,
     updatedAt: new Date(r.updated_at),
   };
 }
 
 const touch = () => new Date().toISOString();
+
+/** The reason of a job the user skipped (filters never bring it back). */
+export const SKIPPED_BY_YOU = "Skipped by you";
 
 /** The needs-you reason for a job whose application may already have gone out. */
 export const UNKNOWN_SUBMISSION = "Submission state unknown — check before retrying";
@@ -41,7 +45,10 @@ export function getJob(db: Db, id: string): Job | null {
   return r ? toJob(r) : null;
 }
 
-/** Inserts the posting as status "new", or refreshes `active` on the existing job (matched by source+listing or url). */
+/**
+ * Inserts the posting as status "new", or refreshes `active` (and fills in missing degrees) on the
+ * existing job, matched by source+listing or url.
+ */
 export function upsertPosting(db: Db, p: Posting): { job: Job; isNew: boolean } {
   const urlNorm = normalizeUrl(p.url);
   const existing = db.prepare("SELECT * FROM jobs WHERE (source_id = ? AND listing_id = ?) OR url_norm = ? ORDER BY (source_id = ? AND listing_id = ?) DESC LIMIT 1")
@@ -49,14 +56,15 @@ export function upsertPosting(db: Db, p: Posting): { job: Job; isNew: boolean } 
   if (existing) {
     if ((existing.active === 1) !== p.active)
       db.prepare("UPDATE jobs SET active = ?, updated_at = ? WHERE id = ?").run(p.active ? 1 : 0, touch(), existing.id);
+    if (existing.degrees === null) db.prepare("UPDATE jobs SET degrees = ? WHERE id = ?").run(JSON.stringify(p.degrees), existing.id);
     return { job: getJob(db, existing.id)!, isNew: false };
   }
   const id = randomUUID();
   db.prepare(`INSERT INTO jobs (id, source_id, listing_id, company, title, locations, category, terms, url, url_norm,
-      date_posted, active, status, role_key, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', ?, ?)`)
+      date_posted, active, status, role_key, updated_at, degrees) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', ?, ?, ?)`)
     .run(id, p.sourceId, p.listingId, p.company, p.title, JSON.stringify(p.locations), p.category,
       JSON.stringify(p.terms), p.url, urlNorm, p.datePosted.toISOString(), p.active ? 1 : 0,
-      roleKey(p.company, p.title, p.terms), touch());
+      roleKey(p.company, p.title, p.terms), touch(), JSON.stringify(p.degrees));
   return { job: getJob(db, id)!, isNew: true };
 }
 
@@ -106,6 +114,12 @@ export function decrementAttempts(db: Db, id: string): void {
 export function nextQueued(db: Db): Job | null {
   const r = db.prepare("SELECT * FROM jobs WHERE status = 'queued' ORDER BY date_posted DESC, rowid ASC LIMIT 1").get() as Row | undefined;
   return r ? toJob(r) : null;
+}
+
+/** Jobs set aside as duplicates of the role, still listed by their source, oldest first. */
+export function activeDuplicatesOf(db: Db, key: string): Job[] {
+  const rows = db.prepare("SELECT * FROM jobs WHERE role_key = ? AND status = 'duplicate-role' AND active = 1 ORDER BY rowid").all(key) as unknown as Row[];
+  return rows.map(toJob);
 }
 
 export function findLiveRole(db: Db, key: string, excludeId: string): Job | null {

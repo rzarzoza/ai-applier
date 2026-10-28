@@ -481,6 +481,14 @@ test("an error that belongs to one job still fails only that job", async () => {
   expect(getRunnerHalt(db)).toBeNull();
 });
 
+test("runNext skips queued jobs that no longer pass the filters and runs the next one", async () => {
+  const toronto = addJob("https://mini-ats.test/apply?toronto=1", { company: "Other Co", locations: ["Toronto, ON, Canada"], datePosted: new Date(Date.now() + 60_000) });
+  expect(await runNext(deps)).toBe("submitted");
+  expect(getJob(db, toronto.id)).toMatchObject({ status: "skipped", statusReason: expect.stringContaining("Canada"), attempts: 0 });
+  expect(getJob(db, job.id)!.status).toBe("submitted");
+  expect(miniAts.submissions).toHaveLength(1);
+});
+
 test("runNext with no API key pauses instead of taking a job", async () => {
   expect(await runNext({ ...deps, hasApiKey: async () => false })).toBeNull();
   expect(opened).toEqual([]);

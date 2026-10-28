@@ -122,3 +122,37 @@ test("disabled sources are skipped", async () => {
   setSourceEnabled(db, "simplify-summer2027", false);
   expect(await pollAll(db, { adapters: fakeAdapters([nyPosting]), now })).toEqual([]);
 });
+
+test("when a queued job's URL changes, the new listing takes over after the old one is closed", async () => {
+  const db = openDb(":memory:");
+  await pollAll(db, { adapters: fakeAdapters([nyPosting]), now });
+  const moved = mk({ listingId: "1b", url: "https://acme.test/new-url" });
+  const r = await pollAll(db, { adapters: fakeAdapters([moved]), now });
+  expect(r[0]).toMatchObject({ newJobs: 1, duplicates: 1, closed: 1, queued: 1 });
+  const byListing = Object.fromEntries(listJobs(db, {}).map(j => [j.listingId, j]));
+  expect(byListing["1"]!.status).toBe("closed");
+  expect(byListing["1b"]).toMatchObject({ status: "queued", chosenLocation: "NYC" });
+});
+
+test("a duplicate is not promoted if it fails the filters or another job is still live for the role", async () => {
+  const db = openDb(":memory:");
+  const seattle = mk({ listingId: "9", url: "https://acme.test/9", locations: ["Seattle, WA"] });
+  const toronto = mk({ listingId: "8", url: "https://acme.test/8", locations: ["Toronto, ON, Canada"] });
+  await pollAll(db, { adapters: fakeAdapters([nyPosting, seattle]), now });
+  // Toronto would have been skipped by the location filter, so mark it a duplicate by hand.
+  await pollAll(db, { adapters: fakeAdapters([nyPosting, seattle, toronto]), now });
+  const t = listJobs(db, {}).find(j => j.listingId === "8")!;
+  setStatus(db, t.id, "duplicate-role", "same role");
+  const ny = listJobs(db, {}).find(j => j.listingId === "1")!;
+  const sea = listJobs(db, {}).find(j => j.listingId === "9")!;
+  setStatus(db, sea.id, "failed", "x"); // live for the role, so no duplicate is promoted
+  await pollAll(db, { adapters: fakeAdapters([{ ...nyPosting, active: false }, seattle, toronto]), now });
+  expect(listJobs(db, {}).find(j => j.id === ny.id)!.status).toBe("closed");
+  expect(listJobs(db, {}).find(j => j.id === t.id)!.status).toBe("duplicate-role");
+
+  setStatus(db, sea.id, "closed", "x");
+  setStatus(db, ny.id, "queued");
+  await pollAll(db, { adapters: fakeAdapters([{ ...nyPosting, active: false }, seattle, toronto]), now });
+  // The only duplicate left fails the location filter.
+  expect(listJobs(db, {}).find(j => j.id === t.id)!).toMatchObject({ status: "skipped", statusReason: expect.stringContaining("Canada") });
+});

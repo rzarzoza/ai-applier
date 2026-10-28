@@ -9,7 +9,9 @@ import type { FieldAnswer, FieldSpec, JobContext } from "../forms/types.js";
 import { decrementAttempts, getJob, incrementAttempts, isUnknownSubmission, nextQueued, setAts, setStatus, setUsedDocuments, submittedSince, UNKNOWN_SUBMISSION } from "../jobs/repo.js";
 import type { Job, JobStatus } from "../jobs/types.js";
 import { llmHaltReason, type Llm } from "../llm/llm.js";
+import { getFilters } from "../filters/filters.js";
 import { getSettings, haltRunner, type Settings } from "../settings.js";
+import { recheckQueued } from "../sources/poller.js";
 import type { BrowserProvider } from "./browser.js";
 import { saveRecord, saveSnapshot } from "./records.js";
 
@@ -291,13 +293,17 @@ export function flagInterruptedRuns(db: Db): string[] {
 }
 
 /**
- * Runs the next queued job, unless the runner is paused, the queue is empty, or today's limit is
- * reached. With no API key available it pauses the runner instead of taking a job.
+ * Runs the next queued job that still passes the filters (skipping the ones that don't), unless the
+ * runner is paused, the queue is empty, or today's limit is reached. With no API key available it
+ * pauses the runner instead of taking a job.
  */
 export async function runNext(deps: RunnerDeps): Promise<JobStatus | null> {
   const settings = getSettings(deps.db);
   if (settings.paused) return null;
-  const job = nextQueued(deps.db);
+  // Filters may have changed since the job was queued: skip any that no longer pass.
+  const rules = getFilters(deps.db);
+  let job = nextQueued(deps.db);
+  while (job && !recheckQueued(deps.db, job, rules, deps.now())) job = nextQueued(deps.db);
   if (!job) return null;
   if (dailyLimitReached(deps.db, settings, deps.now())) return null;
   if (deps.hasApiKey && !(await deps.hasApiKey())) {

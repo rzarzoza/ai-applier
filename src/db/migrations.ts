@@ -90,4 +90,5 @@ export const migrations: string[] = [
   );`,
   `ALTER TABLE jobs ADD COLUMN resume_used TEXT;
   ALTER TABLE jobs ADD COLUMN cover_letter_used TEXT;`,
+  `ALTER TABLE jobs ADD COLUMN degrees TEXT;`,
 ];

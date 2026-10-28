@@ -1,6 +1,6 @@
 import { expect, test } from "vitest";
 import { getFilters } from "../../src/filters/filters.js";
-import { setStatus, upsertPosting } from "../../src/jobs/repo.js";
+import { getJob, incrementAttempts, setStatus, upsertPosting } from "../../src/jobs/repo.js";
 import { listSources, setSourceEnabled } from "../../src/sources/repo.js";
 import type { Posting } from "../../src/sources/types.js";
 import { form, setupApp } from "./helpers.js";
@@ -90,4 +90,44 @@ test("Sources page shows each source's last poll error or OK with counts", async
   });
   html = await (await app.request("/sources")).text();
   expect(html).toContain("Last error: HTTP 500");
+});
+
+test("POST /filters re-checks queued jobs and requeues filter-skipped jobs that never ran", async () => {
+  const { db, app } = setupApp();
+  const mkJob = (n: number, o: Partial<Posting>, status: Parameters<typeof setStatus>[2], reason: string | null = null) => {
+    const j = upsertPosting(db, posting(n, o)).job;
+    setStatus(db, j.id, status, reason);
+    return j.id;
+  };
+  const queuedNyc = mkJob(1, {}, "queued");
+  const queuedSf = mkJob(2, { locations: ["San Francisco, CA"] }, "queued");
+  const skippedSf = mkJob(3, { locations: ["San Francisco, CA"] }, "skipped", "location matches an excluded location");
+  const byYou = mkJob(4, { locations: ["San Francisco, CA"] }, "skipped", "Skipped by you");
+  const ran = mkJob(5, { locations: ["San Francisco, CA"] }, "skipped", "location matches an excluded location");
+  incrementAttempts(db, ran);
+  const inactive = mkJob(6, { locations: ["San Francisco, CA"], active: false }, "skipped", "location matches an excluded location");
+  const sameRole = mkJob(7, { company: "Co2", locations: ["San Francisco, CA"] }, "skipped", "location matches an excluded location");
+  const res = await app.request("/filters", form({
+    categories: "Software", excludeCountries: "", includeLocations: "San Francisco", locationMode: "any", postedWithinDays: "14",
+  }));
+  expect(res.status).toBe(303);
+  const status = (id: string) => getJob(db, id)!.status;
+  expect(getJob(db, queuedNyc)).toMatchObject({ status: "skipped", statusReason: expect.stringContaining("no included location") });
+  expect(status(queuedSf)).toBe("queued");
+  expect(getJob(db, skippedSf)).toMatchObject({ status: "queued", chosenLocation: "San Francisco, CA" });
+  expect(status(byYou)).toBe("skipped");
+  expect(status(ran)).toBe("skipped");
+  expect(status(inactive)).toBe("skipped");
+  expect(status(sameRole)).toBe("duplicate-role"); // Co2's role is already queued
+});
+
+test("POST /filters never requeues a degree-filtered job whose degrees weren't recorded", async () => {
+  const { db, app } = setupApp();
+  const j = upsertPosting(db, posting(1)).job;
+  db.prepare("UPDATE jobs SET degrees = NULL WHERE id = ?").run(j.id);
+  setStatus(db, j.id, "skipped", "degree requirements do not match");
+  await app.request("/filters", form({ categories: "Software", degrees: "PhD", locationMode: "any", postedWithinDays: "14" }));
+  expect(getJob(db, j.id)!.status).toBe("skipped");
+  await app.request("/filters", form({ categories: "Software", degrees: "", locationMode: "any", postedWithinDays: "14" }));
+  expect(getJob(db, j.id)!.status).toBe("queued");
 });

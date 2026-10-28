@@ -8,11 +8,12 @@ import { reviseDraft } from "../answers/draft.js";
 import type { Db } from "../db/db.js";
 import type { Llm } from "../llm/llm.js";
 import { normalizeLabel } from "../answers/classify.js";
-import { getJob, setStatus } from "../jobs/repo.js";
+import { getJob, setStatus, SKIPPED_BY_YOU } from "../jobs/repo.js";
 import { paths } from "../paths.js";
 import { getProfile, saveProfile, type Profile } from "../profile/profile.js";
 import { importResume } from "../profile/resume.js";
 import { saveFilters } from "../filters/filters.js";
+import { refilterJobs } from "../sources/poller.js";
 import { addSource, listSources, setSourceEnabled } from "../sources/repo.js";
 import { getSecret, setSecret } from "../secrets.js";
 import { clearRunnerHalt, saveSettings, setJson, type Settings } from "../settings.js";
@@ -200,7 +201,7 @@ export function createApp(ctx: AppContext): Hono {
       if (name === "mark-applied") void ctx.syncTracker?.();
       return c.redirect(`/applications/${job.id}`, 303);
     });
-  transition("skip", canSkip, j => setStatus(db, j.id, "skipped", "Skipped by you"));
+  transition("skip", canSkip, j => setStatus(db, j.id, "skipped", SKIPPED_BY_YOU));
   transition("retry", canRetry, j => setStatus(db, j.id, "queued"));
   transition("mark-applied", canMarkApplied, j => setStatus(db, j.id, "applied-manually", "Marked applied by you"));
 
@@ -284,6 +285,7 @@ export function createApp(ctx: AppContext): Hono {
 
   app.post("/filters", async c => {
     saveFilters(db, parseFilterForm(await c.req.parseBody()));
+    refilterJobs(db, new Date());
     return c.redirect("/sources", 303);
   });
 

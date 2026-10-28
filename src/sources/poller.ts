@@ -1,6 +1,7 @@
 import type { Db } from "../db/db.js";
-import { evaluateFilters, getFilters } from "../filters/filters.js";
-import { findLiveRole, setChosenLocation, setStatus, upsertPosting } from "../jobs/repo.js";
+import { evaluateFilters, getFilters, type FilterRules } from "../filters/filters.js";
+import { activeDuplicatesOf, findLiveRole, getJob, listJobs, setChosenLocation, setStatus, SKIPPED_BY_YOU, upsertPosting } from "../jobs/repo.js";
+import type { Job } from "../jobs/types.js";
 import { listSources, markPolled } from "./repo.js";
 import type { Posting, SourceAdapter, SourceConfig } from "./types.js";
 
@@ -18,17 +19,80 @@ export interface PollDeps {
 /** Statuses a poll may close; anything further along (submitted, failed, ...) is never touched. */
 const CLOSABLE = ["queued", "needs-you", "ready-to-review"];
 
+/** The posting a job was stored from, for checking it against the filters again. */
+export function jobPosting(job: Job): Posting {
+  return {
+    sourceId: job.sourceId, listingId: job.listingId, company: job.company, title: job.title, locations: job.locations,
+    category: job.category, terms: job.terms, degrees: job.degrees ?? [], sponsorship: null, url: job.url,
+    datePosted: job.datePosted, active: job.active,
+  };
+}
+
+/**
+ * Checks a queued job against the current filters: one that no longer passes is skipped with the
+ * reason; one that passes keeps (or gets) the location the filters choose. Returns whether it passes.
+ */
+export function recheckQueued(db: Db, job: Job, rules: FilterRules, now: Date): boolean {
+  const result = evaluateFilters(jobPosting(job), rules, now);
+  if (!result.pass) { setStatus(db, job.id, "skipped", result.reason); return false; }
+  if (job.chosenLocation !== result.location) setChosenLocation(db, job.id, result.location);
+  return true;
+}
+
+/**
+ * Queues a job that passes the filters, unless another job is already live for the same role
+ * (then it is a duplicate). Returns the status it was given.
+ */
+function queueIfPassing(db: Db, job: Job, rules: FilterRules, now: Date): "queued" | "skipped" | "duplicate-role" {
+  const result = evaluateFilters(jobPosting(job), rules, now);
+  if (!result.pass) { setStatus(db, job.id, "skipped", result.reason); return "skipped"; }
+  const twin = findLiveRole(db, job.roleKey, job.id);
+  if (twin) { setStatus(db, job.id, "duplicate-role", `same role as job ${twin.id}`); return "duplicate-role"; }
+  setChosenLocation(db, job.id, result.location);
+  setStatus(db, job.id, "queued");
+  return "queued";
+}
+
+/**
+ * Applies changed filters to existing jobs: queued jobs that no longer pass are skipped, and jobs the
+ * filters skipped before they ever ran are queued if they now pass (never ones the user skipped, nor
+ * ones whose degree requirements weren't recorded while a degree rule is set).
+ */
+export function refilterJobs(db: Db, now: Date): { skipped: number; requeued: number } {
+  const rules = getFilters(db);
+  let skipped = 0;
+  let requeued = 0;
+  for (const job of listJobs(db, { status: "queued" })) if (!recheckQueued(db, job, rules, now)) skipped++;
+  for (const job of listJobs(db, { status: "skipped" })) {
+    if (job.attempts > 0 || job.statusReason === SKIPPED_BY_YOU || !job.active) continue;
+    if (job.degrees === null && rules.degrees.length > 0) continue;
+    if (!evaluateFilters(jobPosting(job), rules, now).pass) continue;
+    if (queueIfPassing(db, job, rules, now) === "queued") requeued++;
+  }
+  return { skipped, requeued };
+}
+
+/** After a job closes, the first still-listed duplicate of its role that passes the filters takes its place. */
+function promoteDuplicate(db: Db, closed: Job, rules: FilterRules, now: Date): boolean {
+  if (findLiveRole(db, closed.roleKey, closed.id)) return false; // another job still covers the role
+  return activeDuplicatesOf(db, closed.roleKey).some(twin => queueIfPassing(db, twin, rules, now) === "queued");
+}
+
 function processPostings(db: Db, sourceId: string, postings: Posting[], now: Date, report: PollReport): void {
   const rules = getFilters(db);
   const listed = new Set<string>();
-  const close = (id: string, reason: string) => { setStatus(db, id, "closed", reason); report.closed++; };
+  const close = (job: Job, reason: string) => {
+    setStatus(db, job.id, "closed", reason);
+    report.closed++;
+    if (promoteDuplicate(db, job, rules, now)) report.queued++;
+  };
 
   for (const p of postings) {
     listed.add(p.listingId);
     const { job, isNew } = upsertPosting(db, p);
     listed.add(job.listingId);
     if (!isNew) {
-      if (!p.active && CLOSABLE.includes(job.status)) close(job.id, "posting is no longer active");
+      if (!p.active && CLOSABLE.includes(job.status)) close(job, "posting is no longer active");
       continue;
     }
     report.newJobs++;
@@ -44,7 +108,7 @@ function processPostings(db: Db, sourceId: string, postings: Posting[], now: Dat
 
   const open = db.prepare(`SELECT id, listing_id FROM jobs WHERE source_id = ? AND status IN (${CLOSABLE.map(() => "?").join(",")})`)
     .all(sourceId, ...CLOSABLE) as unknown as { id: string; listing_id: string }[];
-  for (const j of open) if (!listed.has(j.listing_id)) close(j.id, "posting is no longer listed by the source");
+  for (const j of open) if (!listed.has(j.listing_id)) close(getJob(db, j.id)!, "posting is no longer listed by the source");
 }
 
 export async function pollAll(db: Db, deps: PollDeps): Promise<PollReport[]> {

@@ -65,3 +65,12 @@ test("hasSubmittedToCompany also counts applied-manually and possibly-sent appli
     expect(hasSubmittedToCompany(db, "acme"), `${status}: ${reason}`).toBe(expected);
   }
 });
+
+test("upsert records the posting's degrees, filling them in for rows stored without them", () => {
+  const db = openDb(":memory:");
+  const j = upsertPosting(db, p({ degrees: ["Bachelor's"] })).job;
+  expect(j.degrees).toEqual(["Bachelor's"]);
+  db.prepare("UPDATE jobs SET degrees = NULL WHERE id = ?").run(j.id);
+  expect(getJob(db, j.id)!.degrees).toBeNull();
+  expect(upsertPosting(db, p({ degrees: ["Master's"] })).job.degrees).toEqual(["Master's"]);
+});
