@@ -3,14 +3,16 @@ import type { AddressInfo } from "node:net";
 import { fileURLToPath } from "node:url";
 import { serve } from "@hono/node-server";
 import { HANDLERS } from "./ats/registry.js";
+import type { AtsHandler } from "./ats/types.js";
 import { openDb } from "./db/db.js";
-import { getJob } from "./jobs/repo.js";
+import { canOpenLive, getJob } from "./jobs/repo.js";
 import { ClaudeLlm, type Llm } from "./llm/llm.js";
 import { paths, setDataDir } from "./paths.js";
 import { SerialQueue } from "./scheduler.js";
 import { getSecret, setSecret } from "./secrets.js";
 import { getJson, getSettings, saveSettings, setJson } from "./settings.js";
-import { persistentChromium } from "./runner/browser.js";
+import { LiveService } from "./runner/live.js";
+import { SessionManager } from "./runner/session-manager.js";
 import { macNotify } from "./runner/notify.js";
 import { clearRunnerCurrent } from "./runner/current.js";
 import { flagInterruptedRuns, runJob, runNext, type RunMode, type RunnerDeps } from "./runner/runner.js";
@@ -33,6 +35,9 @@ export interface StartOptions {
   startLoops?: boolean;
   /** Keychain access; defaults to the real macOS Keychain. Tests inject fakes. */
   secrets?: Secrets;
+  /** The LLM and the ATS handlers; default to Claude and the real handlers. Tests and local checks inject fakes. */
+  llm?: Llm;
+  handlers?: AtsHandler[];
 }
 
 const log = (msg: string) => console.log(`[${new Date().toISOString()}] ${msg}`);
@@ -62,7 +67,7 @@ export async function startApp(opts: StartOptions = {}): Promise<{ url: string; 
     current = new ClaudeLlm({ apiKey });
   };
   await refreshLlm();
-  const llm: Llm = { structured: req => current.structured(req) };
+  const llm: Llm = opts.llm ?? { structured: req => current.structured(req) };
 
   // Tracker syncs never touch the browser, so they skip the serial queue; two never overlap.
   let syncing: Promise<SyncResult> | null = null;
@@ -81,8 +86,10 @@ export async function startApp(opts: StartOptions = {}): Promise<{ url: string; 
   };
 
   const queue = new SerialQueue();
+  // The one browser: every run and the dashboard's live view use its pages.
+  const browser = new SessionManager();
   const runnerDeps = (): RunnerDeps => ({
-    db, llm, browser: persistentChromium, notify: macNotify, now: () => new Date(), handlers: HANDLERS,
+    db, llm, browser, notify: macNotify, now: () => new Date(), handlers: opts.handlers ?? HANDLERS,
     onSubmitted: () => { void runSync(); },
     hasApiKey: async () => {
       if (process.env.ANTHROPIC_API_KEY) return true;
@@ -108,6 +115,20 @@ export async function startApp(opts: StartOptions = {}): Promise<{ url: string; 
     }).catch(e => log(`Run of job ${jobId} failed: ${errText(e)}`))
       .finally(() => requested.delete(jobId));
   };
+
+  /** Opens a job's form again for the live view (through the queue, like every run). Errors are the caller's. */
+  const live = new LiveService({
+    db, manager: browser, onSubmitted: () => { void runSync(); },
+    runRebuild: jobId => queue.run(async () => {
+      await runJob(runnerDeps(), jobId, "rebuild");
+      log(`rebuild ${getJob(db, jobId)?.company ?? jobId}: ${browser.isParked(jobId) ? "open in the app" : "not opened"}`);
+    }),
+  });
+  // A job that moved on (answered in the Inbox, skipped, submitted elsewhere...) no longer needs its page.
+  const sweep = setInterval(() => {
+    void browser.sweep(id => { const j = getJob(db, id); return !!j && canOpenLive(j); }).catch(() => {});
+  }, 5_000);
+  sweep.unref();
 
   let polling: Promise<void> | null = null;
   const pollNow = () => {
@@ -138,6 +159,7 @@ export async function startApp(opts: StartOptions = {}): Promise<{ url: string; 
     runReviewed: id => runById(id, "submit-reviewed"),
     runHandFinish: id => runById(id, "hand-finish"),
     requestedRuns: () => [...requested],
+    live,
     onApiKeySaved: () => { void refreshLlm(); },
   });
 
@@ -177,13 +199,16 @@ export async function startApp(opts: StartOptions = {}): Promise<{ url: string; 
     url,
     async stop() {
       stopped = true;
+      clearInterval(sweep);
       for (const wake of [...wakers]) wake();
+      await live.stop();
       await new Promise<void>(resolve => { server.close(() => resolve()); (server as { closeAllConnections?(): void }).closeAllConnections?.(); });
       // A job may be mid-run (even waiting on the user); give it a moment, then leave it.
       const settled = await Promise.race([
         Promise.all([...loops, queue.idle(), pollInFlight(), syncing ?? Promise.resolve()]).then(() => true),
         new Promise<false>(r => setTimeout(() => r(false), STOP_WAIT_MS).unref()),
       ]);
+      await browser.close();
       if (settled) db.close();
     },
   };
