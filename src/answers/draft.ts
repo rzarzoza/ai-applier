@@ -28,7 +28,22 @@ The template was written by or approved by the applicant, possibly for a differe
 
 Keep the template's structure, length, voice, and claims about the applicant. Use only facts about the applicant that appear in the template, resume, or profile; do not invent experience or skills. Do not state facts about the company that are not in the job description. Stay within the character limit if there is one. Return only the answer text.`;
 
+const FACT_SYSTEM = `You answer factual job application questions for one applicant, only from what their profile and resume state.
+
+The applicant's resume and profile are provided. You receive the question, the form field (its label, kind, options, character limit, and any section heading or helper text in its description), and the job. "{company}" in the question stands for the job's company.
+
+Answer ONLY when the answer follows directly from a stated profile field or explicit resume text. Otherwise set answerable to false, with a null answer and a null basis.
+- Name the basis: the profile field and its value (for example "profile.usCitizen = true") or the resume text you used (for example "resume: Onshape (PTC), Software Engineering Intern, May 2025 – Aug 2025").
+- If the field has options, the answer must be exactly one of the options, copied character for character. If no option fits, the question is not answerable.
+- Never guess. Never infer intent, preferences, plans, or circumstances that are not stated (relocation, salary, how they heard about the job, relatives at the company, and similar) unless a profile field states them.
+- Never invent dates. Use a date only as the profile or resume writes it, reformatted only when the field asks for a specific format (for example "May 2025" as "05/2025").
+- Mind polarity: answer what the field literally asks. A U.S. citizen answers "Yes" to "Are you a U.S. citizen, U.S. national, lawful permanent resident, or protected individual?"; someone who does not require sponsorship answers "No" to "Will you require sponsorship?".
+- For a follow-up such as "If you answered No above, explain… otherwise N/A", answer "N/A" only when the profile makes the earlier answer Yes; otherwise it is not answerable.
+- Employment fields (company, title, start or end date) in an employment or experience section refer to the applicant's most recent role on the resume, unless the section says otherwise. An end date is answerable only when the resume states it.
+- Keep the answer short: the value itself, not a sentence, unless the field is a free-text question that needs one.`;
+
 const DraftSchema = z.object({ answerable: z.boolean(), draft: z.string().nullable() });
+const FactSchema = z.object({ answerable: z.boolean(), answer: z.string().nullable(), basis: z.string().nullable() });
 const ReviseSchema = z.object({ draft: z.string() });
 const TemplateSchema = z.object({ text: z.string() });
 
@@ -45,6 +60,7 @@ function applicantContext(profile: Profile): string {
 }
 
 const fieldInfo = (field: FieldSpec) => ({ label: field.label, kind: field.kind, options: field.options ?? null, maxLength: field.maxLength ?? null });
+const factFieldInfo = (field: FieldSpec) => ({ ...fieldInfo(field), description: field.description ?? null });
 const jobInfo = (job: JobContext) => ({ company: job.company, title: job.title, location: job.location, term: job.term, description: job.description ?? null });
 
 export async function draftAnswer(llm: Llm, profile: Profile, canonical: string, field: FieldSpec, job: JobContext): Promise<{ answerable: boolean; draft: string | null }> {
@@ -58,6 +74,27 @@ export async function draftAnswer(llm: Llm, profile: Profile, canonical: string,
   });
   const draft = out.draft?.trim() || null;
   return out.answerable && draft ? { answerable: true, draft } : { answerable: false, draft: null };
+}
+
+/**
+ * Answers a factual question only from what the profile or resume states, naming the basis. An answer
+ * to a field with options must be exactly one of them, or the question counts as not answerable.
+ */
+export async function factAnswer(llm: Llm, profile: Profile, canonical: string, field: FieldSpec, job: JobContext):
+  Promise<{ answerable: boolean; answer: string | null; basis: string | null }> {
+  const out = await llm.structured({
+    name: "fact",
+    schema: FactSchema,
+    system: FACT_SYSTEM,
+    cachedContext: applicantContext(profile),
+    effort: "low",
+    content: JSON.stringify({ question: canonical, field: factFieldInfo(field), job: jobInfo(job) }),
+  });
+  const none = { answerable: false, answer: null, basis: null };
+  const answer = out.answer?.trim() || null;
+  if (!out.answerable || !answer) return none;
+  if (field.options?.length && !field.options.includes(answer)) return none;
+  return { answerable: true, answer, basis: out.basis?.trim() || null };
 }
 
 export async function reviseDraft(llm: Llm, profile: Profile, canonical: string, draft: string, instruction: string): Promise<string> {

@@ -45,6 +45,10 @@ h1 { font-size: 22px; margin: 0 0 16px; } h2 { font-size: 17px; margin: 32px 0 1
 .note { background: var(--warn-bg); color: var(--warn-text); border-radius: 6px; padding: 6px 10px; margin: 8px 0; font-size: 14px; }
 .draft { border-left: 3px solid var(--accent); padding: 4px 12px; margin: 10px 0; white-space: pre-wrap; }
 .saved { color: var(--ok); font-weight: 600; }
+.blocked { border-top: 1px solid var(--border); margin-top: 10px; padding-top: 8px; }
+.quote-row { display: flex; gap: 8px; align-items: flex-start; margin: 6px 0; }
+blockquote.field-label { flex: 1; margin: 0; padding: 6px 12px; border-left: 3px solid var(--muted); background: var(--bg); border-radius: 4px; white-space: pre-wrap; overflow-wrap: anywhere; }
+button.copy { padding: 4px 10px; font-size: 13px; }
 textarea, select, input[type=text] { width: 100%; padding: 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); font: inherit; }
 textarea { min-height: 90px; }
 .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 10px; }

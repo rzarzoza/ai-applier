@@ -1,7 +1,7 @@
 import { expect, test, vi } from "vitest";
 import { openDb } from "../../src/db/db.js";
-import { addBlocker, addNeedsYou, addVariant, approveAnswer, createQuestion, getOverrides, getQuestion } from "../../src/answers/bank.js";
-import { getJob, setStatus, upsertPosting } from "../../src/jobs/repo.js";
+import { addBlocker, addNeedsYou, addVariant, approveAnswer, blockersForJob, createQuestion, getOverrides, getQuestion, openNeedsYouForJob } from "../../src/answers/bank.js";
+import { getJob, RESUME_NEEDED, setStatus, upsertPosting } from "../../src/jobs/repo.js";
 import type { Posting } from "../../src/sources/types.js";
 import { createApp } from "../../src/web/server.js";
 import { FakeLlm } from "../helpers/fake-llm.js";
@@ -211,4 +211,94 @@ test("a per-job choice that isn't one of that form's options is refused and chan
   expect(getQuestion(db, q.id)!.status).toBe("none");
   expect(getOverrides(db, b.id)).toEqual({});
   expect(getJob(db, a.id)!.status).toBe("needs-you");
+});
+
+test("each blocked job shows the form's exact wording with Copy, its section, field type, choices and a link to the posting", async () => {
+  const { db, app, mk } = setup();
+  const q = createQuestion(db, { canonical: "Education start year", kind: "global", isFactual: true });
+  const label = 'Start date month/year <script>alert("x")</script>';
+  const a = mk(1), b = mk(2);
+  addBlocker(db, a.id, q.id, "missing", { label, kind: "select", options: ["2024", "2025 & later"], description: "Employment — most recent role" });
+  addBlocker(db, b.id, q.id, "missing"); // stored before the form's field was recorded
+  const html = await (await app.request("/inbox")).text();
+  expect(html).toContain("<h3>Education start year</h3>");
+  expect(html).toContain('<blockquote class="field-label">Start date month/year &lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt;</blockquote>');
+  expect(html).not.toContain('<script>alert("x")</script>');
+  expect(html).toContain('<button type="button" class="copy" data-copy="true">Copy</button>');
+  expect(html).toContain("navigator.clipboard.writeText(t.textContent)");
+  expect(html).toContain("Section / help text: Employment — most recent role");
+  expect(html).toContain("Field type: Dropdown (pick one)");
+  expect(html).toContain("Choices: 2024 · 2025 &amp; later");
+  expect(html).toContain('<a href="https://x.test/1" target="_blank" rel="noopener">Open posting</a>');
+  expect(html).toContain("<strong>Co1</strong> · Intern");
+  expect(html).toContain('<a href="https://x.test/2" target="_blank" rel="noopener">Open posting</a>');
+  expect(html).toContain("exact wording wasn&#39;t recorded");
+  expect(html).toContain("Re-check with my profile");
+});
+
+test("a posting link that isn't http(s) is not rendered as a link", async () => {
+  const { db, app } = setup();
+  const q = createQuestion(db, { canonical: "Q?", kind: "global", isFactual: true });
+  const j = upsertPosting(db, { ...p(1), url: "javascript:alert(1)" }).job; setStatus(db, j.id, "needs-you");
+  addBlocker(db, j.id, q.id, "missing", { label: "Q?", kind: "text" });
+  const html = await (await app.request("/inbox")).text();
+  expect(html).not.toContain("javascript:alert");
+  expect(html).not.toContain("Open posting");
+});
+
+test("a suggested answer shows where it came from", async () => {
+  const { db, app, mk } = setup();
+  const q = createQuestion(db, { canonical: "Export control status", kind: "global", isFactual: true, options: ["Yes", "No"], draft: "Yes", draftBasis: "profile.usCitizen = true" });
+  addBlocker(db, mk(1).id, q.id, "approval", { label: "Are you a U.S. citizen…?", kind: "radio", options: ["Yes", "No"] });
+  const html = await (await app.request("/inbox")).text();
+  expect(html).toContain("Suggested from your profile/resume:");
+  expect(html).toContain('<div class="draft">Yes</div>');
+  expect(html).toContain("Based on: profile.usCitizen = true");
+  expect(html).toContain("Use draft");
+});
+
+test("revising a suggestion drops its profile basis", async () => {
+  const { db, llm, app, mk } = setup();
+  llm.on("revise", () => ({ draft: "Rice" }));
+  const q = createQuestion(db, { canonical: "School", kind: "global", isFactual: true, draft: "Rice University", draftBasis: "profile.school" });
+  addBlocker(db, mk(1).id, q.id, "approval");
+  await app.request(`/inbox/${q.id}/revise`, form({ instruction: "shorter" }));
+  expect(getQuestion(db, q.id)).toMatchObject({ draft: "Rice", draftBasis: null });
+});
+
+test("POST /inbox/recheck requeues blocked jobs only, clearing their blockers", async () => {
+  const { db, app, mk } = setup();
+  const q = createQuestion(db, { canonical: "Q?", kind: "global", isFactual: true });
+  const blocked = mk(1), other = mk(2);
+  addBlocker(db, blocked.id, q.id, "missing"); addBlocker(db, other.id, q.id, "approval");
+  const captcha = mk(3); addBlocker(db, captcha.id, q.id, "missing"); addNeedsYou(db, { jobId: captcha.id, kind: "captcha", message: "solve" });
+  const unknown = mk(4); setStatus(db, unknown.id, "needs-you", "Submission state unknown — check before retrying");
+  addBlocker(db, unknown.id, q.id, "missing");
+  const resume = mk(5); setStatus(db, resume.id, "needs-you", RESUME_NEEDED);
+  const done = upsertPosting(db, p(6)).job; setStatus(db, done.id, "submitted"); addBlocker(db, done.id, q.id, "missing");
+
+  const res = await app.request("/inbox/recheck", { method: "POST" });
+  expect(res.status).toBe(303);
+  expect(res.headers.get("location")).toBe("/inbox?rechecked=2");
+  for (const j of [blocked, other]) {
+    expect(getJob(db, j.id)!.status).toBe("queued");
+    expect(blockersForJob(db, j.id)).toEqual([]);
+  }
+  for (const j of [captcha, unknown, resume]) expect(getJob(db, j.id)!.status).toBe("needs-you");
+  expect(blockersForJob(db, captcha.id)).toHaveLength(1);
+  expect(blockersForJob(db, unknown.id)).toHaveLength(1);
+  expect(openNeedsYouForJob(db, captcha.id)).toHaveLength(1);
+  expect(getJob(db, done.id)!.status).toBe("submitted");
+  expect(await (await app.request("/inbox?rechecked=2")).text()).toContain("Re-checking 2 jobs");
+});
+
+test("the dashboard's own Re-check form passes the host and origin guard", async () => {
+  const db = openDb(":memory:");
+  const app = createApp({ db, llm: new FakeLlm(), runInteractive: vi.fn(), runReviewed: vi.fn(), pollNow: vi.fn(), localPort: () => 4310 });
+  const j = upsertPosting(db, p(1)).job; setStatus(db, j.id, "needs-you");
+  const req = (origin: string) => new Request("http://127.0.0.1:4310/inbox/recheck", { method: "POST", headers: { host: "127.0.0.1:4310", origin } });
+  expect((await app.request(req("http://evil.test"))).status).toBe(403);
+  expect(getJob(db, j.id)!.status).toBe("needs-you");
+  expect((await app.request(req("http://127.0.0.1:4310"))).status).toBe(303);
+  expect(getJob(db, j.id)!.status).toBe("queued");
 });

@@ -1,7 +1,7 @@
 import type { Db } from "../db/db.js";
 import { getJob, isUnknownSubmission, RESUME_NEEDED, setStatus } from "../jobs/repo.js";
 import type { FieldKind } from "../forms/types.js";
-import { approveAnswer, deleteQuestion, getQuestion, openNeedsYouForJob, resolveNeedsYouForJob, setOverride, type NeedsYou, type Question } from "./bank.js";
+import { approveAnswer, clearBlockersForJob, deleteQuestion, getQuestion, openNeedsYouForJob, resolveNeedsYouForJob, setOverride, type NeedsYou, type Question } from "./bank.js";
 
 /** After a resume upload: requeues the jobs that were waiting for one. Returns their ids. */
 export function requeueWaitingForResume(db: Db): string[] {
@@ -26,19 +26,29 @@ export function canDoItNow(db: Db, jobId: string): boolean {
   return openNeedsYouForJob(db, jobId).some(n => AT_THE_BROWSER.has(n.kind));
 }
 
-/** A job a question blocks, with the blocking field (label and kind are null on blockers stored before they were recorded). */
+/**
+ * A job a question blocks, with the blocking field exactly as the form shows it: label, kind, options,
+ * and description (section heading or helper text). Label and kind are null on blockers stored before
+ * they were recorded; description is null when the form has none.
+ */
 export interface BlockedJob {
-  id: string; company: string; title: string; label: string | null; kind: FieldKind | null; options: string[] | null;
+  id: string; company: string; title: string; url: string;
+  label: string | null; kind: FieldKind | null; options: string[] | null; description: string | null;
 }
 export interface InboxItem { question: Question; jobs: BlockedJob[] }
 
-type BlockerRow = { id: string; company: string; title: string; label: string | null; kind: FieldKind | null; options_json: string | null };
-const toBlocked = (r: BlockerRow): BlockedJob =>
-  ({ id: r.id, company: r.company, title: r.title, label: r.label, kind: r.kind, options: r.options_json ? (JSON.parse(r.options_json) as string[]) : null });
+type BlockerRow = {
+  id: string; company: string; title: string; url: string; label: string | null; kind: FieldKind | null; options_json: string | null; description: string | null;
+};
+const toBlocked = (r: BlockerRow): BlockedJob => ({
+  id: r.id, company: r.company, title: r.title, url: r.url, label: r.label, kind: r.kind,
+  options: r.options_json ? (JSON.parse(r.options_json) as string[]) : null, description: r.description,
+});
 
 /** The jobs still waiting on the user (needs-you) that the question blocks. */
 function blockedJobsOf(db: Db, questionId: number): BlockedJob[] {
-  const rows = db.prepare(`SELECT j.id, j.company, j.title, b.field_label AS label, b.field_kind AS kind, b.options_json
+  const rows = db.prepare(`SELECT j.id, j.company, j.title, j.url, b.field_label AS label, b.field_kind AS kind, b.options_json,
+        b.field_description AS description
       FROM job_blockers b JOIN jobs j ON j.id = b.job_id
       WHERE b.question_id = ? AND j.status = 'needs-you' ORDER BY j.rowid`).all(questionId) as unknown as BlockerRow[];
   return rows.map(toBlocked);
@@ -107,6 +117,27 @@ export function answerFromInbox(db: Db, questionId: number, input: { text: strin
     }
   }
   return { requeued: requeueUnblocked(db, blockers.map(b => b.id)) };
+}
+
+/**
+ * Re-checks jobs waiting on answers against the current profile and resume: requeues every needs-you
+ * job whose application can't have been sent already, that isn't waiting for a CAPTCHA, code or login
+ * or for a resume upload, after clearing its blockers so the next run resolves its fields again.
+ * Returns the requeued job ids.
+ */
+export function recheckBlockedJobs(db: Db): string[] {
+  const ids = (db.prepare("SELECT id FROM jobs WHERE status = 'needs-you' ORDER BY rowid").all() as unknown as { id: string }[]).map(r => r.id);
+  const requeued: string[] = [];
+  for (const id of ids) {
+    const job = getJob(db, id)!;
+    if (isUnknownSubmission(job) || job.statusReason === RESUME_NEEDED) continue;
+    if (openNeedsYouForJob(db, id).some(n => AT_THE_BROWSER.has(n.kind))) continue;
+    clearBlockersForJob(db, id);
+    resolveNeedsYouForJob(db, id);
+    setStatus(db, id, "queued");
+    requeued.push(id);
+  }
+  return requeued;
 }
 
 /** Approves the answer, clears its blockers, and requeues needs-you jobs left with nothing blocking them. */

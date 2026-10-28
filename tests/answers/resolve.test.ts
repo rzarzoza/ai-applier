@@ -98,7 +98,8 @@ test("hispanic yes/no question resolves from profile.hispanicLatino", async () =
 test("unknown profileKey from the classifier is treated as a question", async () => {
   const db = setup();
   const llm = new FakeLlm()
-    .on("classify", classifyAs({ x: { category: "profile", profileKey: "shoeSize" as never, canonicalQuestion: "What is your shoe size?", isFactual: false } }));
+    .on("classify", classifyAs({ x: { category: "profile", profileKey: "shoeSize" as never, canonicalQuestion: "What is your shoe size?", isFactual: false } }))
+    .on("fact", () => ({ answerable: false, answer: null, basis: null }));
   const res = await resolveFields({ db, llm }, [f("x", "Shoe size", "text")], job);
   expect(res[0]).toMatchObject({ status: "blocked", reason: "missing" });
   expect(llm.calls.some(c => c.name === "draft")).toBe(false);
@@ -184,7 +185,8 @@ test("factual question with no match blocks missing, never drafts", async () => 
     .on("classify", classifyAs({ cl: { category: "question", canonicalQuestion: "Do you hold a security clearance?", isFactual: true } }))
     // A medium-confidence match is not enough for a factual question.
     .on("match", () => ({ matchId: other.id, confidence: "medium" }))
-    .on("draft", () => ({ answerable: true, draft: "Yes" }));
+    .on("draft", () => ({ answerable: true, draft: "Yes" }))
+    .on("fact", () => ({ answerable: false, answer: null, basis: null }));
   const res = await resolveFields({ db, llm }, [f("cl", "Do you hold an active security clearance?", "radio", { options: ["Yes", "No"] })], job);
   expect(llm.calls.some(c => c.name === "draft")).toBe(false);
   const created = listQuestions(db).find(x => x.id !== other.id)!;
@@ -203,7 +205,8 @@ test("matched question still in draft or unanswered blocks; optional unanswered 
       pay: { category: "question", canonicalQuestion: "Salary expectations?", isFactual: true },
       pay2: { category: "question", canonicalQuestion: "Salary expectations?", isFactual: true },
     }))
-    .on("match", req => ({ matchId: JSON.parse(String(req.content)).newQuestion === "Career goals?" ? drafted.id : unanswered.id, confidence: "high" }));
+    .on("match", req => ({ matchId: JSON.parse(String(req.content)).newQuestion === "Career goals?" ? drafted.id : unanswered.id, confidence: "high" }))
+    .on("fact", () => ({ answerable: false, answer: null, basis: null }));
   const res = await resolveFields({ db, llm }, [
     f("goals", "Career goals", "textarea"),
     f("pay", "Salary expectations", "text"),
@@ -381,13 +384,14 @@ test("a saved question with exactly the same canonical text matches without aski
       cl: { category: "question", canonicalQuestion: "do you hold a security clearance", isFactual: true },
       grad: { category: "question", canonicalQuestion: "When do you expect to graduate?", isFactual: true },
     }))
-    .on("match", () => ({ matchId: null, confidence: "low" }));
+    .on("match", () => ({ matchId: null, confidence: "low" }))
+    .on("fact", () => ({ answerable: false, answer: null, basis: null }));
   const res = await resolveFields({ db, llm }, [
     f("cl", "Do you currently hold a clearance?", "radio", { options: ["Yes", "No"] }),
     // Matching a variant's wording is not enough: only canonical text short-circuits.
     f("grad", "When do you expect to graduate?", "text"),
   ], job);
-  expect(llm.calls.map(c => c.name)).toEqual(["classify", "match"]);
+  expect(llm.calls.map(c => c.name)).toEqual(["classify", "match", "fact"]);
   expect(res[0]).toEqual({ fieldId: "cl", status: "filled", answer: { type: "option", option: "No" }, source: "bank" });
   expect(res[1]).toMatchObject({ status: "blocked" });
 });
@@ -398,9 +402,85 @@ test("short generic labels never short-circuit the matcher, even with the same c
   approveAnswer(db, q.id, "I was relocating for family reasons.");
   const llm = new FakeLlm()
     .on("classify", classifyAs({ why: { category: "question", canonicalQuestion: "Please explain", isFactual: true } }))
-    .on("match", () => ({ matchId: null, confidence: "low" }));
+    .on("match", () => ({ matchId: null, confidence: "low" }))
+    .on("fact", () => ({ answerable: false, answer: null, basis: null }));
   const res = await resolveFields({ db, llm }, [f("why", "Please explain", "textarea")], job);
-  expect(llm.calls.map(c => c.name)).toEqual(["classify", "match"]);
+  expect(llm.calls.map(c => c.name)).toEqual(["classify", "match", "fact"]);
   expect(res[0]).toMatchObject({ status: "blocked" });
   expect(getQuestion(db, q.id)!.useCount).toBe(0);
+});
+
+/** A "fact" handler that answers each question (by the field's label) from a fixed table; anything else is not answerable. */
+const factBy = (table: Record<string, { answer: string; basis: string }>) => (req: { content: unknown }) => {
+  const hit = table[JSON.parse(String(req.content)).field.label as string];
+  return hit ? { answerable: true, ...hit } : { answerable: false, answer: null, basis: null };
+};
+
+const EXPORT_CONTROL = "Are you one of the following: a U.S. citizen, a U.S. national, a lawful permanent resident, an asylee or refugee?";
+const SCHOOL = "Please list the school or university you will be enrolled in during the internship or co-op?";
+
+test("a factual question the profile answers becomes a draft with its basis and waits for approval, never sent unapproved", async () => {
+  const db = setup();
+  saveProfile(db, { school: "Rice University", usCitizen: true, relatedToEmployee: null });
+  const llm = new FakeLlm()
+    .on("classify", classifyAs({
+      exp: { category: "question", canonicalQuestion: "Are you a U.S. citizen, national, LPR, asylee or refugee?", isFactual: true },
+      school: { category: "question", canonicalQuestion: "School enrolled in during the internship", isFactual: true },
+      rel: { category: "question", canonicalQuestion: "Are you related to a {company} employee?", isFactual: true },
+      opt: { category: "question", canonicalQuestion: "Preferred school", isFactual: true },
+    }))
+    .on("match", () => ({ matchId: null, confidence: "low" }))
+    .on("draft", () => { throw new Error("factual questions are never drafted"); })
+    .on("fact", factBy({
+      [EXPORT_CONTROL]: { answer: "Yes", basis: "profile.usCitizen = true" },
+      [SCHOOL]: { answer: "Rice University", basis: "profile.school = Rice University" },
+    }));
+  const res = await resolveFields({ db, llm }, [
+    f("exp", EXPORT_CONTROL, "radio", { options: ["Yes", "No"] }),
+    f("school", SCHOOL, "textarea", { required: false }),
+    f("rel", "Are you related to a Acme employee?", "radio", { options: ["Yes", "No"] }),
+  ], job);
+  const [exp, school, rel] = listQuestions(db);
+  expect(exp).toMatchObject({ status: "draft", draft: "Yes", draftBasis: "profile.usCitizen = true", answer: null, isFactual: true });
+  expect(school).toMatchObject({ status: "draft", draft: "Rice University", draftBasis: "profile.school = Rice University" });
+  expect(rel).toMatchObject({ status: "none", draft: null, draftBasis: null });
+  expect(res).toEqual([
+    { fieldId: "exp", status: "blocked", questionId: exp!.id, reason: "approval" },
+    // Optional or not, a suggestion is approved once before it is ever sent.
+    { fieldId: "school", status: "blocked", questionId: school!.id, reason: "approval" },
+    { fieldId: "rel", status: "blocked", questionId: rel!.id, reason: "missing" },
+  ]);
+  const fact = llm.calls.find(c => c.name === "fact")!;
+  expect(fact.effort).toBe("low");
+  expect(fact.cachedContext).toContain("Built a compiler in Rust.");
+  expect(fact.cachedContext).toContain("Rice University");
+  expect(llm.calls.some(c => c.name === "draft")).toBe(false);
+});
+
+test("a fact answer that isn't exactly one of the field's options is rejected", async () => {
+  const db = setup();
+  const llm = new FakeLlm()
+    .on("classify", classifyAs({ exp: { category: "question", canonicalQuestion: "Export control status", isFactual: true } }))
+    .on("match", () => ({ matchId: null, confidence: "low" }))
+    .on("fact", () => ({ answerable: true, answer: "Yes, I am a U.S. citizen", basis: "profile.usCitizen = true" }));
+  const [r] = await resolveFields({ db, llm }, [f("exp", EXPORT_CONTROL, "radio", { options: ["Yes", "No"] })], job);
+  expect(r).toMatchObject({ status: "blocked", reason: "missing" });
+  expect(listQuestions(db)[0]).toMatchObject({ status: "none", draft: null });
+});
+
+test("a matched factual question still unanswered gets a fact draft; an approved draft fills later forms", async () => {
+  const db = setup();
+  const q = createQuestion(db, { canonical: "When could you start a summer internship?", kind: "global", isFactual: true });
+  saveProfile(db, { earliestStart: "May 1st 2027" });
+  const llm = new FakeLlm()
+    .on("classify", classifyAs({ start: { category: "question", canonicalQuestion: "Internship start availability", isFactual: true } }))
+    .on("match", () => ({ matchId: q.id, confidence: "high" }))
+    .on("fact", () => ({ answerable: true, answer: "May 1st 2027", basis: "profile.earliestStart = May 1st 2027" }));
+  const fields = [f("start", "When would you be available to start a summer internship?", "text")];
+  expect(await resolveFields({ db, llm }, fields, job)).toEqual([{ fieldId: "start", status: "blocked", questionId: q.id, reason: "approval" }]);
+  expect(getQuestion(db, q.id)).toMatchObject({ status: "draft", draft: "May 1st 2027", draftBasis: "profile.earliestStart = May 1st 2027", answer: null });
+
+  approveAnswer(db, q.id, "May 1st 2027");
+  expect(await resolveFields({ db, llm }, fields, { ...job, jobId: "j2" }))
+    .toEqual([{ fieldId: "start", status: "filled", answer: { type: "text", text: "May 1st 2027" }, source: "bank" }]);
 });

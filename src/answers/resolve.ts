@@ -4,9 +4,9 @@ import { hasSubmittedToCompany } from "../jobs/repo.js";
 import type { Llm } from "../llm/llm.js";
 import { getProfile, profileValue, type Profile } from "../profile/profile.js";
 import { adaptAnswer } from "./adapt.js";
-import { addVariant, createQuestion, getOverrides, getQuestion, incrementUse, listQuestions, type Question } from "./bank.js";
+import { addVariant, createQuestion, getOverrides, getQuestion, incrementUse, listQuestions, setDraft, type Question } from "./bank.js";
 import { classifyFields, normalizeLabel, withCompanyPlaceholder, type Classification, type DerivedKey } from "./classify.js";
-import { draftAnswer, fillTemplate } from "./draft.js";
+import { draftAnswer, factAnswer, fillTemplate } from "./draft.js";
 import { matchQuestion } from "./match.js";
 
 export type FillSource = "override" | "profile" | "derived" | "consent" | "resume" | "bank" | "template";
@@ -170,17 +170,21 @@ async function fromBank(ctx: Ctx, field: FieldSpec, c: Classification): Promise<
   const matched = matchId === null ? null : getQuestion(db, matchId);
   if (matched) {
     addVariant(db, matched.id, field.label);
-    return fromMatched(ctx, field, matched);
+    return fromMatched(ctx, field, matched, isFactual);
   }
 
   const kind = c.isCompanySpecific ? "template" : "global";
-  const create = (draft: string | null) => {
-    const q = createQuestion(db, { canonical, kind: isFactual ? "global" : kind, isFactual, options: field.options ?? null, draft });
+  const create = (draft: string | null, draftBasis: string | null = null) => {
+    const q = createQuestion(db, { canonical, kind: isFactual ? "global" : kind, isFactual, options: field.options ?? null, draft, draftBasis });
     addVariant(db, q.id, field.label);
     return q;
   };
 
   if (isFactual) {
+    // Factual questions are never drafted; only a fact the profile or resume states is suggested.
+    const fact = await factAnswer(llm, profile, canonical, field, job);
+    // Even an optional field waits for approval, so every suggestion is reviewed once before it is sent.
+    if (fact.answerable) return blocked(field, create(fact.answer, fact.basis).id, "approval");
     const q = create(null);
     return field.required ? blocked(field, q.id, "missing") : skip(field);
   }
@@ -193,7 +197,7 @@ async function fromBank(ctx: Ctx, field: FieldSpec, c: Classification): Promise<
   return field.required ? blocked(field, q.id, "missing") : skip(field);
 }
 
-async function fromMatched(ctx: Ctx, field: FieldSpec, q: Question): Promise<Resolution> {
+async function fromMatched(ctx: Ctx, field: FieldSpec, q: Question, isFactual: boolean): Promise<Resolution> {
   const { db, llm, profile, job } = ctx;
   if (q.status === "draft") return blocked(field, q.id, "approval");
   if (q.status === "approved" && q.answer !== null) {
@@ -203,6 +207,13 @@ async function fromMatched(ctx: Ctx, field: FieldSpec, q: Question): Promise<Res
     if (answer) {
       incrementUse(db, q.id);
       return filled(field, answer, isTemplate ? "template" : "bank");
+    }
+  }
+  if (q.status === "none" && (isFactual || q.isFactual)) {
+    const fact = await factAnswer(llm, profile, q.canonical, field, job);
+    if (fact.answerable) {
+      setDraft(db, q.id, fact.answer!, fact.basis);
+      return blocked(field, q.id, "approval");
     }
   }
   return field.required ? blocked(field, q.id, "missing") : skip(field);

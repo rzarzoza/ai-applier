@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSyn
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Hono } from "hono";
-import { answerFromInbox, answerQuestion, canDoItNow, deleteQuestionAndRequeue, requeueWaitingForResume } from "../answers/inbox.js";
+import { answerFromInbox, answerQuestion, canDoItNow, deleteQuestionAndRequeue, recheckBlockedJobs, requeueWaitingForResume } from "../answers/inbox.js";
 import { getQuestion, listQuestions, approveAnswer, resolveNeedsYouForJob, setDraft, setOverride } from "../answers/bank.js";
 import { reviseDraft } from "../answers/draft.js";
 import type { Db } from "../db/db.js";
@@ -92,7 +92,15 @@ export function createApp(ctx: AppContext): Hono {
   }
 
   app.get("/", c => c.redirect("/inbox"));
-  app.get("/inbox", c => c.html(InboxPage({ db })));
+  app.get("/inbox", c => {
+    const rechecked = c.req.query("rechecked");
+    return c.html(InboxPage({ db, rechecked: rechecked !== undefined && /^\d+$/.test(rechecked) ? Number(rechecked) : undefined }));
+  });
+
+  app.post("/inbox/recheck", c => {
+    const requeued = recheckBlockedJobs(db);
+    return c.redirect(`/inbox?rechecked=${requeued.length}`, 303);
+  });
 
   app.post("/inbox/:id/answer", async c => {
     const id = Number(c.req.param("id"));

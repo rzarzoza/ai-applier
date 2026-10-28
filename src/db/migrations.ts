@@ -94,4 +94,6 @@ export const migrations: string[] = [
   `ALTER TABLE job_blockers ADD COLUMN options_json TEXT;
   ALTER TABLE job_blockers ADD COLUMN field_label TEXT;
   ALTER TABLE job_blockers ADD COLUMN field_kind TEXT;`,
+  `ALTER TABLE job_blockers ADD COLUMN field_description TEXT;
+  ALTER TABLE questions ADD COLUMN draft_basis TEXT;`,
 ];

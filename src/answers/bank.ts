@@ -4,11 +4,13 @@ import type { FieldAnswer, FieldSpec } from "../forms/types.js";
 export interface Question {
   id: number; canonical: string; kind: "global" | "template"; isFactual: boolean; answer: string | null;
   draft: string | null; status: "none" | "draft" | "approved"; options: string[] | null; useCount: number; variants: string[];
+  /** What a draft taken from the profile or resume was based on (e.g. "profile.usCitizen = true"), when known. */
+  draftBasis: string | null;
 }
 
 interface Row {
   id: number; canonical: string; kind: Question["kind"]; is_factual: number; answer: string | null;
-  draft: string | null; status: Question["status"]; options: string | null; use_count: number;
+  draft: string | null; status: Question["status"]; options: string | null; use_count: number; draft_basis: string | null;
 }
 
 function toQuestion(db: Db, r: Row): Question {
@@ -16,6 +18,7 @@ function toQuestion(db: Db, r: Row): Question {
   return {
     id: r.id, canonical: r.canonical, kind: r.kind, isFactual: r.is_factual === 1, answer: r.answer, draft: r.draft,
     status: r.status, options: r.options ? (JSON.parse(r.options) as string[]) : null, useCount: r.use_count, variants,
+    draftBasis: r.draft_basis ?? null,
   };
 }
 
@@ -24,9 +27,12 @@ export function getQuestion(db: Db, id: number): Question | null {
   return r ? toQuestion(db, r) : null;
 }
 
-export function createQuestion(db: Db, q: { canonical: string; kind: "global" | "template"; isFactual: boolean; options?: string[] | null; draft?: string | null }): Question {
-  const res = db.prepare("INSERT INTO questions (canonical, kind, is_factual, draft, status, options) VALUES (?, ?, ?, ?, ?, ?)")
-    .run(q.canonical, q.kind, q.isFactual ? 1 : 0, q.draft ?? null, q.draft ? "draft" : "none", q.options ? JSON.stringify(q.options) : null);
+export function createQuestion(db: Db, q: {
+  canonical: string; kind: "global" | "template"; isFactual: boolean; options?: string[] | null; draft?: string | null; draftBasis?: string | null;
+}): Question {
+  const res = db.prepare("INSERT INTO questions (canonical, kind, is_factual, draft, status, options, draft_basis) VALUES (?, ?, ?, ?, ?, ?, ?)")
+    .run(q.canonical, q.kind, q.isFactual ? 1 : 0, q.draft ?? null, q.draft ? "draft" : "none", q.options ? JSON.stringify(q.options) : null,
+      q.draft ? q.draftBasis ?? null : null);
   return getQuestion(db, Number(res.lastInsertRowid))!;
 }
 
@@ -47,8 +53,10 @@ export function addVariant(db: Db, id: number, label: string): void {
   db.prepare("INSERT OR IGNORE INTO question_variants (question_id, label) VALUES (?, ?)").run(id, label);
 }
 
-export function setDraft(db: Db, id: number, text: string): void {
-  db.prepare("UPDATE questions SET draft = ?, status = CASE WHEN status = 'approved' THEN status ELSE 'draft' END WHERE id = ?").run(text, id);
+/** Sets the draft (and its basis; none unless given, so a revised draft drops the old one). */
+export function setDraft(db: Db, id: number, text: string, basis: string | null = null): void {
+  db.prepare("UPDATE questions SET draft = ?, draft_basis = ?, status = CASE WHEN status = 'approved' THEN status ELSE 'draft' END WHERE id = ?")
+    .run(text, basis, id);
 }
 
 export function approveAnswer(db: Db, id: number, text: string, kind?: "global" | "template"): void {
@@ -63,10 +71,16 @@ export function incrementUse(db: Db, id: number): void {
   db.prepare("UPDATE questions SET use_count = use_count + 1 WHERE id = ?").run(id);
 }
 
-/** Records that the question blocks the job, with the blocking field's label, kind and options when known. */
-export function addBlocker(db: Db, jobId: string, questionId: number, reason: "missing" | "approval", field?: Pick<FieldSpec, "label" | "kind" | "options">): void {
-  db.prepare("INSERT OR REPLACE INTO job_blockers (job_id, question_id, reason, field_label, field_kind, options_json) VALUES (?, ?, ?, ?, ?, ?)")
-    .run(jobId, questionId, reason, field?.label ?? null, field?.kind ?? null, field?.options?.length ? JSON.stringify(field.options) : null);
+/**
+ * Records that the question blocks the job, with the blocking field's label, kind, options and
+ * description (its section heading or helper text) when known.
+ */
+export function addBlocker(db: Db, jobId: string, questionId: number, reason: "missing" | "approval",
+  field?: Pick<FieldSpec, "label" | "kind" | "options" | "description">): void {
+  db.prepare(`INSERT OR REPLACE INTO job_blockers (job_id, question_id, reason, field_label, field_kind, options_json, field_description)
+      VALUES (?, ?, ?, ?, ?, ?, ?)`)
+    .run(jobId, questionId, reason, field?.label ?? null, field?.kind ?? null, field?.options?.length ? JSON.stringify(field.options) : null,
+      field?.description?.trim() || null);
 }
 
 /** Removes every blocker recorded for the job (a new run records the ones that still apply). */

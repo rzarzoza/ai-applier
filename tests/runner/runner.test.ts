@@ -97,7 +97,8 @@ beforeEach(() => {
   llm = new FakeLlm()
     .on("classify", classifyBy())
     .on("match", () => ({ matchId: null, confidence: "low" }))
-    .on("draft", () => ({ answerable: false, draft: null }));
+    .on("draft", () => ({ answerable: false, draft: null }))
+    .on("fact", () => ({ answerable: false, answer: null, basis: null }));
   notifications = [];
   opened = [];
   lastPage = null;
@@ -235,8 +236,8 @@ test("unknown required question → needs-you with blocker, nothing filled or su
   const [q] = listQuestions(db).filter(x => x.id === blockersForJob(db, job.id)[0]!.questionId);
   expect(q!.canonical).toBe("Are you willing to relocate?");
   // The blocker keeps the form's own field, so the inbox can offer this form's options.
-  expect(inboxItems(db)[0]!.jobs).toEqual([{ id: job.id, company: "Mini Co", title: "Software Engineer Intern",
-    label: "Are you willing to relocate?", kind: "select", options: expect.arrayContaining(["Yes", "No"]) }]);
+  expect(inboxItems(db)[0]!.jobs).toEqual([{ id: job.id, company: "Mini Co", title: "Software Engineer Intern", url: job.url,
+    label: "Are you willing to relocate?", kind: "select", options: expect.arrayContaining(["Yes", "No"]), description: null }]);
   expectScreenshot(job.id);
   // Nothing was typed into the page before stopping.
   expect(JSON.parse(snapshotRow(job.id)!.resolutions_json).filter((r: { status: string }) => r.status === "blocked")).toHaveLength(1);
