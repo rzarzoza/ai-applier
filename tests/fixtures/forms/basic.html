@@ -1,0 +1,85 @@
+<!doctype html>
+<html><body>
+<form>
+  <label for="fn">First Name</label>
+  <input id="fn" name="first" type="text" required>
+
+  <label>Email <input name="email" type="email" required aria-describedby="email-help"></label>
+  <p id="email-help">We only use this for updates.</p>
+
+  <span id="li-label">LinkedIn Profile</span>
+  <input name="linkedin" type="url" aria-labelledby="li-label">
+
+  <label for="ph">Phone *</label>
+  <input id="ph" name="phone" type="tel">
+
+  <input type="hidden" name="csrf" value="abc">
+
+  <label for="why">Why us?</label>
+  <textarea id="why" name="why" maxlength="500"></textarea>
+
+  <label for="deg">Degree *</label>
+  <select id="deg" name="degree" required>
+    <option value="">Select...</option>
+    <option value="b">Bachelor's</option>
+    <option value="m">Master's</option>
+  </select>
+
+  <fieldset>
+    <legend>Are you authorized to work in the US?</legend>
+    <label><input type="radio" name="auth" value="y" required> Yes</label>
+    <label><input type="radio" name="auth" value="n"> No</label>
+  </fieldset>
+
+  <fieldset>
+    <legend>Consent</legend>
+    <label><input type="checkbox" name="certify" required> I certify the above is accurate</label>
+  </fieldset>
+  <label><input type="checkbox" name="sms"> I agree to receive SMS updates</label>
+
+  <fieldset>
+    <legend>Which languages?</legend>
+    <label><input type="checkbox" name="lang" value="en"> English</label>
+    <label><input type="checkbox" name="lang" value="es"> Spanish</label>
+    <label><input type="checkbox" name="lang" value="fr"> French</label>
+  </fieldset>
+
+  <div>
+    <label for="cv">Resume *</label>
+    <input id="cv" name="resume" type="file" required style="display:none">
+    <button type="button" onclick="document.getElementById('cv').click()">Attach</button>
+  </div>
+
+  <label for="school">School *</label>
+  <div style="position:relative">
+    <input id="school" name="school" type="text" role="combobox" aria-expanded="false" aria-controls="school-list" autocomplete="off" required>
+    <ul id="school-list" role="listbox" hidden></ul>
+  </div>
+</form>
+<script>
+(() => {
+  const schools = ["University of Texas at Austin", "University of Texas at Dallas", "Stanford University", "MIT"];
+  const input = document.getElementById("school");
+  const list = document.getElementById("school-list");
+  function render() {
+    const q = input.value.toLowerCase();
+    list.innerHTML = "";
+    schools.filter(s => s.toLowerCase().includes(q)).forEach(s => {
+      const li = document.createElement("li");
+      li.setAttribute("role", "option");
+      li.textContent = s;
+      li.addEventListener("mousedown", e => e.preventDefault());
+      li.addEventListener("click", () => { input.value = s; close(); });
+      list.appendChild(li);
+    });
+    list.hidden = false;
+    input.setAttribute("aria-expanded", "true");
+  }
+  function close() { list.hidden = true; input.setAttribute("aria-expanded", "false"); }
+  input.addEventListener("focus", render);
+  input.addEventListener("click", render);
+  input.addEventListener("input", render);
+  input.addEventListener("keydown", e => { if (e.key === "Escape") close(); });
+})();
+</script>
+</body></html>
