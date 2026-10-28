@@ -88,4 +88,6 @@ export const migrations: string[] = [
     screenshot_path TEXT,
     created_at TEXT NOT NULL
   );`,
+  `ALTER TABLE jobs ADD COLUMN resume_used TEXT;
+  ALTER TABLE jobs ADD COLUMN cover_letter_used TEXT;`,
 ];

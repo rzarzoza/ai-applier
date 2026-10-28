@@ -15,7 +15,10 @@ import { importResume } from "../profile/resume.js";
 import { saveFilters } from "../filters/filters.js";
 import { addSource, listSources, setSourceEnabled } from "../sources/repo.js";
 import { getSecret, setSecret } from "../secrets.js";
-import { saveSettings, type Settings } from "../settings.js";
+import { saveSettings, setJson, type Settings } from "../settings.js";
+import { writeTrackerCsv } from "../tracker/csv.js";
+import { spreadsheetIdFromUrl } from "../tracker/sheets.js";
+import { SERVICE_ACCOUNT_SECRET, SHEET_URL_KEY, type SyncResult } from "../tracker/sync.js";
 import {
   ApplicationsPage, JobDetailPage, canMarkApplied, canRetry, canSkip, fieldViews, isStatus, isUnknownSubmission, parseAnswer,
 } from "./pages/applications.js";
@@ -36,10 +39,13 @@ export interface AppContext {
   secrets?: { get(name: string): Promise<string | null>; set(name: string, value: string): Promise<void> };
   /** Called after a new API key was stored, so the app can rebuild its LLM client. */
   onApiKeySaved?(): void;
+  /** Rewrites the CSV and pushes to the Google Sheet. Never rejects; overlapping calls are merged. */
+  syncTracker?(): Promise<SyncResult>;
 }
 
 const API_KEY_NAME = "anthropic-api-key";
 const MAX_RESUME_BYTES = 10 * 1024 * 1024;
+const MAX_SERVICE_KEY_BYTES = 64 * 1024;
 
 /** Turns a GitHub repo URL or a listings.json URL into a source, or null if it is neither. */
 export function sourceFromUrl(input: string): { id: string; kind: "simplify-json" | "readme-table"; url: string } | null {
@@ -188,6 +194,7 @@ export function createApp(ctx: AppContext): Hono {
         return c.text("Confirm that you checked the application was not sent", 400);
       apply(job);
       resolveNeedsYouForJob(db, job.id);
+      if (name === "mark-applied") void ctx.syncTracker?.();
       return c.redirect(`/applications/${job.id}`, 303);
     });
   transition("skip", canSkip, j => setStatus(db, j.id, "skipped", "Skipped by you"));
@@ -281,7 +288,63 @@ export function createApp(ctx: AppContext): Hono {
     try { return !!(await secrets.get(API_KEY_NAME)); } catch { return null; }
   };
 
-  app.get("/settings", async c => c.html(SettingsPage({ db, keySet: await keyState() })));
+  /** The service account's email, or null when no usable key is stored (never the key itself). */
+  const serviceEmail = async (): Promise<string | null | undefined> => {
+    try {
+      const raw = await secrets.get(SERVICE_ACCOUNT_SECRET);
+      if (!raw) return null;
+      const email = (JSON.parse(raw) as { client_email?: unknown }).client_email;
+      return typeof email === "string" ? email : null;
+    } catch { return undefined; }
+  };
+  const settingsPage = async (extra: { notice?: string; error?: string; trackerError?: string; urlDraft?: string } = {}) =>
+    SettingsPage({ db, keySet: await keyState(), serviceEmail: await serviceEmail(), ...extra });
+
+  app.get("/settings", async c => c.html(await settingsPage()));
+
+  app.post("/tracker/url", async c => {
+    const url = str((await c.req.parseBody()).url);
+    if (url && !spreadsheetIdFromUrl(url))
+      return c.html(await settingsPage({ trackerError: "That doesn't look like a Google Sheet link (https://docs.google.com/spreadsheets/d/…).", urlDraft: url }), 400);
+    setJson(db, SHEET_URL_KEY, url);
+    return c.redirect("/settings", 303);
+  });
+
+  app.post("/tracker/key", async c => {
+    const fail = async (msg: string, status: 200 | 400 = 400) => c.html(await settingsPage({ trackerError: msg }), status);
+    const file = (await c.req.parseBody()).key;
+    if (!(file instanceof File)) return fail("Choose the service-account JSON file.");
+    if (file.size > MAX_SERVICE_KEY_BYTES) return fail("That file is too large to be a service-account key.");
+    const text = await file.text();
+    let key: { type?: unknown; client_email?: unknown; private_key?: unknown };
+    try { key = JSON.parse(text); } catch { return fail("That file is not valid JSON."); }
+    if (key === null || typeof key !== "object" || key.type !== "service_account" || typeof key.client_email !== "string" || typeof key.private_key !== "string")
+      return fail("That is not a Google service-account key file.");
+    try {
+      await secrets.set(SERVICE_ACCOUNT_SECRET, text);
+    } catch (e) {
+      return fail(`Couldn't save the key to the Keychain: ${e instanceof Error ? e.message.split("\n")[0] : String(e)}`, 200);
+    }
+    return c.redirect("/settings", 303);
+  });
+
+  app.post("/tracker/sync", async c => {
+    await ctx.syncTracker?.();
+    return c.redirect("/settings", 303);
+  });
+
+  app.get("/tracker.csv", c => {
+    const file = path.join(paths.dataDir, "applications.csv");
+    try {
+      writeTrackerCsv(db, file);
+      return c.body(readFileSync(file), 200, {
+        "content-type": "text/csv; charset=utf-8",
+        "content-disposition": 'attachment; filename="applications.csv"',
+      });
+    } catch (e) {
+      return c.text(`Couldn't write the spreadsheet: ${e instanceof Error ? e.message : String(e)}`, 500);
+    }
+  });
 
   app.post("/settings", async c => {
     const form = await c.req.parseBody();
@@ -304,7 +367,7 @@ export function createApp(ctx: AppContext): Hono {
         ctx.onApiKeySaved?.();
       } catch (e) {
         const why = e instanceof Error ? e.message.split("\n")[0] : String(e);
-        return c.html(SettingsPage({ db, keySet: await keyState(), error: `Couldn't save the API key (other settings were saved): ${why}` }));
+        return c.html(await settingsPage({ error: `Couldn't save the API key (other settings were saved): ${why}` }));
       }
     }
     return c.redirect("/settings", 303);

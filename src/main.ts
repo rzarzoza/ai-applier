@@ -16,6 +16,7 @@ import { runJob, runNext, type RunnerDeps } from "./runner/runner.js";
 import { pollAll, type PollReport } from "./sources/poller.js";
 import { readmeTableAdapter } from "./sources/readme-table.js";
 import { simplifyAdapter } from "./sources/simplify.js";
+import { syncTracker, type SyncResult } from "./tracker/sync.js";
 import { createApp } from "./web/server.js";
 
 const DEFAULT_PORT = 4310;
@@ -54,9 +55,26 @@ export async function startApp(opts: StartOptions = {}): Promise<{ url: string; 
   await refreshLlm();
   const llm: Llm = { structured: req => current.structured(req) };
 
+  // Tracker syncs never touch the browser, so they skip the serial queue; two never overlap.
+  let syncing: Promise<SyncResult> | null = null;
+  let syncAgain = false;
+  const runSync = (): Promise<SyncResult> => {
+    if (syncing) { syncAgain = true; return syncing; }
+    const p: Promise<SyncResult> = (async () => {
+      let result = await syncTracker(db, { secrets, now: () => new Date() });
+      while (syncAgain) { syncAgain = false; result = await syncTracker(db, { secrets, now: () => new Date() }); }
+      if (result.error) log(`Tracker sync: ${result.error}`);
+      return result;
+    })().catch((e): SyncResult => ({ csv: true, sheet: "error", error: errText(e) }))
+      .finally(() => { syncing = null; });
+    syncing = p;
+    return p;
+  };
+
   const queue = new SerialQueue();
   const runnerDeps = (): RunnerDeps => ({
     db, llm, browser: persistentChromium, notify: macNotify, now: () => new Date(), handlers: HANDLERS,
+    onSubmitted: () => { void runSync(); },
   });
   /** Every job run goes through the one queue: the persistent Chromium profile can only be opened once. */
   const runQueued = (task: () => ReturnType<typeof runNext>, what: string) =>
@@ -95,7 +113,7 @@ export async function startApp(opts: StartOptions = {}): Promise<{ url: string; 
   const pollInFlight = () => polling ?? Promise.resolve();
 
   const app = createApp({
-    db, llm, secrets, pollNow,
+    db, llm, secrets, pollNow, syncTracker: runSync,
     runInteractive: id => runById(id, "interactive"),
     runReviewed: id => runById(id, "submit-reviewed"),
     onApiKeySaved: () => { void refreshLlm(); },
@@ -140,7 +158,7 @@ export async function startApp(opts: StartOptions = {}): Promise<{ url: string; 
       await new Promise<void>(resolve => { server.close(() => resolve()); (server as { closeAllConnections?(): void }).closeAllConnections?.(); });
       // A job may be mid-run (even waiting on the user); give it a moment, then leave it.
       const settled = await Promise.race([
-        Promise.all([...loops, queue.idle(), pollInFlight()]).then(() => true),
+        Promise.all([...loops, queue.idle(), pollInFlight(), syncing ?? Promise.resolve()]).then(() => true),
         new Promise<false>(r => setTimeout(() => r(false), STOP_WAIT_MS).unref()),
       ]);
       if (settled) db.close();

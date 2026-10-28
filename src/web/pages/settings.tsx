@@ -1,10 +1,17 @@
 import type { Db } from "../../db/db.js";
-import { getSettings } from "../../settings.js";
+import { getJson, getSettings } from "../../settings.js";
+import { SHEET_URL_KEY, SYNC_KEY, type TrackerSyncState } from "../../tracker/sync.js";
 import { Layout } from "../layout.js";
 import { inboxCount } from "./inbox.js";
 
-export function SettingsPage(props: { db: Db; keySet: boolean | null; notice?: string; error?: string }) {
+export function SettingsPage(props: {
+  db: Db; keySet: boolean | null; notice?: string; error?: string;
+  /** Service-account email: null when no key is stored, undefined when the Keychain could not be read. */
+  serviceEmail?: string | null; trackerError?: string; urlDraft?: string;
+}) {
   const s = getSettings(props.db);
+  const sheetUrl = props.urlDraft ?? getJson<string>(props.db, SHEET_URL_KEY, "");
+  const sync = getJson<TrackerSyncState | null>(props.db, SYNC_KEY, null);
   return (
     <Layout active="settings" inboxCount={inboxCount(props.db)} paused={getSettings(props.db).paused}>
       <h1>Settings</h1>
@@ -43,6 +50,31 @@ export function SettingsPage(props: { db: Db; keySet: boolean | null; notice?: s
         </label>
         <div class="row"><button class="primary" type="submit">Save settings</button></div>
       </form>
+      <div class="card">
+        <h2>Tracker spreadsheet</h2>
+        <p class="meta">Every submitted application is saved to a local spreadsheet (<a href="/tracker.csv">download applications.csv</a>). Optionally it is also kept up to date in a Google Sheet.</p>
+        {props.trackerError ? <div class="note">{props.trackerError}</div> : null}
+        <form method="post" action="/tracker/url">
+          <label class="meta" style="display:block;margin:8px 0">
+            Google Sheet URL (blank to turn off)
+            <input type="text" name="url" value={sheetUrl} placeholder="https://docs.google.com/spreadsheets/d/…" />
+          </label>
+          <div class="row"><button type="submit">Save Sheet URL</button></div>
+        </form>
+        <form method="post" action="/tracker/key" enctype="multipart/form-data">
+          <label class="meta" style="display:block;margin:8px 0">
+            Service-account key (JSON file): {props.serviceEmail === undefined ? "unknown (could not read the Keychain)" : props.serviceEmail ? "set ✓" : "not set"}
+            <input type="file" name="key" accept="application/json,.json" />
+          </label>
+          {props.serviceEmail ? <p class="meta">Share your Sheet with <strong>{props.serviceEmail}</strong> (Editor access).</p> : null}
+          <div class="row"><button type="submit">Upload key</button></div>
+        </form>
+        <p class="meta">
+          {sync?.lastSyncAt ? `Last sync: ${sync.lastSyncAt}` : "Not synced yet"}
+          {sync?.lastError ? <span> · Error: {sync.lastError}</span> : null}
+        </p>
+        <form method="post" action="/tracker/sync"><div class="row"><button class="primary" type="submit">Sync now</button></div></form>
+      </div>
     </Layout>
   );
 }

@@ -1,5 +1,5 @@
 import { expect, test } from "vitest";
-import { getSettings } from "../../src/settings.js";
+import { getJson, getSettings, setJson } from "../../src/settings.js";
 import { form, setupApp } from "./helpers.js";
 
 const base = { reviewMode: "companies", reviewCompanies: "Acme, Globex", dailyLimit: "15", pollMinutes: "60", headless: "1", apiKey: "" };
@@ -66,4 +66,78 @@ test("every dashboard page shows the paused banner only while paused", async () 
     expect(await (await app.request(p)).text()).toContain("Paused — nothing will be applied");
   saveSettings(db, { paused: false });
   expect(await (await app.request("/inbox")).text()).not.toContain("Paused — nothing will be applied");
+});
+
+// --- tracker spreadsheet ---
+const SA = JSON.stringify({ type: "service_account", client_email: "bot@proj.iam.gserviceaccount.com", private_key: "-----BEGIN PRIVATE KEY-----\nSECRETKEY\n-----END PRIVATE KEY-----\n" });
+const upload = (name: string, content: string, extra: Record<string, string> = {}) => {
+  const fd = new FormData();
+  fd.set(name, new File([content], "key.json", { type: "application/json" }));
+  for (const [k, v] of Object.entries(extra)) fd.set(k, v);
+  return { method: "POST", body: fd };
+};
+
+test("tracker URL is validated and stored under kv trackerSheetUrl", async () => {
+  const { db, app } = setupApp();
+  const bad = await app.request("/tracker/url", form({ url: "https://example.com/x" }));
+  expect(bad.status).toBe(400);
+  expect(await bad.text()).toContain("Google Sheet");
+  const ok = await app.request("/tracker/url", form({ url: "https://docs.google.com/spreadsheets/d/abc123/edit" }));
+  expect(ok.status).toBe(303);
+  expect(getJson(db, "trackerSheetUrl", "")).toBe("https://docs.google.com/spreadsheets/d/abc123/edit");
+  expect(await (await app.request("/settings")).text()).toContain("https://docs.google.com/spreadsheets/d/abc123/edit");
+  await app.request("/tracker/url", form({ url: "" }));
+  expect(getJson(db, "trackerSheetUrl", "x")).toBe("");
+});
+
+test("service-account key is stored in the secrets store, only client_email is shown", async () => {
+  const { app, secrets } = setupApp();
+  const res = await app.request("/tracker/key", upload("key", SA));
+  expect(res.status).toBe(303);
+  expect(secrets.set).toHaveBeenCalledWith("google-service-account", SA);
+  secrets.get.mockResolvedValue(SA);
+  const html = await (await app.request("/settings")).text();
+  expect(html).toContain("bot@proj.iam.gserviceaccount.com");
+  expect(html).not.toContain("SECRETKEY");
+});
+
+test("service-account key upload rejects bad files and Keychain errors without a 500", async () => {
+  const { app, secrets } = setupApp();
+  for (const bad of ["not json", JSON.stringify({ type: "user", client_email: "a", private_key: "b" }), JSON.stringify({ type: "service_account", client_email: "a" }), "x".repeat(70_000)]) {
+    const r = await app.request("/tracker/key", upload("key", bad));
+    expect(r.status).toBe(400);
+  }
+  expect((await app.request("/tracker/key", form({}))).status).toBe(400);
+  expect(secrets.set).not.toHaveBeenCalled();
+  secrets.set.mockRejectedValue(new Error("keychain locked"));
+  const r = await app.request("/tracker/key", upload("key", SA));
+  expect(r.status).toBe(200);
+  const html = await r.text();
+  expect(html).toContain("keychain locked");
+  expect(html).not.toContain("SECRETKEY");
+});
+
+test("Settings renders when the key is unreadable or malformed", async () => {
+  const { app, secrets } = setupApp();
+  secrets.get.mockResolvedValue("garbage");
+  expect((await app.request("/settings")).status).toBe(200);
+});
+
+test("POST /tracker/sync triggers a sync; GET /tracker.csv regenerates and downloads", async () => {
+  const { app, trackerSync } = setupApp();
+  const res = await app.request("/tracker/sync", { method: "POST" });
+  expect(res.status).toBe(303);
+  expect(trackerSync).toHaveBeenCalledTimes(1);
+  const csv = await app.request("/tracker.csv");
+  expect(csv.headers.get("content-type")).toContain("text/csv");
+  expect(csv.headers.get("content-disposition")).toBe('attachment; filename="applications.csv"');
+  expect(await csv.text()).toContain("Date applied,Company,Job title");
+});
+
+test("tracker section shows last sync time and error", async () => {
+  const { db, app } = setupApp();
+  setJson(db, "trackerSync", { lastSyncAt: "2026-10-28T20:00:00.000Z", lastError: "403 PERMISSION_DENIED" });
+  const html = await (await app.request("/settings")).text();
+  expect(html).toContain("403 PERMISSION_DENIED");
+  expect(html).toContain("/tracker.csv");
 });

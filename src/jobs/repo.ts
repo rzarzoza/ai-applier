@@ -75,6 +75,11 @@ export function setStatus(db: Db, id: string, status: JobStatus, reason: string 
     .run(status, reason, submittedAt, touch(), id);
 }
 
+/** Records which resume and cover letter a submitted application used (shown in the tracker). */
+export function setUsedDocuments(db: Db, id: string, resume: string | null, coverLetter: string): void {
+  db.prepare("UPDATE jobs SET resume_used = ?, cover_letter_used = ?, updated_at = ? WHERE id = ?").run(resume, coverLetter, touch(), id);
+}
+
 export function setChosenLocation(db: Db, id: string, loc: string | null): void {
   db.prepare("UPDATE jobs SET chosen_location = ?, updated_at = ? WHERE id = ?").run(loc, touch(), id);
 }

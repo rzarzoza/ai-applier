@@ -13,7 +13,9 @@ import type { Posting } from "../../src/sources/types.js";
 import { persistentChromium, type BrowserProvider } from "../../src/runner/browser.js";
 import { notificationScript } from "../../src/runner/notify.js";
 import { listRecords } from "../../src/runner/records.js";
-import { runJob, runNext, type RunnerDeps } from "../../src/runner/runner.js";
+import type { Resolution } from "../../src/answers/resolve.js";
+import type { FieldAnswer, FieldSpec } from "../../src/forms/types.js";
+import { runJob, runNext, usedDocuments, type RunnerDeps } from "../../src/runner/runner.js";
 import { FakeLlm } from "../helpers/fake-llm.js";
 import { fixtureSubmitCount, miniAts, miniAtsHandler } from "../helpers/mini-ats-handler.js";
 
@@ -399,4 +401,29 @@ test("persistent Chromium opens a page in the profile directory and closes", asy
   expect(await page.locator("p").innerText()).toBe("ok");
   await close();
   expect(page.isClosed()).toBe(true);
+});
+
+test("runner records resume_used and cover_letter_used on submit and calls onSubmitted", async () => {
+  const seen: string[] = [];
+  deps.onSubmitted = id => { seen.push(id); };
+  expect(await runJob(deps, job.id)).toBe("submitted");
+  expect(seen).toEqual([job.id]);
+  expect(db.prepare("SELECT resume_used, cover_letter_used FROM jobs WHERE id = ?").get(job.id)).toEqual({ resume_used: null, cover_letter_used: "none" });
+  // A throwing hook never changes the outcome.
+  const j2 = addJob("https://mini-ats.test/apply");
+  deps.onSubmitted = () => { throw new Error("boom"); };
+  expect(await runJob(deps, j2.id)).toBe("submitted");
+});
+
+test("usedDocuments picks the resume by source and cover letters by label", () => {
+  const f = (id: string, label: string): FieldSpec => ({ id, label, kind: "file", required: false });
+  const filled = (fieldId: string, answer: FieldAnswer, source: "resume" | "bank" | "profile"): Resolution => ({ fieldId, status: "filled", answer, source });
+  const fields = [f("1", "Resume/CV"), f("2", "Cover Letter"), f("3", "Other file")];
+  expect(usedDocuments(fields, [
+    filled("1", { type: "file", path: "/data/resume.pdf" }, "resume"),
+    filled("2", { type: "file", path: "/x/My Cover.pdf" }, "bank"),
+  ])).toEqual({ resume: "resume.pdf", coverLetter: "My Cover.pdf" });
+  const text: FieldSpec = { id: "4", label: "Why us? (cover letter)", kind: "textarea", required: false };
+  expect(usedDocuments([text], [filled("4", { type: "text", text: "hi" }, "bank")])).toEqual({ resume: null, coverLetter: "written answer" });
+  expect(usedDocuments([], [])).toEqual({ resume: null, coverLetter: "none" });
 });

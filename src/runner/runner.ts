@@ -1,3 +1,4 @@
+import path from "node:path";
 import type { Page } from "playwright";
 import { addBlocker, addNeedsYou, clearBlockersForJob, resolveNeedsYouForJob } from "../answers/bank.js";
 import { resolveFields, type Resolution } from "../answers/resolve.js";
@@ -5,7 +6,7 @@ import { atsNameFromUrl, detectAts, HANDLERS } from "../ats/registry.js";
 import type { AtsHandler, OpenResult, SubmitOutcome } from "../ats/types.js";
 import type { Db } from "../db/db.js";
 import type { FieldAnswer, FieldSpec, JobContext } from "../forms/types.js";
-import { getJob, incrementAttempts, nextQueued, setAts, setStatus, submittedSince } from "../jobs/repo.js";
+import { getJob, incrementAttempts, nextQueued, setAts, setStatus, setUsedDocuments, submittedSince } from "../jobs/repo.js";
 import type { Job, JobStatus } from "../jobs/types.js";
 import type { Llm } from "../llm/llm.js";
 import { getSettings, type Settings } from "../settings.js";
@@ -24,6 +25,8 @@ export interface RunnerDeps {
   pollMs?: number; // default 5_000
   /** How long to wait for the page to confirm a submission. */
   submitWaitMs?: number; // default 30_000
+  /** Called after a job ends submitted or applied-manually (e.g. to sync the tracker). Must not block; errors are ignored. */
+  onSubmitted?(jobId: string): void;
 }
 
 export type RunMode = "auto" | "submit-reviewed" | "interactive";
@@ -104,7 +107,12 @@ export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "a
       } catch { /* a missing snapshot must not hide the status */ }
     }
     setStatus(db, job.id, status, reason);
+    if (status === "applied-manually") notifySubmitted();
     return status;
+  };
+
+  const notifySubmitted = () => {
+    try { deps.onSubmitted?.(job.id); } catch { /* the tracker must never affect a job */ }
   };
 
   /** Records a confirmed submission. A record that can't be written never changes the status. */
@@ -122,7 +130,13 @@ export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "a
       reason = `Submitted, but the record could not be saved: ${errorMessage(err)}`;
     }
     try { resolveNeedsYouForJob(db, job.id); } catch { /* the submission stands */ }
-    return end("submitted", reason, confirmation);
+    try {
+      const docs = usedDocuments(fields, resolutions);
+      setUsedDocuments(db, job.id, docs.resume, docs.coverLetter);
+    } catch { /* the tracker columns are a convenience */ }
+    const status = await end("submitted", reason, confirmation);
+    notifySubmitted();
+    return status;
   };
 
   /** The application may already have gone out: flag it for the user and never invite a blind retry. */
@@ -305,6 +319,22 @@ function holds(field: FieldSpec, answer: FieldAnswer, got: string | string[] | b
     default:
       return !isEmpty(got);
   }
+}
+
+/** The resume file the form got, and the cover letter: a file's name, "written answer" for text, or "none". */
+export function usedDocuments(fields: FieldSpec[], resolutions: Resolution[]): { resume: string | null; coverLetter: string } {
+  const byId = new Map(fields.map(f => [f.id, f]));
+  let resume: string | null = null;
+  let coverFile: string | null = null;
+  let coverText = false;
+  for (const r of resolutions) {
+    if (r.status !== "filled") continue;
+    if (r.source === "resume" && r.answer.type === "file") resume ??= path.basename(r.answer.path);
+    if (!/cover letter/i.test(byId.get(r.fieldId)?.label ?? "")) continue;
+    if (r.answer.type === "file") coverFile ??= path.basename(r.answer.path);
+    else if (r.answer.type === "text" && r.answer.text.trim()) coverText = true;
+  }
+  return { resume, coverLetter: coverFile ?? (coverText ? "written answer" : "none") };
 }
 
 function answerValue(a: FieldAnswer): unknown {

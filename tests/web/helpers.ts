@@ -8,8 +8,9 @@ export function setupApp() {
   const llm = new FakeLlm();
   const pollNow = vi.fn();
   const secrets = { get: vi.fn().mockResolvedValue(null as string | null), set: vi.fn().mockResolvedValue(undefined) };
-  const app = createApp({ db, llm, runInteractive: vi.fn(), runReviewed: vi.fn(), pollNow, secrets });
-  return { db, llm, app, pollNow, secrets };
+  const trackerSync = vi.fn().mockResolvedValue({ csv: true, sheet: "skipped" });
+  const app = createApp({ db, llm, runInteractive: vi.fn(), runReviewed: vi.fn(), pollNow, secrets, syncTracker: trackerSync });
+  return { db, llm, app, pollNow, secrets, trackerSync };
 }
 
 export const form = (o: Record<string, string>) => ({
