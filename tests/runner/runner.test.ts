@@ -3,7 +3,7 @@ import path from "node:path";
 import { afterAll, beforeAll, beforeEach, expect, test } from "vitest";
 import { chromium, type Browser, type Page } from "playwright";
 import { openDb, type Db } from "../../src/db/db.js";
-import { addBlocker, addNeedsYou, blockersForJob, createQuestion, listOpenNeedsYou, listQuestions, setOverride } from "../../src/answers/bank.js";
+import { addBlocker, addNeedsYou, approveAnswer, blockersForJob, createQuestion, listOpenNeedsYou, listQuestions, setOverride } from "../../src/answers/bank.js";
 import { paths } from "../../src/paths.js";
 import { getJob, setStatus, upsertPosting } from "../../src/jobs/repo.js";
 import type { Job } from "../../src/jobs/types.js";
@@ -158,6 +158,43 @@ test("submit-reviewed submits a ready-to-review job and applies overrides", asyn
   const record = JSON.parse(readFileSync(path.join(listRecords(job.id)[0]!, "record.json"), "utf8"));
   expect(record.answers).toContainEqual({ label: "Phone", value: "5550001111", source: "override" });
   expect(getJob(db, job.id)!.attempts).toBe(2);
+});
+
+test("submit-reviewed sends the reviewed values, not freshly resolved ones", async () => {
+  saveSettings(db, { reviewMode: "all" });
+  const t = createQuestion(db, { canonical: "Describe a project you are proud of.", kind: "template", isFactual: false });
+  approveAnswer(db, t.id, "At {company} I would build tools.");
+  llm.on("template", () => ({ text: "At Mini Co I would build tools." }));
+  expect(await runJob(deps, job.id)).toBe("ready-to-review");
+  // Values the user never reviewed: a new profile email and a regenerated template.
+  saveProfile(db, { email: "changed@example.com" });
+  llm.on("template", () => ({ text: "Something else entirely." }));
+  expect(await runJob(deps, job.id, "submit-reviewed")).toBe("submitted");
+  expect(miniAts.submissions[0]).toMatchObject({ email: "luis@example.com", project: "At Mini Co I would build tools." });
+});
+
+test("submit-reviewed goes back to review when the form shows a value nobody reviewed", async () => {
+  saveSettings(db, { reviewMode: "all" });
+  expect(await runJob(deps, job.id)).toBe("ready-to-review");
+  // The form now reveals a follow-up question once relocation is answered.
+  db.prepare("UPDATE jobs SET url = ? WHERE id = ?").run("https://mini-ats.test/apply?conditional=1", job.id);
+  expect(await runJob(deps, job.id, "submit-reviewed")).toBe("ready-to-review");
+  expect(getJob(db, job.id)!.statusReason).toBe("Form changed since review");
+  expect(fixtureSubmitCount()).toBe(0);
+  expect(JSON.parse(snapshotRow(job.id)!.fields_json).map((f: { label: string }) => f.label)).toContain("Which cities would you consider?");
+  // Once that snapshot is reviewed, submitting sends it.
+  expect(await runJob(deps, job.id, "submit-reviewed")).toBe("submitted");
+  expect(miniAts.submissions[0]).toMatchObject({ cities: "Austin, TX" });
+});
+
+test("submit-reviewed goes back to review when a field left blank at review now gets a value", async () => {
+  saveSettings(db, { reviewMode: "all" });
+  expect(await runJob(deps, job.id)).toBe("ready-to-review");
+  llm.on("classify", classifyBy({ "Text me about new roles": { category: "consent-required" } }));
+  db.prepare("DELETE FROM field_cache").run();
+  expect(await runJob(deps, job.id, "submit-reviewed")).toBe("ready-to-review");
+  expect(getJob(db, job.id)!.statusReason).toBe("Form changed since review");
+  expect(fixtureSubmitCount()).toBe(0);
 });
 
 test("unknown required question → needs-you with blocker, nothing filled or submitted", async () => {

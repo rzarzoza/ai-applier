@@ -1,7 +1,8 @@
 import path from "node:path";
 import type { Page } from "playwright";
 import { addBlocker, addNeedsYou, clearBlockersForJob, resolveNeedsYouForJob } from "../answers/bank.js";
-import { resolveFields, type Resolution } from "../answers/resolve.js";
+import { normalizeLabel } from "../answers/classify.js";
+import { resolveFields, type FillSource, type Preset, type Resolution } from "../answers/resolve.js";
 import { atsNameFromUrl, detectAts, HANDLERS } from "../ats/registry.js";
 import type { AtsHandler, OpenResult, SubmitOutcome } from "../ats/types.js";
 import type { Db } from "../db/db.js";
@@ -13,7 +14,7 @@ import { getFilters } from "../filters/filters.js";
 import { getSettings, haltRunner, type Settings } from "../settings.js";
 import { recheckQueued } from "../sources/poller.js";
 import type { BrowserProvider } from "./browser.js";
-import { saveRecord, saveSnapshot } from "./records.js";
+import { getSnapshot, saveRecord, saveSnapshot, type Snapshot } from "./records.js";
 
 export interface RunnerDeps {
   db: Db;
@@ -107,6 +108,8 @@ export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "a
   const byId = new Map<string, FieldSpec>();
   let submitClicked = false;
   let beforeSubmit: Buffer | null = null;
+  // Submitting after review sends exactly what the user reviewed; anything else goes back for review.
+  const reviewed = mode === "submit-reviewed" ? reviewedValues(getSnapshot(db, job.id)) : null;
 
   /**
    * Saves what this run saw (with a screenshot) and sets the final status. A job that no longer needs
@@ -181,7 +184,7 @@ export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "a
 
     for (let round = 0; ; round++) {
       for (const f of batch) { fields.push(f); byId.set(f.id, f); }
-      const res = await resolveFields({ db, llm: deps.llm }, batch, ctx);
+      const res = await resolveFields({ db, llm: deps.llm }, batch, ctx, reviewed?.preset);
       resolutions.push(...res);
 
       const blocked = res.filter(r => r.status === "blocked");
@@ -217,7 +220,10 @@ export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "a
       if (!holds(field, r.answer, got) && (field.required || !isEmpty(got))) return await end("failed", `Could not fill "${field.label}"`);
     }
 
-    if (mode !== "submit-reviewed" && reviewApplies(settings, job.company)) return await end("ready-to-review", "Waiting for your review");
+    if (reviewed) {
+      const unseen = resolutions.some(r => r.status === "filled" && r.source !== "override" && !reviewed.includes(byId.get(r.fieldId)!, r.answer));
+      if (unseen) return await end("ready-to-review", "Form changed since review");
+    } else if (reviewApplies(settings, job.company)) return await end("ready-to-review", "Waiting for your review");
 
     if (dailyLimitReached(db, settings, deps.now())) {
       setStatus(db, job.id, "queued", "Daily limit reached");
@@ -320,6 +326,33 @@ async function jobContext(job: Job, handler: AtsHandler, page: Page): Promise<Jo
     term: job.terms[0] ?? null,
     description: await handler.description(page).catch(() => undefined),
   };
+}
+
+/**
+ * The values the user reviewed, by field label: `preset` gives a field its reviewed value (when its
+ * label had exactly one), and `includes` says whether a value is one the user saw for that label.
+ */
+function reviewedValues(snap: Snapshot | null): { preset: Preset; includes(field: FieldSpec, answer: FieldAnswer): boolean } {
+  const byLabel = new Map<string, { answer: FieldAnswer; source: FillSource }[]>();
+  const labels = new Map((snap?.fields ?? []).map(f => [f.id, f.label]));
+  for (const r of snap?.resolutions ?? []) {
+    const label = labels.get(r.fieldId);
+    if (r.status !== "filled" || label === undefined) continue;
+    const key = normalizeLabel(label, "");
+    byLabel.set(key, [...(byLabel.get(key) ?? []), { answer: r.answer, source: r.source }]);
+  }
+  const seen = (field: FieldSpec) => byLabel.get(normalizeLabel(field.label, "")) ?? [];
+  return {
+    preset: field => {
+      const values = seen(field);
+      return values.length > 0 && values.every(v => sameAnswer(v.answer, values[0]!.answer)) ? values[0] : undefined;
+    },
+    includes: (field, answer) => seen(field).some(v => sameAnswer(v.answer, answer)),
+  };
+}
+
+function sameAnswer(a: FieldAnswer, b: FieldAnswer): boolean {
+  return JSON.stringify(answerValue(a)) === JSON.stringify(answerValue(b)) && a.type === b.type;
 }
 
 function reviewApplies(s: Settings, company: string): boolean {

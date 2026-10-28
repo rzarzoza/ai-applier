@@ -31,25 +31,31 @@ const blocked = (field: FieldSpec, questionId: number, reason: "missing" | "appr
 const cleanLabel = (label: string) => label.trim().replace(/\s*\*+$/, "").trim();
 const nonEmpty = (v: Value): Value => (v === "" || (Array.isArray(v) && v.length === 0) ? null : v);
 
+/** A value already settled for a field (e.g. the one the user reviewed), used as is. */
+export type Preset = (field: FieldSpec) => { answer: FieldAnswer; source: FillSource } | undefined;
+
 /**
- * Decides every field's value: a per-job override, then by classification the profile, the app's
- * records, consent rules, the resume, or the answer bank (matching, templates, AI drafts). Never
- * writes job_blockers; it may create questions and add variants.
+ * Decides every field's value: a per-job override, then a preset value if given, then by
+ * classification the profile, the app's records, consent rules, the resume, or the answer bank
+ * (matching, templates, AI drafts). Never writes job_blockers; it may create questions and add variants.
  */
-export async function resolveFields(deps: { db: Db; llm: Llm }, fields: FieldSpec[], job: JobContext): Promise<Resolution[]> {
+export async function resolveFields(deps: { db: Db; llm: Llm }, fields: FieldSpec[], job: JobContext, preset?: Preset): Promise<Resolution[]> {
   const { db, llm } = deps;
   const overrides = new Map(Object.entries(getOverrides(db, job.jobId)).map(([label, a]) => [normalizeLabel(label, ""), a]));
   const overrideFor = (f: FieldSpec) => overrides.get(normalizeLabel(f.label, ""));
+  const settled = (f: FieldSpec): Resolution | undefined => {
+    const override = overrideFor(f);
+    if (override) return filled(f, override, "override");
+    const p = preset?.(f);
+    return p ? filled(f, p.answer, p.source) : undefined;
+  };
 
-  const toClassify = fields.filter(f => !overrideFor(f));
+  const toClassify = fields.filter(f => !settled(f));
   const classes = toClassify.length ? await classifyFields(db, llm, toClassify, job) : new Map<string, Classification>();
   const ctx: Ctx = { db, llm, profile: getProfile(db), job };
 
   const out: Resolution[] = [];
-  for (const field of fields) {
-    const override = overrideFor(field);
-    out.push(override ? filled(field, override, "override") : await byCategory(ctx, field, classes.get(field.id)!));
-  }
+  for (const field of fields) out.push(settled(field) ?? await byCategory(ctx, field, classes.get(field.id)!));
   return out;
 }
 
