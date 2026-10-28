@@ -379,6 +379,89 @@ test("a required field that will not keep its value fails without submitting", a
   expectScreenshot(j.id);
 });
 
+/** Wraps the mini handler to record each field whose fill went through; `breaks` names fields whose fill throws. */
+function recordingFills(breaks: Record<string, string> = {}) {
+  const filledLabels: string[] = [];
+  deps.handlers = [{
+    ...miniAtsHandler,
+    async fill(page, field, answer) {
+      if (breaks[field.label]) throw new Error(breaks[field.label]);
+      await miniAtsHandler.fill(page, field, answer);
+      filledLabels.push(field.label);
+    },
+  }];
+  return filledLabels;
+}
+const LATER_FIELDS = ["Email", "Phone", "Are you willing to relocate?", "I certify that the information above is accurate"];
+const adaptOptions = () => llm.calls.filter(c => c.name === "adapt").map(c => (JSON.parse(String(c.content)) as { options: string[] }).options);
+
+test("a field whose fill throws never stops the fields after it; a required one then fails the job with the reason", async () => {
+  const filledLabels = recordingFills({ "First Name": "First name box is broken" });
+  expect(await runJob(deps, job.id)).toBe("failed");
+  expect(getJob(db, job.id)!.statusReason).toBe('Could not fill "First Name": First name box is broken');
+  expect(filledLabels).toEqual(LATER_FIELDS);
+  expect(fixtureSubmitCount()).toBe(0);
+  expectScreenshot(job.id);
+});
+
+test("an optional field that cannot be filled is left blank and the job still submits", async () => {
+  setOverride(db, job.id, "Tell us about a project you are proud of", { type: "text", text: "A compiler" });
+  const filledLabels = recordingFills({ "Tell us about a project you are proud of": "Textarea detached" });
+  expect(await runJob(deps, job.id)).toBe("submitted");
+  expect(filledLabels).toEqual(["First Name", ...LATER_FIELDS]);
+  expect(miniAts.submissions[0]).toMatchObject({ first: "Luis", project: "", certify: "on" });
+  const record = JSON.parse(readFileSync(path.join(listRecords(job.id)[0]!, "record.json"), "utf8"));
+  expect(record.answers.map((a: { label: string }) => a.label)).not.toContain("Tell us about a project you are proud of");
+});
+
+test("a combobox without the answer's option is read and the value mapped onto its real options; later fields are filled", async () => {
+  saveProfile(db, { degree: "B.S." });
+  llm.on("classify", classifyBy({ Degree: { category: "profile", profileKey: "degree", isFactual: true } }))
+    .on("adapt", req => ({ option: (JSON.parse(String(req.content)) as { options: string[] }).options.includes("Bachelor's Degree") ? "Bachelor's Degree" : null }));
+  const filledLabels = recordingFills();
+  // Like Greenhouse's education selects: the form is read without the combobox's options.
+  const handler = deps.handlers![0]!;
+  deps.handlers = [{ ...handler, async readFields(page) {
+    const fields = await miniAtsHandler.readFields(page);
+    for (const f of fields) if (f.label === "Degree") delete f.options;
+    return fields;
+  } }];
+  const j = addJob("https://mini-ats.test/apply?degree=1");
+  expect(await runJob(deps, j.id)).toBe("submitted");
+  expect(adaptOptions()).toEqual([["Associate's Degree", "Bachelor's Degree", "Master's Degree"]]);
+  expect(filledLabels).toEqual(["First Name", "Degree", ...LATER_FIELDS]);
+  expect(miniAts.submissions).toEqual([{ first: "Luis", degree: "Bachelor's Degree", email: "luis@example.com", phone: "5551234567", reloc: "y", project: "", certify: "on" }]);
+  const record = JSON.parse(readFileSync(path.join(listRecords(j.id)[0]!, "record.json"), "utf8"));
+  expect(record.answers).toContainEqual({ label: "Degree", value: "Bachelor's Degree", source: "profile" });
+});
+
+test("a combobox value no real option matches fails the job naming the field, after every later field was filled", async () => {
+  saveProfile(db, { degree: "B.S." });
+  llm.on("classify", classifyBy({ Degree: { category: "profile", profileKey: "degree", isFactual: true } }))
+    .on("adapt", () => ({ option: null }));
+  const filledLabels = recordingFills();
+  // A lazy list shows nothing until something is typed: the value's first letter loads the options.
+  const j = addJob("https://mini-ats.test/apply?degree=1&lazy=1");
+  expect(await runJob(deps, j.id)).toBe("failed");
+  expect(getJob(db, j.id)!.statusReason).toBe('Could not fill "Degree": no option matches "B.S."');
+  expect(adaptOptions()).toEqual([["Bachelor's Degree"]]);
+  expect(filledLabels).toEqual(["First Name", ...LATER_FIELDS]);
+  expect(fixtureSubmitCount()).toBe(0);
+  expectScreenshot(j.id);
+});
+
+test("a blocked job fills every field it can: one that cannot be filled is left blank and the job still needs you", async () => {
+  saveProfile(db, { degree: "B.S.", willingToRelocate: null });
+  llm.on("classify", classifyBy({ Degree: { category: "profile", profileKey: "degree", isFactual: true } }))
+    .on("adapt", () => ({ option: null }));
+  const filledLabels = recordingFills();
+  const j = addJob("https://mini-ats.test/apply?degree=1&lazy=1");
+  expect(await runJob(deps, j.id)).toBe("needs-you");
+  expect(getJob(db, j.id)!.statusReason).toBe("1 question needs you");
+  expect(filledLabels).toEqual(["First Name", "Email", "Phone", "I certify that the information above is accurate"]);
+  expect(fixtureSubmitCount()).toBe(0);
+});
+
 test("validation error after submit → failed with page messages", async () => {
   saveProfile(db, { phone: "555-ABC" });
   expect(await runJob(deps, job.id)).toBe("failed");

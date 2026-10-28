@@ -28,6 +28,13 @@ export interface AtsHandler {
    * runner's answers are typed after it, not overwritten by it. Must not throw on a timeout; omit when the site has none.
    */
   afterUpload?(page: Page): Promise<void>;
+  /**
+   * The option texts a select, combobox or radio group offers right now, read by opening the control (comboboxes with
+   * their typed text cleared, so the whole list shows). `typed` is the value that did not match: when a list stays
+   * empty until something is typed, its first letter is typed to load options. Leaves the control closed and empty.
+   * Omit to use the generic reader (forms/fill.ts `readOptions`).
+   */
+  readOptions?(page: Page, field: FieldSpec, typed?: string): Promise<string[]>;
   readBack(page: Page, field: FieldSpec): Promise<string | string[] | boolean | null>;
   submit(page: Page): Promise<void>;
   outcome(page: Page): Promise<SubmitOutcome>;

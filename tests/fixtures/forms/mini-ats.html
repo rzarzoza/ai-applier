@@ -69,6 +69,55 @@
     });
   }
 
+  // ?degree=1: after First Name, a required react-select-like "Degree" combobox. Its options are
+  // "Associate's Degree", "Bachelor's Degree", "Master's Degree" (no "B.S."): opening it with an empty box shows them
+  // all, typing filters them (contains, any case), and clicking one picks it. Typed text that was not picked is cleared
+  // when the box loses focus or on Escape, like react-select. &lazy=1: nothing shows until something is typed.
+  if (params.has("degree")) {
+    var lazy = params.has("lazy");
+    var degrees = ["Associate's Degree", "Bachelor's Degree", "Master's Degree"];
+    var chosen = "";
+    var dLabel = document.createElement("label");
+    dLabel.htmlFor = "degree";
+    dLabel.textContent = "Degree";
+    var dInput = document.createElement("input");
+    dInput.id = "degree";
+    dInput.name = "degree";
+    dInput.type = "text";
+    dInput.required = true;
+    dInput.autocomplete = "off";
+    dInput.setAttribute("role", "combobox");
+    dInput.setAttribute("aria-controls", "degree-list");
+    var dList = document.createElement("div");
+    dList.id = "degree-list";
+    dList.setAttribute("role", "listbox");
+    dList.hidden = true;
+    // Keeps focus in the box while an option is clicked (react-select does the same).
+    dList.addEventListener("mousedown", function (e) { e.preventDefault(); });
+    var emailLabel = document.querySelector('label[for="email"]');
+    form.insertBefore(dLabel, emailLabel);
+    form.insertBefore(dInput, emailLabel);
+    form.insertBefore(dList, emailLabel);
+    var render = function () {
+      var q = dInput.value.toLowerCase();
+      dList.innerHTML = "";
+      if (lazy && !q) { dList.hidden = true; return; }
+      degrees.filter(function (d) { return d.toLowerCase().indexOf(q) >= 0; }).forEach(function (d) {
+        var o = document.createElement("div");
+        o.setAttribute("role", "option");
+        o.textContent = d;
+        o.addEventListener("click", function () { chosen = d; dInput.value = d; dList.hidden = true; });
+        dList.appendChild(o);
+      });
+      dList.hidden = !dList.children.length;
+    };
+    var close = function () { dInput.value = chosen; dList.hidden = true; };
+    dInput.addEventListener("click", render);
+    dInput.addEventListener("input", render);
+    dInput.addEventListener("blur", close);
+    dInput.addEventListener("keydown", function (e) { if (e.key === "Escape") close(); });
+  }
+
   // ?file=<label>: adds a required file upload with that label (e.g. "Resume/CV" or "Transcript").
   if (params.has("file")) {
     var submitBtn = document.getElementById("submit");

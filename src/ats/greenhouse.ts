@@ -20,7 +20,7 @@
  */
 import type { Frame, Locator, Page } from "playwright";
 import { extractFields } from "../forms/extract.js";
-import { fillField, readBack as readBackField } from "../forms/fill.js";
+import { fillField, readBack as readBackField, readOptions as readOptionsField } from "../forms/fill.js";
 import { inPage } from "../forms/in-page.js";
 import type { FieldAnswer, FieldSpec } from "../forms/types.js";
 import type { AtsHandler, OpenResult, SubmitOutcome } from "./types.js";
@@ -121,6 +121,12 @@ export const greenhouse: AtsHandler = {
     if (field.kind === "combobox") return pickOption(root, field, answer);
     await fillField(root, field, answer);
     if (field.kind === "file") await uploadSettled(root, field);
+  },
+
+  async readOptions(page, field, typed) {
+    const root = await greenhouse.root(page);
+    if (field.kind !== "combobox") return readOptionsField(root, field, typed);
+    return listOptions(root, field, typed);
   },
 
   async readBack(page, field) {
@@ -224,6 +230,39 @@ async function pickOption(root: Page | Frame, field: FieldSpec, answer: FieldAns
   }
   await input.press("Escape").catch(() => {});
   throw new Error(`No option matching "${typed}" for "${field.label}" (saw: ${seen.slice(0, 10).join(" | ")})`);
+}
+
+/**
+ * The option texts of a react-select, read with its typed text cleared so a static list shows whole. An async search
+ * list (school, degree, discipline) may show nothing until something is typed: then the first letter of `typed` is
+ * typed and the options it loads are read. Waits for the loading indicator to clear; leaves the select closed and empty.
+ */
+async function listOptions(root: Page | Frame, field: FieldSpec, typed?: string): Promise<string[]> {
+  const input = byId(root, field);
+  const loading = root.locator(".select-shell", { has: input }).locator('[class*="loading"]');
+  const read = async (waitMs: number) => {
+    const deadline = Date.now() + waitMs;
+    for (;;) {
+      const options = await listboxOptions(root, input);
+      const texts = options ? (await options.allInnerTexts()).map(t => t.replace(/\s+/g, " ").trim()).filter(Boolean) : [];
+      if ((texts.length && !(await loading.count())) || Date.now() >= deadline) return [...new Set(texts)];
+      await new Promise(r => setTimeout(r, 200));
+    }
+  };
+  try {
+    await input.click();
+    await input.fill("").catch(() => {});
+    let texts = await read(2000);
+    const hint = typed?.trim().slice(0, 1);
+    if (!texts.length && hint) {
+      await input.pressSequentially(hint);
+      texts = await read(5000);
+    }
+    return texts;
+  } finally {
+    await input.fill("").catch(() => {});
+    await input.press("Escape").catch(() => {});
+  }
 }
 
 /** The options of the listbox named by the input's aria-controls; else of the only open listbox on the page. */

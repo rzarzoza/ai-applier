@@ -1,11 +1,13 @@
 import path from "node:path";
 import type { Page } from "playwright";
 import { addBlocker, addNeedsYou, clearBlockersForJob, resolveNeedsYouForJob } from "../answers/bank.js";
+import { adaptAnswer } from "../answers/adapt.js";
 import { normalizeLabel } from "../answers/classify.js";
 import { resolveFields, type FillSource, type Preset, type Resolution } from "../answers/resolve.js";
 import { atsNameFromUrl, detectAts, HANDLERS } from "../ats/registry.js";
 import type { AtsHandler, OpenResult, SubmitOutcome } from "../ats/types.js";
 import type { Db } from "../db/db.js";
+import { readOptions as readOptionsField } from "../forms/fill.js";
 import type { FieldAnswer, FieldSpec, JobContext } from "../forms/types.js";
 import {
   decrementAttempts, getJob, incrementAttempts, isUnknownSubmission, nextQueued, RESUME_NEEDED, setAts, setStatus, setUsedDocuments,
@@ -73,6 +75,19 @@ const FINAL: ReadonlySet<JobStatus> = new Set(["submitted", "applied-manually", 
 const MAX_EXTRA_ROUNDS = 3;
 
 const isHuman = (o: SubmitOutcome) => o.kind === "captcha" || o.kind === "verification-code";
+
+/** A field that could not be filled, and a short reason why. */
+type FillFailure = { field: FieldSpec; reason: string };
+const OPTION_KINDS = new Set<FieldSpec["kind"]>(["select", "combobox", "radio"]);
+/** A fill error meaning the control offers no option matching the answer (or several equally). */
+const NO_OPTION = /no (combobox )?option|ambiguous option/i;
+const REASON_MAX = 160;
+const shortReason = (err: unknown) => {
+  const m = errorMessage(err);
+  return m.length > REASON_MAX ? `${m.slice(0, REASON_MAX - 1)}…` : m;
+};
+const couldNotFill = (f: { field: FieldSpec; reason?: string }) =>
+  f.reason ? `Could not fill "${f.field.label}": ${f.reason}` : `Could not fill "${f.field.label}"`;
 
 /**
  * Applies to one job: opens its form through the matching ATS handler, resolves and fills every
@@ -177,24 +192,68 @@ export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "a
       throw new SetupError(`The browser could not start: ${errorMessage(err)}`);
     }
     const { page } = session;
+    let ctx: JobContext | null = null;
+
+    /**
+     * Fills one answer. When a choice control offers no option matching it (or the field's options were never known),
+     * reads the options the control really offers, maps the answer's value onto one of them (adaptAnswer: never an
+     * option outside the list) and fills that once; the resolution then holds the answer actually filled. Returns why
+     * the field could not be filled, or null. API-wide LLM errors propagate.
+     */
+    const fillOne = async (r: Filled, field: FieldSpec): Promise<string | null> => {
+      try {
+        await handler.fill(page, field, r.answer);
+        return null;
+      } catch (err) {
+        const value = r.answer.type === "option" ? r.answer.option : r.answer.type === "text" ? r.answer.text : null;
+        if (value === null || !ctx || !OPTION_KINDS.has(field.kind) || (field.options?.length && !NO_OPTION.test(errorMessage(err)))) {
+          return shortReason(err);
+        }
+        const options = await (handler.readOptions ? handler.readOptions(page, field, value)
+          : handler.root(page).then(root => readOptionsField(root, field, value))).catch((): string[] => []);
+        if (!options.length) return shortReason(err);
+        const adapted = await adaptAnswer(deps.llm, value, { ...field, options }, ctx);
+        const same = adapted?.type === r.answer.type && JSON.stringify(adapted) === JSON.stringify(r.answer);
+        if (!adapted || same) return `no option matches "${value}"`;
+        await handler.fill(page, field, adapted);
+        r.answer = adapted;
+        return null;
+      }
+    };
 
     /**
      * Fills file fields first (the resume before any other file), lets the site finish handling the upload (its resume
      * parser may autofill or clear fields), then fills everything else, so a parser never overwrites typed answers.
+     * Every field is attempted: one that cannot be filled is recorded as skipped and returned, and the rest still get
+     * filled. Only API-wide LLM errors stop it.
      */
-    const fillAll = async (filled: Filled[]) => {
+    const fillAll = async (filled: Filled[]): Promise<FillFailure[]> => {
+      const failures: FillFailure[] = [];
+      const attempt = async (r: Filled) => {
+        const field = byId.get(r.fieldId)!;
+        const reason = await fillOne(r, field).catch((err: unknown) => {
+          if (llmHaltReason(err)) throw err;
+          return shortReason(err);
+        });
+        if (reason === null) return;
+        failures.push({ field, reason });
+        const i = resolutions.indexOf(r);
+        if (i >= 0) resolutions[i] = { fieldId: r.fieldId, status: "skip" };
+      };
       const { files, rest } = fillOrder(byId, filled);
-      for (const r of files) await handler.fill(page, byId.get(r.fieldId)!, r.answer);
+      for (const r of files) await attempt(r);
       if (files.length) await handler.afterUpload?.(page);
-      for (const r of rest) await handler.fill(page, byId.get(r.fieldId)!, r.answer);
+      for (const r of rest) await attempt(r);
+      return failures;
     };
 
     /**
      * Reads back every filled field still on the form (`onForm`). Values a late script (e.g. a resume parser) cleared or
      * replaced after they were typed are filled once more and read again. Returns the first field that still does not
-     * hold its answer: a blank optional field is allowed; a required one, or a field holding some other value, is not.
+     * hold its answer (with why, when filling it again failed): a blank optional field is allowed; a required one, or a
+     * field holding some other value, is not.
      */
-    const verify = async (onForm: ReadonlySet<string>): Promise<FieldSpec | null> => {
+    const verify = async (onForm: ReadonlySet<string>): Promise<{ field: FieldSpec; reason?: string } | null> => {
       const mismatches = async () => {
         const out: { r: Filled; field: FieldSpec; got: Awaited<ReturnType<AtsHandler["readBack"]>> }[] = [];
         for (const r of resolutions) {
@@ -207,10 +266,12 @@ export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "a
       };
       let wrong = await mismatches();
       if (wrong.length) {
-        await fillAll(wrong.map(w => w.r));
+        const failed = (await fillAll(wrong.map(w => w.r))).find(f => f.field.required);
+        if (failed) return failed;
         wrong = await mismatches();
       }
-      return wrong.find(w => w.field.required || !isEmpty(w.got))?.field ?? null;
+      const bad = wrong.find(w => w.field.required || !isEmpty(w.got));
+      return bad ? { field: bad.field } : null;
     };
 
     const opened = await handler.open(page, job.url);
@@ -218,12 +279,12 @@ export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "a
 
     let batch = await handler.readFields(page);
     if (!batch.length) return await end("failed", "No form fields found");
-    const ctx = await jobContext(job, handler, page);
+    ctx = await jobContext(job, handler, page);
     let present = batch;
 
     for (let round = 0; ; round++) {
       for (const f of batch) { fields.push(f); byId.set(f.id, f); }
-      const res = await resolveFields({ db, llm: deps.llm }, batch, ctx, reviewed?.preset);
+      const res = await resolveFields({ db, llm: deps.llm }, batch, ctx!, reviewed?.preset);
       resolutions.push(...res);
 
       const files = res.filter(r => r.status === "needs-file");
@@ -240,7 +301,8 @@ export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "a
         for (const b of blocked) addBlocker(db, job.id, b.questionId, b.reason, byId.get(b.fieldId));
         resolveNeedsYouForJob(db, job.id); // this run supersedes any earlier CAPTCHA or code request
         // Still fill (and check) every field that has an answer, so the form and its screenshot show all but the questions
-        // that need the user. Best effort: those questions are what this run reports, and nothing is submitted.
+        // that need the user. Best effort: a field that can't be filled is left blank, the questions are what this run
+        // reports, and nothing is submitted.
         try {
           await fillAll(res.filter((r): r is Filled => r.status === "filled"));
           await verify(new Set(present.map(f => f.id)));
@@ -251,7 +313,9 @@ export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "a
       const unanswered = res.find(r => r.status === "skip" && byId.get(r.fieldId)?.required);
       if (unanswered) return await end("failed", `Required field "${byId.get(unanswered.fieldId)!.label}" has no answer`);
 
-      await fillAll(res.filter((r): r is Filled => r.status === "filled"));
+      // Every field is attempted; then a required field that could not be filled fails the job (optional ones stay blank).
+      const failed = (await fillAll(res.filter((r): r is Filled => r.status === "filled"))).find(f => f.field.required);
+      if (failed) return await end("failed", couldNotFill(failed));
 
       // Answers can reveal follow-up questions; read the form again and handle any new ones.
       present = await handler.readFields(page);
@@ -266,7 +330,7 @@ export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "a
 
     // Verify the fields still on the form (a conditional question may have been removed again).
     const unfilled = await verify(new Set(present.map(f => f.id)));
-    if (unfilled) return await end("failed", `Could not fill "${unfilled.label}"`);
+    if (unfilled) return await end("failed", couldNotFill(unfilled));
 
     if (reviewed) {
       const unseen = resolutions.some(r => r.status === "filled" && r.source !== "override" && !reviewed.includes(byId.get(r.fieldId)!, r.answer));

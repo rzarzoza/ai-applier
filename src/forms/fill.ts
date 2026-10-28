@@ -28,23 +28,12 @@ export async function fillField(root: Page | Frame, field: FieldSpec, answer: Fi
       if (answer.type !== "option" && answer.type !== "text") throw new Error(`combobox needs an option or text answer`);
       const want = answer.type === "option" ? answer.option : answer.text;
       await el.click();
-      const info = (await el.evaluate(inPage((e: HTMLElement) => ({
-        editable: e instanceof HTMLInputElement || e instanceof HTMLTextAreaElement || e.isContentEditable,
-        childInput: !!e.querySelector("input"),
-        controls: (e.getAttribute("aria-controls") ?? e.getAttribute("aria-owns") ?? e.querySelector("input")?.getAttribute("aria-controls") ?? "").split(/\s+/)[0],
-      })))) as { editable: boolean; childInput: boolean; controls: string };
-      if (info.editable) {
-        await el.fill("");
-        await el.pressSequentially(want);
-      } else if (info.childInput) {
-        const input = el.locator("input").first();
+      const { input, controls } = await comboboxParts(el);
+      if (input) {
         await input.fill("");
         await input.pressSequentially(want);
       }
-      const global = root.locator("[role=option]:visible");
-      const scoped = info.controls ? root.locator(`[id=${JSON.stringify(info.controls)}] [role=option]:visible`) : null;
-      await global.first().waitFor({ timeout: 3000 });
-      const options = scoped && (await scoped.count()) > 0 ? scoped : global;
+      const options = await comboboxOptions(root, controls, 3000);
       const texts = (await options.allInnerTexts()).map(norm);
       let idx = texts.findIndex(t => t === norm(want));
       if (idx < 0) idx = texts.findIndex(t => t.startsWith(norm(want)));
@@ -77,6 +66,63 @@ export async function fillField(root: Page | Frame, field: FieldSpec, answer: Fi
     default:
       if (answer.type !== "text") throw new Error(`${field.kind} needs a text answer`);
       await el.fill(answer.text);
+  }
+}
+
+/** The box to type into (the combobox itself or an input inside it), and the id of the listbox it controls. */
+async function comboboxParts(el: Locator): Promise<{ input: Locator | null; controls: string }> {
+  const info = (await el.evaluate(inPage((e: HTMLElement) => ({
+    editable: e instanceof HTMLInputElement || e instanceof HTMLTextAreaElement || e.isContentEditable,
+    childInput: !!e.querySelector("input"),
+    controls: (e.getAttribute("aria-controls") ?? e.getAttribute("aria-owns") ?? e.querySelector("input")?.getAttribute("aria-controls") ?? "").split(/\s+/)[0],
+  })))) as { editable: boolean; childInput: boolean; controls: string };
+  return { input: info.editable ? el : info.childInput ? el.locator("input").first() : null, controls: info.controls };
+}
+
+/** The visible options, from the combobox's own listbox when it names one; waits up to `waitMs` for any to show. */
+async function comboboxOptions(root: Page | Frame, controls: string, waitMs: number): Promise<Locator> {
+  const global = root.locator("[role=option]:visible");
+  const scoped = controls ? root.locator(`[id=${JSON.stringify(controls)}] [role=option]:visible`) : null;
+  await global.first().waitFor({ timeout: waitMs }).catch(() => {});
+  return scoped && (await scoped.count()) > 0 ? scoped : global;
+}
+
+const uniqueTexts = (texts: string[]) => [...new Set(texts.map(t => t.replace(/\s+/g, " ").trim()).filter(Boolean))];
+
+/**
+ * The option texts a choice control offers. A combobox is opened with its typed text cleared, so the whole list shows;
+ * when nothing shows until something is typed (a lazy or search-as-you-type list), the first letter of `typed` is typed
+ * to load matching options. The control is left closed and empty. Other kinds have no options (empty list).
+ */
+export async function readOptions(root: Page | Frame, field: FieldSpec, typed?: string): Promise<string[]> {
+  const members = all(root, field);
+  const el = members.first();
+  switch (field.kind) {
+    case "select":
+      return el.evaluate(inPage((s: HTMLSelectElement) =>
+        Array.from(s.options).filter(o => o.value !== "").map(o => (o.textContent ?? "").replace(/\s+/g, " ").trim()))) as Promise<string[]>;
+    case "radio":
+    case "checkbox-group":
+      return uniqueTexts(await optionLabels(members));
+    case "combobox": {
+      await el.click();
+      const { input, controls } = await comboboxParts(el);
+      try {
+        if (input) await input.fill("");
+        let options = await comboboxOptions(root, controls, 1500);
+        const hint = typed?.trim().slice(0, 1);
+        if (!(await options.count()) && input && hint) {
+          await input.pressSequentially(hint);
+          options = await comboboxOptions(root, controls, 3000);
+        }
+        return uniqueTexts(await options.allInnerTexts());
+      } finally {
+        if (input) await input.fill("").catch(() => {});
+        await el.press("Escape").catch(() => {});
+      }
+    }
+    default:
+      return [];
   }
 }
 

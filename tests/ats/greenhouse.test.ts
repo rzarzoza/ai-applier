@@ -282,6 +282,18 @@ test("greenhouse fill refuses an ambiguous prefix match", async () => {
   expect(await greenhouse.readBack(page, school)).toBeNull();
 });
 
+test("greenhouse readOptions lists a react-select's whole list with its typed text cleared, and leaves it empty", async () => {
+  await page.setContent(fakeSelect(["Associate's Degree", "Bachelor's Degree", "Master's Degree"]));
+  const degree = (await greenhouse.readFields(page)).find(f => f.label === "School")!;
+  await expect(greenhouse.fill(page, degree, { type: "text", text: "B.S." })).rejects.toThrow(/No option matching/);
+  await page.locator("#s").fill("B.S.");
+  expect(await greenhouse.readOptions!(page, degree, "B.S.")).toEqual(["Associate's Degree", "Bachelor's Degree", "Master's Degree"]);
+  expect(await page.locator("#s").inputValue()).toBe("");
+  await greenhouse.fill(page, degree, { type: "option", option: "Bachelor's Degree" });
+  expect(await greenhouse.readBack(page, degree)).toBe("Bachelor's Degree");
+  expect(await page.locator("body").getAttribute("data-decoy")).toBeNull();
+});
+
 test("greenhouse root is the embedded frame when the form lives in a greenhouse iframe", async () => {
   await serve("https://job-boards.greenhouse.io/embed/job_app?for=acme&token=7", legacy);
   await serve("https://careers.acme.com/jobs?gh_jid=7", `<iframe src="https://job-boards.greenhouse.io/embed/job_app?for=acme&token=7" width="900" height="2000"></iframe>`);
