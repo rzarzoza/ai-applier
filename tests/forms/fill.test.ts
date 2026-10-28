@@ -55,6 +55,14 @@ test("fillField + readBack round-trip every kind", async () => {
   expect(await readBack(page, by("School"))).toBe("University of Texas at Austin");
 });
 
+test("non-editable div[role=combobox] round-trips", async () => {
+  await page.setContent(basicHtml);
+  const dept = (await extractFields(page)).find(x => x.label === "Department")!;
+  expect(await readBack(page, dept)).toBe("Select...");
+  await fillField(page, dept, { type: "option", option: "Data Science" });
+  expect(await readBack(page, dept)).toBe("Data Science");
+});
+
 test("combobox falls back to an option that starts with the answer", async () => {
   await page.setContent(basicHtml);
   const school = (await extractFields(page)).find(x => x.label === "School")!;

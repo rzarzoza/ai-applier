@@ -1,9 +1,10 @@
 import type { Frame, Page } from "playwright";
+import { inPage } from "./in-page.js";
 import type { FieldSpec } from "./types.js";
 
 /** Finds visible controls inside `scope` and tags each with `data-aa-id`; group members share one id. */
 export async function extractFields(root: Page | Frame, scope = "form"): Promise<FieldSpec[]> {
-  const fields = await root.evaluate(collectFields, scope);
+  const fields = (await root.evaluate(inPage(collectFields), scope)) as FieldSpec[];
   for (const f of fields) {
     if (f.kind === "combobox") f.options = await readComboboxOptions(root, f.id);
   }

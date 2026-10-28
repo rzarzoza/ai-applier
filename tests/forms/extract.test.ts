@@ -16,13 +16,14 @@ test("extracts labels, kinds, required, options", async () => {
     ["First Name", "text", true], ["Email", "email", true], ["LinkedIn Profile", "url", false], ["Phone", "tel", true],
     ["Why us?", "textarea", false], ["Degree", "select", true], ["Are you authorized to work in the US?", "radio", true],
     ["I certify the above is accurate", "checkbox", true], ["I agree to receive SMS updates", "checkbox", false],
-    ["Which languages?", "checkbox-group", false], ["Resume", "file", true], ["School", "combobox", true],
+    ["Which languages?", "checkbox-group", false], ["Resume", "file", true], ["School", "combobox", true], ["Department", "combobox", true],
   ]);
   expect(f.find(x => x.label === "Degree")!.options).toEqual(["Bachelor's", "Master's"]);
   expect(f.find(x => x.label === "Why us?")!.maxLength).toBe(500);
   expect(f.find(x => x.kind === "radio")!.options).toEqual(["Yes", "No"]);
   expect(f.find(x => x.kind === "checkbox-group")!.options).toEqual(["English", "Spanish", "French"]);
   expect(f.find(x => x.kind === "combobox")!.options).toContain("University of Texas at Austin");
+  expect(f.find(x => x.label === "Department")!.options).toEqual(["Engineering", "Design", "Data Science"]);
   expect(f.find(x => x.label === "Email")!.description).toBe("We only use this for updates.");
   expect(f.find(x => x.label === "I certify the above is accurate")!.description).toBe("Consent");
 });

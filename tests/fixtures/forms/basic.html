@@ -55,6 +55,14 @@
     <input id="school" name="school" type="text" role="combobox" aria-expanded="false" aria-controls="school-list" autocomplete="off" required>
     <ul id="school-list" role="listbox" hidden></ul>
   </div>
+
+  <span id="dept-label">Department *</span>
+  <div style="position:relative">
+    <div id="dept" role="combobox" tabindex="0" aria-labelledby="dept-label" aria-required="true" aria-expanded="false" aria-controls="dept-list">Select...</div>
+    <ul id="dept-list" role="listbox" hidden>
+      <li role="option">Engineering</li><li role="option">Design</li><li role="option">Data Science</li>
+    </ul>
+  </div>
 </form>
 <script>
 (() => {
@@ -79,6 +87,13 @@
   input.addEventListener("focus", render);
   input.addEventListener("click", render);
   input.addEventListener("input", render);
+  const dept = document.getElementById("dept");
+  const deptList = document.getElementById("dept-list");
+  dept.addEventListener("click", () => { deptList.hidden = false; dept.setAttribute("aria-expanded", "true"); });
+  dept.addEventListener("keydown", e => { if (e.key === "Escape") { deptList.hidden = true; dept.setAttribute("aria-expanded", "false"); } });
+  deptList.querySelectorAll("li").forEach(li => li.addEventListener("click", () => {
+    dept.textContent = li.textContent; deptList.hidden = true; dept.setAttribute("aria-expanded", "false");
+  }));
   input.addEventListener("keydown", e => { if (e.key === "Escape") close(); });
 })();
 </script>
