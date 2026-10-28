@@ -9,45 +9,48 @@ const TEXT_KINDS = new Set<FieldSpec["kind"]>(["text", "textarea", "email", "tel
 const NEGATIONS = new Set(["not", "no", "non", "never", "neither", "nor", "don", "dont", "doesn", "doesnt", "isn", "aren", "won", "without", "decline", "declined"]);
 
 const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
-const YES = /^(yes|y|true)\b/;
-const NO = /^(no|n|false)\b/;
 
 function yesNo(value: string): boolean | null {
   const v = norm(value);
-  if (v === "yes" || v === "y" || v === "true") return true;
-  if (v === "no" || v === "n" || v === "false") return false;
+  if (v === "yes" || v === "true") return true;
+  if (v === "no" || v === "false") return false;
   return null;
 }
 
-/** True when `inner` appears as whole words in `outer` and the leftover words carry no negation. */
-function containsCleanly(outer: string, inner: string): boolean {
-  if (!inner || !` ${outer} `.includes(` ${inner} `)) return false;
+/** Whether `inner` appears as whole words in `outer`, and if so whether the leftover words carry a negation. */
+function containment(outer: string, inner: string): "none" | "clean" | "negated" {
+  if (!inner || !` ${outer} `.includes(` ${inner} `)) return "none";
   const leftover = ` ${outer} `.replace(` ${inner} `, " ").trim().split(" ");
-  return !leftover.some(w => NEGATIONS.has(w));
+  return leftover.some(w => NEGATIONS.has(w)) ? "negated" : "clean";
 }
 
 /**
- * Maps a stored value onto one of a field's options without an LLM: exact match (case-insensitive),
- * then whole-word containment either way, then yes/no synonyms for booleans. Null when nothing or
- * more than one option fits.
+ * Maps a stored value onto one of a field's options without an LLM. A yes/no value (boolean or the
+ * words yes/no/true/false) only maps to an option that is exactly yes/no; a qualified option such as
+ * "Yes, but I need sponsorship" is left to the LLM, which sees the question. Other strings: exact
+ * match (case-insensitive), then whole-word containment either way. Null when nothing or more than
+ * one option fits, or when any containment match crosses a negation.
  */
 export function pickOption(value: string | boolean, options: string[]): string | null {
   const unique = (xs: string[]) => (xs.length === 1 ? xs[0]! : null);
-  if (typeof value === "string") {
-    const v = norm(value);
-    if (!v) return null;
-    const exact = options.filter(o => norm(o) === v);
-    if (exact.length) return unique(exact);
-    const contained = options.filter(o => {
-      const n = norm(o);
-      return containsCleanly(n, v) || containsCleanly(v, n);
-    });
-    if (contained.length) return unique(contained);
-    const b = yesNo(value);
-    return b === null ? null : pickOption(b, options);
+  const bool = typeof value === "boolean" ? value : yesNo(value);
+  if (bool !== null) {
+    const words = bool ? ["yes", "true"] : ["no", "false"];
+    return unique(options.filter(o => words.includes(norm(o))));
   }
-  const pattern = value ? YES : NO;
-  return unique(options.filter(o => pattern.test(norm(o))));
+  const v = norm(value as string);
+  if (!v) return null;
+  const exact = options.filter(o => norm(o) === v);
+  if (exact.length) return unique(exact);
+  const clean: string[] = [];
+  let negated = 0;
+  for (const o of options) {
+    const n = norm(o);
+    const kinds = [containment(n, v), containment(v, n)];
+    if (kinds.includes("clean")) clean.push(o);
+    else if (kinds.includes("negated")) negated++;
+  }
+  return negated ? null : unique(clean);
 }
 
 const ADAPT_OPTION_SYSTEM = `You map a job applicant's stored answer onto one option of an application form field.

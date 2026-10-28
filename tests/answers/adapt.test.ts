@@ -16,10 +16,22 @@ test("pickOption maps booleans and near-matches; null when ambiguous", () => {
 
 test("pickOption uses containment but never across a negation", () => {
   expect(pickOption("United States", ["Canada", "United States of America"])).toBe("United States of America");
-  expect(pickOption(false, ["Yes, I will require sponsorship", "No, I will not require sponsorship"])).toBe("No, I will not require sponsorship");
   expect(pickOption("Hispanic or Latino", ["Not Hispanic or Latino", "Decline to answer"])).toBeNull();
   expect(pickOption("Not Hispanic or Latino", ["Hispanic or Latino", "Decline to answer"])).toBeNull();
   expect(pickOption(true, ["I am authorized", "I am not authorized"])).toBeNull();
+  // A candidate rejected for negation still makes the match ambiguous.
+  expect(pickOption("Hispanic", ["Hispanic or Latino", "Not Hispanic or Latino"])).toBeNull();
+});
+
+test("pickOption maps yes/no only onto plain yes/no options", () => {
+  expect(pickOption("Yes", ["Yes, I am authorized and do not need sponsorship", "Yes, but I need sponsorship", "No"])).toBeNull();
+  expect(pickOption("Yes", ["Yes, but I will need sponsorship", "No"])).toBeNull();
+  expect(pickOption("No", ["Yes", "No, but I will in the future"])).toBeNull();
+  expect(pickOption(false, ["Yes, I will require sponsorship", "No, I will not require sponsorship"])).toBeNull();
+  expect(pickOption(false, ["Yes", "N/A"])).toBeNull();
+  expect(pickOption(false, ["Yes", "No preference"])).toBeNull();
+  expect(pickOption("no", ["YES", "NO"])).toBe("NO");
+  expect(pickOption(true, ["True", "False"])).toBe("True");
 });
 
 test("adaptAnswer never returns an option not in the list", async () => {

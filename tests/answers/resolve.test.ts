@@ -273,3 +273,56 @@ test("field_cache avoids a second classify call for the same form", async () => 
   expect(classifyCalls).toHaveLength(2);
   expect(JSON.parse(String(classifyCalls[1]!.content)).fields.map((x: { id: string }) => x.id)).toEqual(["phone"]);
 });
+
+test("a factual attestation checkbox is answered from the profile, not ticked as consent", async () => {
+  const db = setup();
+  const llm = new FakeLlm().on("classify", classifyAs({ auth: { category: "profile", profileKey: "workAuthorizedUS", isFactual: true } }));
+  const fields = [f("auth", "I certify that I am legally authorized to work in the US", "checkbox")];
+  expect(await resolveFields({ db, llm }, fields, job))
+    .toEqual([{ fieldId: "auth", status: "filled", answer: { type: "check", checked: true }, source: "profile" }]);
+  saveProfile(db, { workAuthorizedUS: false });
+  expect(await resolveFields({ db, llm }, fields, job))
+    .toEqual([{ fieldId: "auth", status: "filled", answer: { type: "check", checked: false }, source: "profile" }]);
+});
+
+test("workedAtCompany needs the same company name, not an overlapping one", async () => {
+  const llm = new FakeLlm().on("classify", classifyAs({ worked: { category: "derived", derivedKey: "workedAtCompany", isFactual: true } }));
+  const fields = [f("worked", "Have you worked here before?", "radio", { options: ["Yes", "No"] })];
+  const run = async (employers: string[], company: string) => {
+    const db = setup();
+    saveProfile(db, { employers });
+    return (await resolveFields({ db, llm }, fields, { ...job, company }))[0];
+  };
+  expect(await run(["Acme Corp."], "Acme, Inc.")).toMatchObject({ status: "filled", answer: { option: "Yes" } });
+  expect(await run(["Initech"], "Acme")).toMatchObject({ status: "filled", answer: { option: "No" } });
+  expect(await run(["H&R Block"], "Block")).toMatchObject({ status: "blocked", reason: "missing" });
+  expect(await run(["Meta"], "Meta Financial Group")).toMatchObject({ status: "blocked", reason: "missing" });
+});
+
+test("consent only ticks or agrees on choice fields; other kinds are not guessed", async () => {
+  const db = setup();
+  const llm = new FakeLlm().on("classify", classifyAs({
+    date: { category: "consent-required" },
+    mail: { category: "consent-required" },
+    agree: { category: "consent-required" },
+  }));
+  const res = await resolveFields({ db, llm }, [
+    f("date", "Date of signature", "date"),
+    f("mail", "Consent email", "email", { required: false }),
+    f("agree", "Do you agree to the privacy policy?", "radio", { options: ["Yes", "No"] }),
+  ], job);
+  expect(res[0]).toMatchObject({ fieldId: "date", status: "blocked", reason: "missing" });
+  expect(res[1]).toEqual({ fieldId: "mail", status: "skip" });
+  expect(res[2]).toEqual({ fieldId: "agree", status: "filled", answer: { type: "option", option: "Yes" }, source: "consent" });
+});
+
+test("an unfillable fact never reuses a template answer with the same label", async () => {
+  const db = setup();
+  const t = createQuestion(db, { canonical: "Are you willing to relocate?", kind: "template", isFactual: false });
+  approveAnswer(db, t.id, "Yes, happy to move to Initech's offices.", "template");
+  const llm = new FakeLlm().on("classify", classifyAs({ reloc: { category: "profile", profileKey: "willingToRelocate", isFactual: true } }));
+  const [r] = await resolveFields({ db, llm }, [f("reloc", "Are you willing to relocate?", "text")], job);
+  expect(r).toMatchObject({ status: "blocked", reason: "missing" });
+  expect((r as { questionId: number }).questionId).not.toBe(t.id);
+  expect(getQuestion(db, t.id)!.useCount).toBe(0);
+});

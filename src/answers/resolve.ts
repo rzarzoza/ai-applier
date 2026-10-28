@@ -20,6 +20,9 @@ interface Ctx { db: Db; llm: Llm; profile: Profile; job: JobContext }
 
 type Value = string | boolean | string[] | null;
 
+/** Kinds where consent is expressed by ticking or choosing "yes"/"I agree". */
+const CHOICE_KINDS = new Set<FieldSpec["kind"]>(["checkbox", "checkbox-group", "select", "combobox", "radio"]);
+
 const filled = (field: FieldSpec, answer: FieldAnswer, source: FillSource): Resolution => ({ fieldId: field.id, status: "filled", answer, source });
 const skip = (field: FieldSpec): Resolution => ({ fieldId: field.id, status: "skip" });
 const blocked = (field: FieldSpec, questionId: number, reason: "missing" | "approval"): Resolution =>
@@ -56,10 +59,10 @@ async function byCategory(ctx: Ctx, field: FieldSpec, c: Classification): Promis
       return fromValue(ctx, field, profileValue(ctx.profile, c.profileKey!), "profile");
     case "derived":
       return fromValue(ctx, field, derivedValue(ctx, c.derivedKey!), "derived");
-    case "consent-required": {
-      const isText = field.kind === "text" || field.kind === "textarea";
-      return fromValue(ctx, field, isText ? profileValue(ctx.profile, "fullName") : true, "consent");
-    }
+    case "consent-required":
+      if (field.kind === "text" || field.kind === "textarea") return fromValue(ctx, field, profileValue(ctx.profile, "fullName"), "consent");
+      if (CHOICE_KINDS.has(field.kind)) return fromValue(ctx, field, true, "consent");
+      return unresolvedFact(ctx, field);
     case "optin-optional":
       return skip(field);
     case "resume":
@@ -75,7 +78,7 @@ async function byCategory(ctx: Ctx, field: FieldSpec, c: Classification): Promis
 function derivedValue({ db, profile, job }: Ctx, key: DerivedKey): Value {
   switch (key) {
     case "workedAtCompany":
-      return profile.employers === null ? null : profile.employers.some(e => sameCompany(e, job.company));
+      return workedAt(profile.employers, job.company);
     case "appliedToCompany":
       return hasSubmittedToCompany(db, job.company);
     case "jobLocation":
@@ -85,11 +88,27 @@ function derivedValue({ db, profile, job }: Ctx, key: DerivedKey): Value {
   }
 }
 
-/** "Acme" matches "Acme Corporation" and vice versa, on whole words only. */
-function sameCompany(a: string, b: string): boolean {
-  const n = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
-  const [x, y] = [n(a), n(b)];
-  return !!x && !!y && (` ${x} `.includes(` ${y} `) || ` ${y} `.includes(` ${x} `));
+const LEGAL_SUFFIXES = new Set(["inc", "incorporated", "corp", "corporation", "llc", "ltd", "limited", "co", "company", "technologies", "plc"]);
+
+function companyName(s: string): string {
+  const words = s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim().split(" ").filter(Boolean);
+  while (words.length > 1 && LEGAL_SUFFIXES.has(words[words.length - 1]!)) words.pop();
+  return words.join(" ");
+}
+
+/**
+ * True when an employer is the company (equal after dropping legal suffixes, so "Acme Corp" is
+ * "Acme"). Null when an employer only overlaps it ("H&R Block" vs "Block"), since that can't be
+ * told apart safely; false otherwise. Null employers means unknown.
+ */
+function workedAt(employers: string[] | null, company: string): boolean | null {
+  if (employers === null) return null;
+  const c = companyName(company);
+  if (!c) return null;
+  const names = employers.map(companyName).filter(Boolean);
+  if (names.some(e => e === c)) return true;
+  if (names.some(e => ` ${e} `.includes(` ${c} `) || ` ${c} `.includes(` ${e} `))) return null;
+  return false;
 }
 
 /** Fills from a known value; if there is none or it doesn't fit the field, falls back to the user's own answer. */
@@ -109,7 +128,8 @@ async function fromValue(ctx: Ctx, field: FieldSpec, value: Value, source: FillS
 async function unresolvedFact(ctx: Ctx, field: FieldSpec): Promise<Resolution> {
   const { db, llm, job } = ctx;
   const key = normalizeLabel(field.label, job.company);
-  const existing = listQuestions(db).find(q => [q.canonical, ...q.variants].some(t => normalizeLabel(t, job.company) === key));
+  // Template answers are written for some other company, so they are never reused verbatim here.
+  const existing = listQuestions(db).find(q => q.kind !== "template" && [q.canonical, ...q.variants].some(t => normalizeLabel(t, job.company) === key));
 
   if (existing?.status === "approved" && existing.answer !== null) {
     const answer = await adaptAnswer(llm, existing.answer, field, job);
