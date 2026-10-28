@@ -222,8 +222,10 @@ test("save-to-bank with no or several matching questions says so and approves no
   const q1 = createQuestion(db, { canonical: "Why us?", kind: "global", isFactual: false });
   const q2 = createQuestion(db, { canonical: "Another wording", kind: "global", isFactual: false });
   addVariant(db, q2.id, "Why us?");
-  res = await app.request(`/applications/${j.id}/field`, form({ label: "Why us?", value: "B", saveToBank: "1" }));
+  const j2 = mk(2, "ready-to-review");
+  saveSnapshot(db, j2.id, { fields: FIELDS, resolutions: RES, screenshot: null });
+  res = await app.request(`/applications/${j2.id}/field`, form({ label: "Why us?", value: "B", saveToBank: "1" }));
   expect(res.headers.get("location")).toContain("notice=bank-miss");
   expect(getQuestion(db, q1.id)!.status).toBe("none"); expect(getQuestion(db, q2.id)!.status).toBe("none");
-  expect(getOverrides(db, j.id)["Why us?"]).toEqual({ type: "text", text: "B" });
+  expect(getOverrides(db, j2.id)["Why us?"]).toEqual({ type: "text", text: "B" });
 });
