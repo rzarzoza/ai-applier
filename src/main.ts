@@ -12,7 +12,7 @@ import { getSecret, setSecret } from "./secrets.js";
 import { getJson, getSettings, saveSettings, setJson } from "./settings.js";
 import { persistentChromium } from "./runner/browser.js";
 import { macNotify } from "./runner/notify.js";
-import { runJob, runNext, type RunnerDeps } from "./runner/runner.js";
+import { flagInterruptedRuns, runJob, runNext, type RunnerDeps } from "./runner/runner.js";
 import { pollAll, type PollReport } from "./sources/poller.js";
 import { readmeTableAdapter } from "./sources/readme-table.js";
 import { simplifyAdapter } from "./sources/simplify.js";
@@ -43,6 +43,9 @@ export async function startApp(opts: StartOptions = {}): Promise<{ url: string; 
   const db = openDb(paths.db);
   // A fresh database starts paused so nothing applies before the profile, resume and filters are set up.
   if (!db.prepare("SELECT 1 FROM kv WHERE key = 'settings'").get()) saveSettings(db, { paused: true });
+  // Nothing is running yet, so a job still "filling" was cut off by the last shutdown.
+  const interrupted = flagInterruptedRuns(db);
+  if (interrupted.length) log(`${interrupted.length} interrupted ${interrupted.length === 1 ? "run needs" : "runs need"} checking (see the Inbox)`);
   const secrets: Secrets = opts.secrets ?? { get: getSecret, set: setSecret };
 
   // The app talks to the LLM through this wrapper, so a key saved in Settings takes effect without a restart.

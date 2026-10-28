@@ -258,6 +258,21 @@ export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "a
   }
 }
 
+/**
+ * A job left "filling" means the app stopped mid-run (Ctrl-C, crash), possibly after clicking submit.
+ * Flags each one as state unknown, so only the confirmed Retry on its page runs it again. Call at
+ * startup, before any run. Returns the flagged job ids.
+ */
+export function flagInterruptedRuns(db: Db): string[] {
+  const rows = db.prepare("SELECT id, company, title FROM jobs WHERE status = 'filling' ORDER BY rowid").all() as unknown as { id: string; company: string; title: string }[];
+  for (const j of rows) {
+    resolveNeedsYouForJob(db, j.id);
+    addNeedsYou(db, { jobId: j.id, kind: "other", message: `${j.company} · ${j.title}: ${UNKNOWN_SUBMISSION} (the app stopped during this application)` });
+    setStatus(db, j.id, "needs-you", UNKNOWN_SUBMISSION);
+  }
+  return rows.map(j => j.id);
+}
+
 /** Runs the next queued job, unless the runner is paused, the queue is empty, or today's limit is reached. */
 export async function runNext(deps: RunnerDeps): Promise<JobStatus | null> {
   const settings = getSettings(deps.db);

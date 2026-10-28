@@ -1,6 +1,6 @@
 import type { Db } from "../db/db.js";
 import { getJob, isUnknownSubmission, setStatus } from "../jobs/repo.js";
-import { approveAnswer, getQuestion, openNeedsYouForJob, type NeedsYou, type Question } from "./bank.js";
+import { approveAnswer, deleteQuestion, getQuestion, openNeedsYouForJob, type NeedsYou, type Question } from "./bank.js";
 
 /** Needs-you kinds the user clears at the browser, so "Do it now" may open the form for them. */
 const AT_THE_BROWSER: ReadonlySet<NeedsYou["kind"]> = new Set(["captcha", "code", "login"]);
@@ -33,16 +33,33 @@ export function inboxItems(db: Db): InboxItem[] {
   }));
 }
 
-/** Approves the answer, clears its blockers, and requeues needs-you jobs left with no blockers. */
+/** Approves the answer, clears its blockers, and requeues needs-you jobs left with nothing blocking them. */
 export function answerQuestion(db: Db, questionId: number, text: string, kind?: "global" | "template"): { requeued: string[] } {
   approveAnswer(db, questionId, text, kind);
-  const affected = (db.prepare("SELECT job_id FROM job_blockers WHERE question_id = ? ORDER BY rowid").all(questionId) as unknown as { job_id: string }[]).map(r => r.job_id);
+  const affected = blockedJobs(db, questionId);
   db.prepare("DELETE FROM job_blockers WHERE question_id = ?").run(questionId);
+  return { requeued: requeueUnblocked(db, affected) };
+}
+
+/** Deletes the question (and its blockers), and requeues needs-you jobs it alone was blocking. */
+export function deleteQuestionAndRequeue(db: Db, questionId: number): { requeued: string[] } {
+  const affected = blockedJobs(db, questionId);
+  deleteQuestion(db, questionId);
+  return { requeued: requeueUnblocked(db, affected) };
+}
+
+const blockedJobs = (db: Db, questionId: number) =>
+  (db.prepare("SELECT job_id FROM job_blockers WHERE question_id = ? ORDER BY rowid").all(questionId) as unknown as { job_id: string }[]).map(r => r.job_id);
+
+/** Requeues each job that is in needs-you with no blockers and no open needs-you item left. */
+function requeueUnblocked(db: Db, jobIds: string[]): string[] {
   const requeued: string[] = [];
-  for (const id of affected) {
-    const left = db.prepare(`SELECT (SELECT COUNT(*) FROM job_blockers WHERE job_id = ?) AS n, (SELECT status FROM jobs WHERE id = ?) AS status`)
-      .get(id, id) as { n: number; status: string };
-    if (left.n === 0 && left.status === "needs-you") { setStatus(db, id, "queued"); requeued.push(id); }
+  for (const id of jobIds) {
+    const left = db.prepare("SELECT COUNT(*) AS n FROM job_blockers WHERE job_id = ?").get(id) as { n: number };
+    if (left.n === 0 && getJob(db, id)?.status === "needs-you" && openNeedsYouForJob(db, id).length === 0) {
+      setStatus(db, id, "queued");
+      requeued.push(id);
+    }
   }
-  return { requeued };
+  return requeued;
 }

@@ -1,5 +1,7 @@
 import { expect, test } from "vitest";
-import { addVariant, createQuestion, getQuestion, listQuestions } from "../../src/answers/bank.js";
+import { addBlocker, addNeedsYou, addVariant, blockersForJob, createQuestion, getQuestion, listQuestions } from "../../src/answers/bank.js";
+import { getJob, setStatus, upsertPosting } from "../../src/jobs/repo.js";
+import type { Posting } from "../../src/sources/types.js";
 import { form, setupApp } from "./helpers.js";
 
 test("GET /bank lists questions, escapes text and filters by search", async () => {
@@ -37,4 +39,34 @@ test("POST /bank/:id/delete removes the question", async () => {
   const res = await app.request(`/bank/${q.id}/delete`, { method: "POST" });
   expect(res.status).toBe(303);
   expect(listQuestions(db)).toHaveLength(0);
+});
+
+const posting = (n: number): Posting => ({ sourceId: "s", listingId: String(n), company: `Co${n}`, title: "Intern", locations: ["NYC"],
+  category: null, terms: [], degrees: [], sponsorship: null, url: `https://x.test/${n}`, datePosted: new Date("2026-10-20"), active: true });
+
+test("deleting a question requeues needs-you jobs it alone was blocking", async () => {
+  const { db, app } = setupApp();
+  const q = createQuestion(db, { canonical: "Q?", kind: "global", isFactual: true });
+  const other = createQuestion(db, { canonical: "Other?", kind: "global", isFactual: true });
+  const mk = (n: number) => { const j = upsertPosting(db, posting(n)).job; setStatus(db, j.id, "needs-you", "1 question needs you"); addBlocker(db, j.id, q.id, "missing"); return j; };
+  const freed = mk(1), stillBlocked = mk(2), waitingOnCaptcha = mk(3), skipped = mk(4);
+  addBlocker(db, stillBlocked.id, other.id, "missing");
+  addNeedsYou(db, { jobId: waitingOnCaptcha.id, kind: "captcha", message: "solve" });
+  setStatus(db, skipped.id, "skipped", "Skipped by you");
+  expect((await app.request(`/bank/${q.id}/delete`, { method: "POST" })).status).toBe(303);
+  expect(getJob(db, freed.id)!.status).toBe("queued");
+  expect(getJob(db, stillBlocked.id)!.status).toBe("needs-you");
+  expect(getJob(db, waitingOnCaptcha.id)!.status).toBe("needs-you");
+  expect(getJob(db, skipped.id)!.status).toBe("skipped");
+});
+
+test("editing a question in the bank clears its blockers and requeues the jobs", async () => {
+  const { db, app } = setupApp();
+  const q = createQuestion(db, { canonical: "Q?", kind: "global", isFactual: true });
+  const j = upsertPosting(db, posting(1)).job;
+  setStatus(db, j.id, "needs-you", "1 question needs you");
+  addBlocker(db, j.id, q.id, "missing");
+  await app.request(`/bank/${q.id}`, form({ answer: "Yes", kind: "global" }));
+  expect(blockersForJob(db, j.id)).toEqual([]);
+  expect(getJob(db, j.id)!.status).toBe("queued");
 });

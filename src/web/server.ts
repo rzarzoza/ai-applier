@@ -2,8 +2,8 @@ import { mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSyn
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Hono } from "hono";
-import { answerQuestion, canDoItNow } from "../answers/inbox.js";
-import { getQuestion, listQuestions, approveAnswer, deleteQuestion, resolveNeedsYouForJob, setDraft, setOverride } from "../answers/bank.js";
+import { answerQuestion, canDoItNow, deleteQuestionAndRequeue } from "../answers/inbox.js";
+import { getQuestion, listQuestions, approveAnswer, resolveNeedsYouForJob, setDraft, setOverride } from "../answers/bank.js";
 import { reviseDraft } from "../answers/draft.js";
 import type { Db } from "../db/db.js";
 import type { Llm } from "../llm/llm.js";
@@ -212,12 +212,12 @@ export function createApp(ctx: AppContext): Hono {
     const form = await c.req.parseBody();
     const answer = str(form.answer);
     if (!answer) return c.text("Type an answer first.", 400);
-    approveAnswer(db, id, answer, form.kind === "template" || form.kind === "global" ? form.kind : undefined);
+    answerQuestion(db, id, answer, form.kind === "template" || form.kind === "global" ? form.kind : undefined);
     return c.redirect("/bank", 303);
   });
 
   app.post("/bank/:id/delete", c => {
-    deleteQuestion(db, Number(c.req.param("id")));
+    deleteQuestionAndRequeue(db, Number(c.req.param("id")));
     return c.redirect("/bank", 303);
   });
 
