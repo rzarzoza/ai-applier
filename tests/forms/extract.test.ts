@@ -41,3 +41,13 @@ test("respects scope and skips fields outside it", async () => {
   await page.setContent(`<form id="a"><label for="x">X</label><input id="x"></form><form id="b"><label for="y">Y</label><input id="y"></form>`);
   expect((await extractFields(page, "#b")).map(x => x.label)).toEqual(["Y"]);
 });
+
+test("skips aria-hidden controls such as react-select's hidden required mirror", async () => {
+  await page.setContent(`<form>
+    <label id="c-label" for="c">Country</label>
+    <div><input id="c" role="combobox" aria-labelledby="c-label"></div>
+    <input required tabindex="-1" aria-hidden="true" value="" style="opacity:0">
+    <div aria-hidden="true"><input id="ghost" aria-label="Ghost"></div>
+  </form>`);
+  expect((await extractFields(page)).map(f => [f.label, f.kind])).toEqual([["Country", "combobox"]]);
+});

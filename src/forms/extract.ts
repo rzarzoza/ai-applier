@@ -99,6 +99,7 @@ function collectFields(scope: string): FieldSpec[] {
 
   type Ctl = HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement | HTMLElement;
   const controls = Array.from(scopeEl.querySelectorAll<Ctl>("input, select, textarea, [role=combobox]")).filter(e => {
+    if (e.closest('[aria-hidden="true"]')) return false;
     if (e instanceof HTMLInputElement && ["hidden", "submit", "button", "reset", "image"].includes(e.type)) return false;
     if (e instanceof HTMLInputElement && e.type === "file") return isVisible(e) || hasVisibleTrigger(e);
     return isVisible(e);
