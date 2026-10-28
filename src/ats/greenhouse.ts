@@ -23,6 +23,7 @@ import { isLocationAnswer, locationQueries, pickLocation } from "../answers/adap
 import { extractFields } from "../forms/extract.js";
 import { fillField, readBack as readBackField, readOptions as readOptionsField } from "../forms/fill.js";
 import { inPage } from "../forms/in-page.js";
+import { beforeAction, beforeField, typeKeys } from "../forms/pace.js";
 import type { FieldAnswer, FieldSpec } from "../forms/types.js";
 import type { AtsHandler, OpenResult, SubmitOutcome } from "./types.js";
 
@@ -119,7 +120,11 @@ export const greenhouse: AtsHandler = {
 
   async fill(page, field, answer) {
     const root = await greenhouse.root(page);
-    if (field.kind === "combobox") return pickOption(root, field, answer);
+    if (field.kind === "combobox") {
+      await beforeField(byId(root, field));
+      await beforeAction();
+      return pickOption(root, field, answer);
+    }
     await fillField(root, field, answer);
     if (field.kind === "file") await uploadSettled(root, field);
   },
@@ -209,7 +214,8 @@ async function pickOption(root: Page | Frame, field: FieldSpec, answer: FieldAns
   const loading = root.locator(".select-shell", { has: input }).locator('[class*="loading"]');
   if (isLocationAnswer(field, typed)) return pickPlace(root, field, typed, input, loading);
   await input.click();
-  await input.fill(typed).catch(() => {});
+  await input.fill("").catch(() => {});
+  await typeKeys(input, typed).catch(() => input.fill(typed).catch(() => {}));
   let seen: string[] = [];
   let stable = "";
   let stableSince = Date.now();
@@ -218,10 +224,10 @@ async function pickOption(root: Page | Frame, field: FieldSpec, answer: FieldAns
     const options = await listboxOptions(root, input);
     seen = options ? (await options.allInnerTexts()).map(norm) : [];
     const exact = seen.indexOf(want);
-    if (options && exact >= 0) return options.nth(exact).click();
+    if (options && exact >= 0) return beforeAction().then(() => options.nth(exact).click());
     const prefixed = seen.flatMap((t, i) => (t.startsWith(want) ? [i] : []));
     const settled = !(await loading.count());
-    if (options && settled && prefixed.length === 1) return options.nth(prefixed[0]).click();
+    if (options && settled && prefixed.length === 1) return beforeAction().then(() => options.nth(prefixed[0]).click());
     const key = seen.join("\n");
     if (key !== stable || !settled) { stable = key; stableSince = Date.now(); }
     if (prefixed.length > 1 && Date.now() - stableSince > 1500) {
@@ -244,7 +250,8 @@ async function pickPlace(root: Page | Frame, field: FieldSpec, typed: string, in
   const seen: string[] = [];
   await input.click();
   for (const q of locationQueries(typed)) {
-    await input.fill(q).catch(() => {});
+    await input.fill("").catch(() => {});
+    await typeKeys(input, q).catch(() => input.fill(q).catch(() => {}));
     await new Promise(r => setTimeout(r, 300)); // let the search start before reading
     let texts: string[] = [];
     let stable = "";
@@ -257,7 +264,7 @@ async function pickPlace(root: Page | Frame, field: FieldSpec, typed: string, in
       const key = texts.join("\n");
       if (key !== stable || !settled) { stable = key; stableSince = Date.now(); }
       const pick = settled && texts.length ? pickLocation(typed, texts) : null;
-      if (options && pick !== null) return options.nth(texts.indexOf(pick)).click();
+      if (options && pick !== null) return beforeAction().then(() => options.nth(texts.indexOf(pick)).click());
       if ((settled && Date.now() - stableSince > (texts.length ? 800 : 1500)) || Date.now() >= deadline) break;
       await new Promise(r => setTimeout(r, 200));
     }
@@ -290,7 +297,7 @@ async function listOptions(root: Page | Frame, field: FieldSpec, typed?: string,
     await input.click();
     await input.fill("").catch(() => {});
     if (search && typed?.trim()) {
-      await input.fill(typed.trim());
+      await typeKeys(input, typed.trim()).catch(() => input.fill(typed.trim()));
       await new Promise(r => setTimeout(r, 300)); // let an async search start before reading
       return await read(5000);
     }

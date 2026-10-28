@@ -30,6 +30,7 @@ import type { Frame, Page } from "playwright";
 import { extractFields } from "../forms/extract.js";
 import { fillField, readBack as readBackField, readOptions as readOptionsField } from "../forms/fill.js";
 import { inPage } from "../forms/in-page.js";
+import { beforeAction, beforeField, typeKeys } from "../forms/pace.js";
 import type { FieldAnswer, FieldSpec } from "../forms/types.js";
 import type { AtsHandler, OpenResult, SubmitOutcome } from "./types.js";
 
@@ -170,10 +171,13 @@ async function pickSelect2(page: Page, field: FieldSpec, answer: FieldAnswer): P
   const typed = answer.type === "option" ? answer.option : answer.text;
   const want = norm(typed);
   const box = page.locator(`[data-aa-id="${field.id}"]`).first();
+  await beforeField(box);
+  await beforeAction();
   await box.click();
   const search = page.locator(".select2-search__field:visible").first();
   await search.waitFor({ state: "visible", timeout: 5000 });
-  await search.fill(typed);
+  await search.fill("");
+  await typeKeys(search, typed).catch(() => search.fill(typed));
   const owns = await box.getAttribute("aria-owns");
   const items = ".select2-results__option:not(.select2-results__message)";
   const options = owns ? page.locator(`[id=${JSON.stringify(owns)}] ${items}`) : page.locator(`.select2-container--open ${items}`);
@@ -182,9 +186,9 @@ async function pickSelect2(page: Page, field: FieldSpec, answer: FieldAnswer): P
   while (Date.now() < deadline) {
     seen = (await options.allInnerTexts()).map(norm);
     const exact = seen.indexOf(want);
-    if (exact >= 0) return options.nth(exact).click();
+    if (exact >= 0) return beforeAction().then(() => options.nth(exact).click());
     const prefixed = seen.flatMap((t, i) => (t.startsWith(want) ? [i] : []));
-    if (prefixed.length === 1) return options.nth(prefixed[0]).click();
+    if (prefixed.length === 1) return beforeAction().then(() => options.nth(prefixed[0]).click());
     if (prefixed.length > 1) {
       await search.press("Escape").catch(() => {});
       throw new Error(`Ambiguous option "${typed}" for "${field.label}": ${prefixed.slice(0, 6).map(i => seen[i]).join(" | ")}`);
@@ -223,7 +227,8 @@ async function listSelect2(page: Page, field: FieldSpec, typed?: string, search 
   try {
     const query = typed?.trim() ?? "";
     if (search && query) {
-      await input.fill(query);
+      await input.fill("");
+      await typeKeys(input, query).catch(() => input.fill(query));
       return await read(5000);
     }
     await input.fill("");

@@ -36,6 +36,7 @@ import type { Frame, Locator, Page } from "playwright";
 import { extractFields } from "../forms/extract.js";
 import { fillField, readBack as readBackField } from "../forms/fill.js";
 import { inPage } from "../forms/in-page.js";
+import { beforeAction, beforeField, typeKeys } from "../forms/pace.js";
 import type { FieldAnswer, FieldSpec } from "../forms/types.js";
 import type { AtsHandler, OpenResult, SubmitOutcome } from "./types.js";
 
@@ -179,7 +180,11 @@ async function fillYesNo(page: Page, field: FieldSpec, answer: FieldAnswer): Pro
   const want = norm(answer.option);
   if (want !== "yes" && want !== "no") throw new Error(`No option matching "${answer.option}" (saw: Yes | No)`);
   const button = box(page, field).locator("button").filter({ hasText: new RegExp(`^\\s*${want}\\s*$`, "i") });
-  if ((await button.getAttribute("aria-pressed")) !== "true") await button.click();
+  await beforeField(button.first());
+  if ((await button.getAttribute("aria-pressed")) !== "true") {
+    await beforeAction();
+    await button.click();
+  }
 }
 
 /**
@@ -193,11 +198,14 @@ async function pickOption(page: Page, field: FieldSpec, answer: FieldAnswer): Pr
   const want = norm(typed);
   const input = box(page, field);
   await input.evaluate(inPage((e: Element) => e.removeAttribute("data-aa-picked")));
+  await beforeField(input);
+  await beforeAction();
   await input.click();
   await input.fill("");
-  await input.pressSequentially(typed);
+  await typeKeys(input, typed).catch(() => input.pressSequentially(typed));
   // Typed text alone is not an answer: remember the value of the picked option so readBack can tell the two apart.
   const pick = async (options: Locator, i: number) => {
+    await beforeAction();
     await options.nth(i).click();
     await input.evaluate(inPage(async (e: HTMLInputElement) => {
       await new Promise(r => setTimeout(r, 150));

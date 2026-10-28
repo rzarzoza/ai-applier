@@ -1,6 +1,7 @@
 import type { Frame, Locator, Page } from "playwright";
 import { isLocationAnswer, locationQueries, pickLocation } from "../answers/adapt.js";
 import { inPage } from "./in-page.js";
+import { beforeAction, beforeField, typeKeys, typeText } from "./pace.js";
 import type { FieldAnswer, FieldSpec } from "./types.js";
 
 const norm = (s: string) => s.replace(/\s+/g, " ").trim().toLowerCase();
@@ -30,9 +31,16 @@ async function matchOption(members: Locator, want: string): Promise<string> {
 const selectLabels = (el: Locator) =>
   el.evaluate(inPage((s: HTMLSelectElement) => Array.from(s.options).map(o => o.label.replace(/\s+/g, " ").trim()))) as Promise<string[]>;
 
+/**
+ * Fills one field at a human pace (see pace.ts): scrolls it into view and pauses first, types text with the keyboard,
+ * and pauses briefly before picking, ticking or attaching.
+ */
 export async function fillField(root: Page | Frame, field: FieldSpec, answer: FieldAnswer): Promise<void> {
   const members = all(root, field);
   const el = members.first();
+  await beforeField(el);
+  if (field.kind !== "text" && field.kind !== "textarea" && field.kind !== "email" && field.kind !== "tel" && field.kind !== "url"
+    && field.kind !== "number" && field.kind !== "date") await beforeAction();
   switch (field.kind) {
     case "select":
       if (answer.type !== "option") throw new Error(`select needs an option answer`);
@@ -47,13 +55,14 @@ export async function fillField(root: Page | Frame, field: FieldSpec, answer: Fi
       if (isLocationAnswer(field, want)) return fillLocation(root, field, want, input, controls);
       if (input) {
         await input.fill("");
-        await input.pressSequentially(want);
+        await typeKeys(input, want).catch(() => input.pressSequentially(want));
       }
       const options = await comboboxOptions(root, controls, 3000);
       const texts = (await options.allInnerTexts()).map(norm);
       let idx = texts.findIndex(t => t === norm(want));
       if (idx < 0) idx = texts.findIndex(t => t.startsWith(norm(want)));
       if (idx < 0) throw new Error(`No combobox option matching "${want}"`);
+      await beforeAction();
       await options.nth(idx).click();
       return;
     }
@@ -81,8 +90,28 @@ export async function fillField(root: Page | Frame, field: FieldSpec, answer: Fi
       return;
     default:
       if (answer.type !== "text") throw new Error(`${field.kind} needs a text answer`);
-      await el.fill(answer.text);
+      await typeAnswer(el, answer.text);
   }
+}
+
+/** Input types the keyboard can type into as text (a date, time or color picker is set with fill instead). */
+const TYPEABLE = new Set(["text", "email", "tel", "url", "search", "number", "password", ""]);
+const loose = (s: string) => s.replace(/[^\p{L}\p{N}]+/gu, "").toLowerCase();
+
+/**
+ * Types the text into a text box with the keyboard (newlines become spaces in a one-line box). Falls back to fill when
+ * typing fails or leaves something else in the box (ignoring formatting a mask adds, such as a phone's punctuation).
+ */
+async function typeAnswer(el: Locator, raw: string): Promise<void> {
+  const kind = (await el.evaluate(inPage((e: Element) =>
+    e instanceof HTMLTextAreaElement ? "textarea" : e instanceof HTMLInputElement ? e.type.toLowerCase() : (e as HTMLElement).isContentEditable ? "editable" : "other"))) as string;
+  if (kind !== "textarea" && kind !== "editable" && !TYPEABLE.has(kind)) return el.fill(raw);
+  const text = kind === "textarea" || kind === "editable" ? raw : raw.replace(/\s*[\r\n]+\s*/g, " ");
+  try {
+    await typeText(el, text);
+    if (kind === "editable" || loose(await el.inputValue()) === loose(text)) return;
+  } catch { /* fill below */ }
+  await el.fill(text);
 }
 
 /**
@@ -94,13 +123,16 @@ async function fillLocation(root: Page | Frame, field: FieldSpec, want: string, 
   for (const q of input ? locationQueries(want) : [want]) {
     if (input) {
       await input.fill("");
-      await input.pressSequentially(q);
+      await typeKeys(input, q).catch(() => input.pressSequentially(q));
     }
     const options = await comboboxOptions(root, controls, 3000);
     const texts = (await options.allInnerTexts()).map(t => t.replace(/\s+/g, " ").trim());
     seen.push(...texts.filter(t => t && !seen.includes(t)));
     const pick = pickLocation(want, texts);
-    if (pick !== null) return options.nth(texts.indexOf(pick)).click();
+    if (pick !== null) {
+      await beforeAction();
+      return options.nth(texts.indexOf(pick)).click();
+    }
   }
   if (input) await input.fill("").catch(() => {});
   throw new Error(`No combobox option matching "${want}" for "${field.label}" (saw: ${seen.slice(0, 10).join(" | ")})`);
