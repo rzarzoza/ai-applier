@@ -1,6 +1,6 @@
 import { expect, test } from "vitest";
 import { openDb, type Db } from "../../src/db/db.js";
-import { approveAnswer, createQuestion, getQuestion, listQuestions, setOverride } from "../../src/answers/bank.js";
+import { addVariant, approveAnswer, createQuestion, getQuestion, listQuestions, setOverride } from "../../src/answers/bank.js";
 import type { Classification, FieldCategory } from "../../src/answers/classify.js";
 import { resolveFields } from "../../src/answers/resolve.js";
 import type { FieldSpec, JobContext } from "../../src/forms/types.js";
@@ -325,4 +325,47 @@ test("an unfillable fact never reuses a template answer with the same label", as
   expect(r).toMatchObject({ status: "blocked", reason: "missing" });
   expect((r as { questionId: number }).questionId).not.toBe(t.id);
   expect(getQuestion(db, t.id)!.useCount).toBe(0);
+});
+
+test("same-label fields with different descriptions are classified separately, in one form and in the cache", async () => {
+  const db = setup();
+  const llm = new FakeLlm().on("classify", classifyAs({
+    terms: { category: "consent-required" },
+    sms: { category: "optin-optional" },
+  }));
+  const fields = [
+    f("terms", "I agree", "checkbox", { description: "I agree to the privacy policy and terms." }),
+    f("sms", "I agree", "checkbox", { required: false, description: "Send me text messages about new roles." }),
+  ];
+  const res = await resolveFields({ db, llm }, fields, job);
+  expect(JSON.parse(String(llm.calls[0]!.content)).fields.map((x: { id: string }) => x.id)).toEqual(["terms", "sms"]);
+  expect(res).toEqual([
+    { fieldId: "terms", status: "filled", answer: { type: "check", checked: true }, source: "consent" },
+    { fieldId: "sms", status: "skip" },
+  ]);
+  // A later form reuses both cached classifications by description.
+  await resolveFields({ db, llm }, [{ ...fields[1]!, id: "x" }, { ...fields[0]!, id: "y" }], { ...job, jobId: "j2" });
+  expect(llm.calls.filter(c => c.name === "classify")).toHaveLength(1);
+});
+
+test("a saved question with exactly the same wording matches without asking the LLM", async () => {
+  const db = setup();
+  const q = createQuestion(db, { canonical: "Do you hold a security clearance?", kind: "global", isFactual: true });
+  approveAnswer(db, q.id, "No");
+  const v = createQuestion(db, { canonical: "Expected graduation date", kind: "global", isFactual: true });
+  addVariant(db, v.id, "When do you graduate at Acme?");
+  approveAnswer(db, v.id, "May 2028");
+  const llm = new FakeLlm().on("classify", classifyAs({
+    cl: { category: "question", canonicalQuestion: "do you hold a security clearance", isFactual: true },
+    grad: { category: "question", canonicalQuestion: "When will you graduate?", isFactual: true },
+  }));
+  const res = await resolveFields({ db, llm }, [
+    f("cl", "Clearance?", "radio", { options: ["Yes", "No"] }),
+    f("grad", "When do you graduate at Acme? *", "text"),
+  ], job);
+  expect(llm.calls.map(c => c.name)).toEqual(["classify"]);
+  expect(res).toEqual([
+    { fieldId: "cl", status: "filled", answer: { type: "option", option: "No" }, source: "bank" },
+    { fieldId: "grad", status: "filled", answer: { type: "text", text: "May 2028" }, source: "bank" },
+  ]);
 });

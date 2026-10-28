@@ -70,9 +70,14 @@ export function normalizeLabel(label: string, company: string): string {
   return withCompanyPlaceholder(norm(label).replace(/\s*\*+$/, "").trim(), company);
 }
 
+/**
+ * Fields with the same key share one classification (cached across forms, and grouped within a form).
+ * The description is part of it: two "I agree" boxes can be a required consent and an optional SMS opt-in.
+ */
 export function fieldCacheKey(field: FieldSpec, company: string): string {
   const options = (field.options ?? []).map(o => normalizeLabel(o, company)).sort();
-  return createHash("sha1").update([field.kind, normalizeLabel(field.label, company), options.join("\u001f")].join("|")).digest("hex");
+  const description = withCompanyPlaceholder(norm(field.description ?? ""), company);
+  return createHash("sha1").update([field.kind, normalizeLabel(field.label, company), options.join("\u001f"), description].join("|")).digest("hex");
 }
 
 type Raw = z.infer<typeof ClassifySchema>["fields"][number];
