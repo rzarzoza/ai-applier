@@ -14,7 +14,7 @@ import { readOptions as readOptionsField } from "../forms/fill.js";
 import { inPage } from "../forms/in-page.js";
 import type { FieldAnswer, FieldSpec, JobContext } from "../forms/types.js";
 import {
-  decrementAttempts, getJob, HAND_UNCONFIRMED, incrementAttempts, isUnknownSubmission, nextQueued, RESUME_NEEDED, setAts, setStatus,
+  canOpenLive, decrementAttempts, getJob, HAND_UNCONFIRMED, incrementAttempts, isUnknownSubmission, nextQueued, RESUME_NEEDED, setAts, setStatus,
   setUsedDocuments, submittedSince, UNKNOWN_SUBMISSION,
 } from "../jobs/repo.js";
 import type { Job, JobStatus } from "../jobs/types.js";
@@ -23,7 +23,7 @@ import { getFilters } from "../filters/filters.js";
 import { getProfile } from "../profile/profile.js";
 import { getSettings, haltRunner, type Settings } from "../settings.js";
 import { recheckQueued } from "../sources/poller.js";
-import type { BrowserProvider } from "./browser.js";
+import type { BrowserProvider, BrowserSession, WatchField } from "./browser.js";
 import { clearRunnerCurrent, getRunnerCurrent, setRunnerCurrent, STEPS, type RunnerCurrent, type RunnerStep } from "./current.js";
 import { getSnapshot, saveRecord, saveSnapshot, type Snapshot } from "./records.js";
 
@@ -53,8 +53,11 @@ class SetupError extends Error {}
 /**
  * "hand-finish" opens the form of a job waiting on the user, fills what the app can, highlights what is left, and waits
  * for the user to finish and click the site's own submit button: the app never submits in this mode.
+ * "rebuild" opens the form of a job waiting on the user (or on review) again for the dashboard's live view: it fills
+ * everything the app knows (the user's per-job values first), highlights what is left and parks the page. It never
+ * submits, never waits, and never changes the job's status; a failure is thrown.
  */
-export type RunMode = "auto" | "submit-reviewed" | "interactive" | "hand-finish";
+export type RunMode = "auto" | "submit-reviewed" | "interactive" | "hand-finish" | "rebuild";
 
 const HUMAN_WAIT_MS = 600_000;
 const POLL_MS = 5_000;
@@ -126,22 +129,36 @@ export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "a
   // Only the confirmed Retry on the job's page may re-run a possibly sent application.
   if (mode === "interactive" && isUnknownSubmission(job)) return job.status;
   if (mode === "hand-finish" && !canHandFinish(db, job.id)) return job.status;
+  const rebuild = mode === "rebuild";
+  if (rebuild && !canOpenLive(job)) return job.status;
 
-  clearBlockersForJob(db, job.id);
+  // A rebuild leaves the job as it is: its blockers stay until a run or a submission replaces them.
+  if (!rebuild) clearBlockersForJob(db, job.id);
   const handler = detectAts(job.url, deps.handlers ?? HANDLERS);
   if (!handler) {
+    if (rebuild) throw new Error(`${atsNameFromUrl(job.url)} forms can't be opened here`);
     const ats = atsNameFromUrl(job.url);
     setAts(db, job.id, ats);
     setStatus(db, job.id, "unsupported", ats);
     return "unsupported";
   }
   setAts(db, job.id, handler.name);
-  setStatus(db, job.id, "filling");
-  incrementAttempts(db, job.id);
+  if (!rebuild) {
+    // A new run replaces whatever page the live view kept for the job.
+    await deps.browser.unpark?.(job.id);
+    setStatus(db, job.id, "filling");
+    incrementAttempts(db, job.id);
+  }
 
   // The user is at the browser in these modes: show it and wait longer for them.
-  const userPresent = mode !== "auto";
-  const hand = mode === "hand-finish";
+  const userPresent = mode !== "auto" && !rebuild;
+  /** Fill what the app can and leave the rest to the user, never submitting (hand-finish and rebuild). */
+  const hand = mode === "hand-finish" || rebuild;
+  // With a live view, the user sees and drives the page in the dashboard: only Pop out and Do it now need a window.
+  const visible = mode === "hand-finish" || mode === "interactive" ||
+    (!deps.browser.keepsPages && !rebuild && (mode === "submit-reviewed" || !getSettings(db).headless));
+  /** Set once a rebuild filled and highlighted the form: only then is its page worth parking. */
+  let rebuilt = false;
   const startedAt = deps.now().toISOString();
   const step = (s: RunnerStep, extra: { maybeSent?: boolean } = {}) => setRunnerCurrent(db, { jobId: job.id, step: s, startedAt, mode, ...extra });
   /** Hand-finish: the fields left for the user, each with the bank question it answers (when it is one). */
@@ -151,17 +168,30 @@ export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "a
   };
   /** Hand-finish: what the user typed into those fields, added to the submission's record. */
   const handAnswers: { label: string; value: unknown; source: string }[] = [];
-  let session: { page: Page; close(): Promise<void> } | null = null;
+  let session: BrowserSession | null = null;
   const fields: FieldSpec[] = [];
   const resolutions: Resolution[] = [];
   const byId = new Map<string, FieldSpec>();
   /** What the user should know about this run (e.g. an "Other" picked with no box to type the real value in). */
   const notes: string[] = [];
   const withNotes = (reason: string) => [reason, ...notes].join("; ");
+  /** Every field a parked page shows (but files), with what the app filled in and the bank question it is blocked on. */
+  const watchList = (): WatchField[] => {
+    const last = new Map(resolutions.map(r => [r.fieldId, r]));
+    return fields.filter(f => f.kind !== "file").map(field => {
+      const r = last.get(field.id);
+      return {
+        field,
+        filled: r?.status === "filled" ? r.answer : null,
+        questionId: r?.status === "blocked" ? r.questionId : forUser.get(field.id)?.questionId ?? null,
+      };
+    });
+  };
   let submitClicked = false;
   let beforeSubmit: Buffer | null = null;
   // Submitting after review sends exactly what the user reviewed; anything else goes back for review.
-  const reviewed = mode === "submit-reviewed" ? reviewedValues(getSnapshot(db, job.id)) : null;
+  // A rebuild of a job awaiting review shows the values the user is reviewing.
+  const reviewed = mode === "submit-reviewed" || (rebuild && job.status === "ready-to-review") ? reviewedValues(getSnapshot(db, job.id)) : null;
 
   /**
    * Saves what this run saw (with a screenshot) and sets the final status. A job that no longer needs
@@ -188,24 +218,7 @@ export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "a
   /** Records a confirmed submission. A record that can't be written never changes the status. */
   const endSubmitted = async (page: Page): Promise<JobStatus> => {
     const confirmation = await screenshot(page);
-    let reason: string | null = null;
-    try {
-      saveRecord(job.id, {
-        screenshots: [beforeSubmit, confirmation].filter((s): s is Buffer => s !== null),
-        answers: [
-          ...resolutions.filter((r): r is Filled => r.status === "filled")
-            .map(r => ({ label: byId.get(r.fieldId)!.label, value: answerValue(r.answer), source: r.source as string })),
-          ...handAnswers,
-        ],
-        outcome: "submitted",
-      });
-    } catch (err) {
-      reason = `Submitted, but the record could not be saved: ${errorMessage(err)}`;
-    }
-    try {
-      const docs = usedDocuments(fields, resolutions);
-      setUsedDocuments(db, job.id, docs.resume, docs.coverLetter);
-    } catch { /* the tracker columns are a convenience */ }
+    const reason = recordSubmission(db, job.id, { screenshots: [beforeSubmit, confirmation], fields, resolutions, handAnswers });
     const status = await end("submitted", reason ?? (notes.length ? notes.join("; ") : null), confirmation);
     notifySubmitted();
     return status;
@@ -224,7 +237,7 @@ export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "a
     step("Opening application");
     const settings = getSettings(db);
     try {
-      session = await deps.browser.open({ headless: userPresent ? false : settings.headless });
+      session = await deps.browser.open({ headless: !visible });
     } catch (err) {
       throw new SetupError(`The browser could not start: ${errorMessage(err)}`);
     }
@@ -488,28 +501,22 @@ export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "a
         if (got !== undefined) handAnswers.push({ label: t.field.label, value: got, source: "you" });
       }
       const status = await endSubmitted(page);
-      // Only answers that went out with a confirmed application are worth keeping.
-      const saved = new Set<number>();
-      for (const t of todo) {
-        const got = captured.get(t.field.id);
-        const text = got === undefined ? null : bankText(got);
-        if (t.questionId === null || saved.has(t.questionId) || !text) continue;
-        try {
-          const q = getQuestion(db, t.questionId);
-          if (!q) continue;
-          answerQuestion(db, q.id, q.kind === "template" ? withCompanyPlaceholder(text, job.company) : text);
-          saved.add(q.id);
-        } catch { /* the submission stands */ }
-      }
+      learnAnswers(db, job.company, todo, captured);
       return status;
     };
 
     const opened = await handler.open(page, job.url);
-    if (!opened.ok) return await end(...OPEN_FAILED[opened.reason](opened.detail));
+    if (!opened.ok) {
+      if (rebuild) throw new Error(OPEN_FAILED[opened.reason](opened.detail)[1]);
+      return await end(...OPEN_FAILED[opened.reason](opened.detail));
+    }
 
     step("Reading the form");
     let batch = await handler.readFields(page);
-    if (!batch.length) return await end("failed", "No form fields found");
+    if (!batch.length) {
+      if (rebuild) throw new Error("No form fields found");
+      return await end("failed", "No form fields found");
+    }
     ctx = await jobContext(job, handler, page);
     let present = batch;
 
@@ -596,6 +603,16 @@ export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "a
       }
     }
 
+    if (rebuild) {
+      // Everything the app knows is filled: outline what is left and hand the page to the live view (see finally).
+      const onForm = new Set(present.map(f => f.id));
+      const unfilled = await verify(onForm);
+      if (unfilled) leaveToUser(unfilled.field);
+      const todo = [...forUser.values()].filter(t => onForm.has(t.field.id)).map(t => t.field.id);
+      await (await handler.root(page)).evaluate(inPage(highlightFields), todo).catch(() => {});
+      rebuilt = true;
+      return job.status;
+    }
     if (hand) return await awaitHandFinish(present);
 
     // Verify the fields still on the form (a conditional question may have been removed again).
@@ -626,8 +643,8 @@ export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "a
       await deps.notify("AI Applier needs you", `${job.company}: ${human.ask} in the browser window`);
       resolveNeedsYouForJob(db, job.id);
       addNeedsYou(db, { jobId: job.id, kind: human.kind, message: `${job.company} · ${job.title}: ${human.ask}` });
-      // Nobody can solve anything in a hidden browser: hand it to the user right away.
-      if (!userPresent && settings.headless) return await end("needs-you", human.reason);
+      // Nobody can solve anything in a hidden browser: hand it to the user right away (the live view shows it).
+      if (!visible) return await end("needs-you", human.reason);
       const humanWait = deps.humanWaitMs ?? HUMAN_WAIT_MS;
       step("Waiting for you (CAPTCHA/code)");
       outcome = await pollOutcome(handler, page, userPresent ? Math.max(humanWait, INTERACTIVE_WAIT_MS) : humanWait, pollMs,
@@ -652,6 +669,8 @@ export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "a
         return await endUnknown("No confirmation after submitting");
     }
   } catch (err) {
+    // A rebuild leaves the job as it was: whoever asked for it shows why it failed.
+    if (rebuild) throw err;
     const halt = err instanceof SetupError ? err.message : llmHaltReason(err);
     if (halt && !submitClicked) {
       // Every job would fail the same way: put this one back as it was and pause until it's fixed.
@@ -665,9 +684,90 @@ export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "a
     if (outcome.kind === "submitted") return await endSubmitted(session.page);
     return await endUnknown(errorMessage(err));
   } finally {
-    await session?.close().catch(() => {});
+    // A job left waiting on the user keeps its page open for the dashboard's live view (when the browser can keep it).
+    let kept = false;
+    const now = getJob(db, job.id);
+    if (session?.park && !session.page.isClosed() && now && canOpenLive(now) && (!rebuild || rebuilt)) {
+      try {
+        kept = session.park(job.id, { handler, fields: [...fields], resolutions: [...resolutions], watch: watchList(), notes: [...notes] });
+      } catch { kept = false; }
+    }
+    if (!kept) await session?.close().catch(() => {});
     if (getRunnerCurrent(db)?.jobId === job.id) clearRunnerCurrent(db);
   }
+}
+
+/**
+ * Writes the record of a confirmed submission (screenshots in order, every answer filled plus `handAnswers`) and the
+ * documents it used. Returns the job's reason when the record could not be written, else null; never throws.
+ */
+function recordSubmission(db: Db, jobId: string, s: {
+  screenshots: (Buffer | null)[]; fields: FieldSpec[]; resolutions: Resolution[]; handAnswers: { label: string; value: unknown; source: string }[];
+}): string | null {
+  const byId = new Map(s.fields.map(f => [f.id, f]));
+  const typed = new Set(s.handAnswers.map(a => a.label));
+  let reason: string | null = null;
+  try {
+    saveRecord(jobId, {
+      screenshots: s.screenshots.filter((x): x is Buffer => x !== null),
+      answers: [
+        ...s.resolutions.filter((r): r is Filled => r.status === "filled" && byId.has(r.fieldId) && !typed.has(byId.get(r.fieldId)!.label))
+          .map(r => ({ label: byId.get(r.fieldId)!.label, value: answerValue(r.answer), source: r.source as string })),
+        ...s.handAnswers,
+      ],
+      outcome: "submitted",
+    });
+  } catch (err) {
+    reason = `Submitted, but the record could not be saved: ${errorMessage(err)}`;
+  }
+  try {
+    const docs = usedDocuments(s.fields, s.resolutions);
+    setUsedDocuments(db, jobId, docs.resume, docs.coverLetter);
+  } catch { /* the tracker columns are a convenience */ }
+  return reason;
+}
+
+/**
+ * Approves in the bank each question the user answered by hand, with what they typed or picked (`captured`, by field
+ * id). Only call it once the application went out: only answers sent with a confirmed application are worth keeping.
+ */
+function learnAnswers(db: Db, company: string, todo: { field: FieldSpec; questionId: number | null }[], captured: ReadonlyMap<string, string | string[] | boolean>): void {
+  const saved = new Set<number>();
+  for (const t of todo) {
+    const got = captured.get(t.field.id);
+    const text = got === undefined ? null : bankText(got);
+    if (t.questionId === null || saved.has(t.questionId) || !text) continue;
+    try {
+      const q = getQuestion(db, t.questionId);
+      if (!q) continue;
+      answerQuestion(db, q.id, q.kind === "template" ? withCompanyPlaceholder(text, company) : text);
+      saved.add(q.id);
+    } catch { /* the submission stands */ }
+  }
+}
+
+/**
+ * Records a submission the user made on a parked page in the live view (the page confirmed it): the record with the
+ * answers the app filled and what the user typed (`captured`, by field id), the used documents, a snapshot, the
+ * submitted status (resolving the job's needs-you items), then the tracker hook, and finally the bank approvals of the
+ * questions the user answered (see learnAnswers).
+ */
+export async function recordLiveSubmission(ctx: { db: Db; onSubmitted?(jobId: string): void }, jobId: string,
+  parked: { page: Page; fields: FieldSpec[]; resolutions: Resolution[]; watch: WatchField[]; notes: string[] },
+  captured: ReadonlyMap<string, string | string[] | boolean>): Promise<JobStatus> {
+  const { db } = ctx;
+  const job = getJob(db, jobId);
+  if (!job) throw new Error(`No job with id ${jobId}`);
+  const confirmation = await screenshot(parked.page);
+  const handAnswers = parked.watch.filter(w => captured.has(w.field.id))
+    .map(w => ({ label: w.field.label, value: captured.get(w.field.id), source: "you" }));
+  const reason = recordSubmission(db, jobId, { screenshots: [confirmation], fields: parked.fields, resolutions: parked.resolutions, handAnswers });
+  try { saveSnapshot(db, jobId, { fields: parked.fields, resolutions: parked.resolutions, screenshot: confirmation }); } catch { /* a convenience */ }
+  try { resolveNeedsYouForJob(db, jobId); } catch { /* the status below still stands */ }
+  setStatus(db, jobId, "submitted", reason ?? (parked.notes.length ? parked.notes.join("; ") : null));
+  try { ctx.onSubmitted?.(jobId); } catch { /* the tracker must never affect a job */ }
+  learnAnswers(db, job.company, parked.watch, captured);
+  return "submitted";
 }
 
 /** Runs inside the page: outlines the controls left for the user and scrolls the first one into view. */
@@ -688,7 +788,7 @@ function highlightFields(ids: string[]): void {
 }
 
 /** Resolves to the promise's value, or rejects after `ms`. */
-function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+export function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   return Promise.race([p, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("timed out")), ms); })])
     .finally(() => clearTimeout(timer));
@@ -839,7 +939,7 @@ const TEXT_KINDS = new Set<FieldSpec["kind"]>(["text", "textarea", "email", "tel
 const squash = (s: string) => s.replace(/\s+/g, " ").trim();
 const lower = (xs: string[]) => xs.map(x => squash(x).toLowerCase()).sort();
 
-function isEmpty(got: string | string[] | boolean | null): boolean {
+export function isEmpty(got: string | string[] | boolean | null): boolean {
   return got === null || got === false || (typeof got === "string" && got.trim() === "") || (Array.isArray(got) && got.length === 0);
 }
 
@@ -848,7 +948,7 @@ function isEmpty(got: string | string[] | boolean | null): boolean {
  * same text (phone numbers compared without formatting); choices only need some selection, since a
  * widget may show a different label for the chosen option (e.g. a dial code for a phone country).
  */
-function holds(field: FieldSpec, answer: FieldAnswer, got: string | string[] | boolean | null): boolean {
+export function holds(field: FieldSpec, answer: FieldAnswer, got: string | string[] | boolean | null): boolean {
   switch (answer.type) {
     case "check":
       return got === answer.checked;

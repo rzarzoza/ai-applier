@@ -49,6 +49,12 @@ export const HAND_UNCONFIRMED = "Finished by hand? Not confirmed — check befor
 export const isUnknownSubmission = (j: Job) =>
   j.status === "needs-you" && (!!j.statusReason?.startsWith(UNKNOWN_SUBMISSION_PREFIX) || j.statusReason === HAND_UNCONFIRMED);
 
+/**
+ * Whether the job's application may be shown and finished in the dashboard's live view: it waits for the user's input
+ * (and was not possibly sent already) or for their review.
+ */
+export const canOpenLive = (j: Job) => (j.status === "needs-you" && !isUnknownSubmission(j)) || j.status === "ready-to-review";
+
 export function getJob(db: Db, id: string): Job | null {
   const r = db.prepare("SELECT * FROM jobs WHERE id = ?").get(id) as Row | undefined;
   return r ? toJob(r) : null;
