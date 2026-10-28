@@ -125,6 +125,14 @@ export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "a
     return end("submitted", reason, confirmation);
   };
 
+  /** The application may already have gone out: flag it for the user and never invite a blind retry. */
+  const endUnknown = (detail: string): Promise<JobStatus> => {
+    try {
+      addNeedsYou(db, { jobId: job.id, kind: "other", message: `${job.company} · ${job.title}: ${UNKNOWN_SUBMISSION} (${detail})` });
+    } catch { /* the status below still flags it */ }
+    return end("needs-you", UNKNOWN_SUBMISSION);
+  };
+
   try {
     const settings = getSettings(db);
     session = await deps.browser.open({ headless: userPresent ? false : settings.headless });
@@ -210,19 +218,15 @@ export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "a
       case "already-applied":
         return await end("applied-manually", "Already applied");
       case "unknown":
-        return await end("failed", outcome.detail);
+        return await endUnknown(outcome.detail);
       default:
-        return await end("failed", "No confirmation after submitting");
+        return await endUnknown("No confirmation after submitting");
     }
   } catch (err) {
     if (!submitClicked || !session) return await end("failed", errorMessage(err));
-    // The application may already have gone out: never invite a blind retry.
     const outcome = await handler.outcome(session.page).catch((): SubmitOutcome => ({ kind: "pending" }));
     if (outcome.kind === "submitted") return await endSubmitted(session.page);
-    try {
-      addNeedsYou(db, { jobId: job.id, kind: "other", message: `${job.company} · ${job.title}: ${UNKNOWN_SUBMISSION} (${errorMessage(err)})` });
-    } catch { /* the status below still flags it */ }
-    return await end("needs-you", UNKNOWN_SUBMISSION);
+    return await endUnknown(errorMessage(err));
   } finally {
     await session?.close().catch(() => {});
   }

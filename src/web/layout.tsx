@@ -44,6 +44,8 @@ button { font: inherit; padding: 6px 14px; border-radius: 6px; border: 1px solid
 button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
 details { margin-top: 10px; } summary { cursor: pointer; color: var(--accent); }
 .empty { color: var(--muted); }
+table { width: 100%; border-collapse: collapse; font-size: 14px; } th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+.row a { color: var(--muted); text-decoration: none; } .row a.active { color: var(--text); font-weight: 600; }
 `;
 
 export function Layout(props: { active: string; inboxCount: number; children?: Child }) {

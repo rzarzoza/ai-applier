@@ -47,3 +47,12 @@ export function saveSnapshot(db: Db, jobId: string, s: { fields: FieldSpec[]; re
   db.prepare(`INSERT OR REPLACE INTO job_snapshots (job_id, fields_json, resolutions_json, screenshot_path, created_at)
       VALUES (?, ?, ?, ?, ?)`).run(jobId, JSON.stringify(s.fields), JSON.stringify(s.resolutions), shotPath, time);
 }
+
+export interface Snapshot { fields: FieldSpec[]; resolutions: Resolution[]; screenshotPath: string | null; createdAt: string }
+
+/** The job's stored snapshot (see `saveSnapshot`), or null if the runner has not saved one. */
+export function getSnapshot(db: Db, jobId: string): Snapshot | null {
+  const r = db.prepare("SELECT * FROM job_snapshots WHERE job_id = ?").get(jobId) as
+    { fields_json: string; resolutions_json: string; screenshot_path: string | null; created_at: string } | undefined;
+  return r ? { fields: JSON.parse(r.fields_json) as FieldSpec[], resolutions: JSON.parse(r.resolutions_json) as Resolution[], screenshotPath: r.screenshot_path, createdAt: r.created_at } : null;
+}

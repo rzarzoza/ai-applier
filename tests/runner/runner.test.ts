@@ -199,15 +199,16 @@ test("validation error after submit → failed with page messages", async () => 
   expectScreenshot(job.id);
 });
 
-test("an unknown outcome fails with its detail; no confirmation in time fails too", async () => {
+test("an unknown outcome, or no confirmation in time, ends needs-you (state unknown), never failed", async () => {
   const oops = addJob("https://mini-ats.test/apply?oops=1");
-  expect(await runJob(deps, oops.id)).toBe("failed");
-  expect(getJob(db, oops.id)!.statusReason).toContain("Something went wrong on our side");
+  expect(await runJob(deps, oops.id)).toBe("needs-you");
+  expect(getJob(db, oops.id)!.statusReason).toBe("Submission state unknown — check before retrying");
+  expect(listOpenNeedsYou(db).map(n => n.message).join("\n")).toContain("Something went wrong on our side");
   expectScreenshot(oops.id);
 
   const silent = addJob("https://mini-ats.test/apply?silent=1");
-  expect(await runJob({ ...deps, submitWaitMs: 300 }, silent.id)).toBe("failed");
-  expect(getJob(db, silent.id)!.statusReason).toMatch(/no confirmation/i);
+  expect(await runJob({ ...deps, submitWaitMs: 300 }, silent.id)).toBe("needs-you");
+  expect(getJob(db, silent.id)!.statusReason).toBe("Submission state unknown — check before retrying");
   expectScreenshot(silent.id);
 });
 

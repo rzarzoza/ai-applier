@@ -14,7 +14,7 @@ function setup() {
   const llm = new FakeLlm();
   const runInteractive = vi.fn();
   const pollNow = vi.fn();
-  const app = createApp({ db, llm, runInteractive, pollNow });
+  const app = createApp({ db, llm, runInteractive, runReviewed: vi.fn(), pollNow });
   const mk = (n: number) => { const j = upsertPosting(db, p(n)).job; setStatus(db, j.id, "needs-you"); return j; };
   return { db, llm, app, runInteractive, mk };
 }
