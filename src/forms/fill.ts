@@ -1,4 +1,5 @@
 import type { Frame, Locator, Page } from "playwright";
+import { isLocationAnswer, locationQueries, pickLocation } from "../answers/adapt.js";
 import { inPage } from "./in-page.js";
 import type { FieldAnswer, FieldSpec } from "./types.js";
 
@@ -29,6 +30,7 @@ export async function fillField(root: Page | Frame, field: FieldSpec, answer: Fi
       const want = answer.type === "option" ? answer.option : answer.text;
       await el.click();
       const { input, controls } = await comboboxParts(el);
+      if (isLocationAnswer(field, want)) return fillLocation(root, field, want, input, controls);
       if (input) {
         await input.fill("");
         await input.pressSequentially(want);
@@ -67,6 +69,27 @@ export async function fillField(root: Page | Frame, field: FieldSpec, answer: Fi
       if (answer.type !== "text") throw new Error(`${field.kind} needs a text answer`);
       await el.fill(answer.text);
   }
+}
+
+/**
+ * Picks the applicant's place in a location typeahead: searches the value, the city alone and "City, ST", and clicks
+ * only an option naming that city and state (pickLocation). Never a prefix or an unrelated place: none → error.
+ */
+async function fillLocation(root: Page | Frame, field: FieldSpec, want: string, input: Locator | null, controls: string): Promise<void> {
+  const seen: string[] = [];
+  for (const q of input ? locationQueries(want) : [want]) {
+    if (input) {
+      await input.fill("");
+      await input.pressSequentially(q);
+    }
+    const options = await comboboxOptions(root, controls, 3000);
+    const texts = (await options.allInnerTexts()).map(t => t.replace(/\s+/g, " ").trim());
+    seen.push(...texts.filter(t => t && !seen.includes(t)));
+    const pick = pickLocation(want, texts);
+    if (pick !== null) return options.nth(texts.indexOf(pick)).click();
+  }
+  if (input) await input.fill("").catch(() => {});
+  throw new Error(`No combobox option matching "${want}" for "${field.label}" (saw: ${seen.slice(0, 10).join(" | ")})`);
 }
 
 /** The box to type into (the combobox itself or an input inside it), and the id of the listbox it controls. */

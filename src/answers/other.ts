@@ -2,37 +2,58 @@ import type { FieldAnswer, FieldSpec } from "../forms/types.js";
 import type { ProfileKey } from "../profile/profile.js";
 
 /**
- * The "Other → type the real value" fallback. When a choice control asks for a name (school, major, degree, city,
- * country, employer) and the applicant's real value is not among its options, the control's "Other" option is picked
- * and the real value is typed into the box that asks to specify it. Only ever for names: never for yes/no, EEO,
- * work authorization, consent or any other fact, where "Other" would change the answer.
+ * The "Other → type the real value" fallback. When a choice control asks for a name (school, major, degree, employer)
+ * and the applicant's real value is not among its options, the control's "Other" option is picked and the real value is
+ * typed into the box that asks to specify it. Only ever for names: never for yes/no, EEO, work authorization, consent,
+ * places (a location must resolve to the real place or fail) or any other fact, where "Other" would change the answer.
  */
 
 /** Profile keys whose values are names of things that a list may simply not include. */
-export const ENTITY_KEYS: ReadonlySet<ProfileKey> = new Set<ProfileKey>(["school", "major", "degree", "city", "state", "location", "country", "employers"]);
+export const ENTITY_KEYS: ReadonlySet<ProfileKey> = new Set<ProfileKey>(["school", "major", "degree", "employers"]);
 
 /** Labels of questions asking for such a name (for answers from the bank, a derived value or an override). */
-const ENTITY_LABEL = /school|university|college|institution|major|discipline|field of study|degree|company|employer|organi[sz]ation|city/i;
+const ENTITY_LABEL = /school|university|college|institution|major|discipline|field of study|degree|company|employer|organi[sz]ation/i;
 
 /** Questions where "Other" is never a truthful stand-in, whatever their label also mentions. */
 const NEVER_OTHER = /authori[sz]|sponsor|visa|citizen|immigration|eligib|legally|gender|sex\b|sexual|race|racial|ethnic|hispanic|latin[oax]|veteran|disab|orientation|pronoun|transgender|demographic|eeo|consent|agree|acknowledg|certif|attest|privacy|clearance|criminal|convict/i;
 
-/** Option texts that stand for "my answer is not listed", most specific first (a longer match wins). */
-const OTHER_PATTERNS = [
-  "my school is not listed", "my university is not listed", "other school not listed", "other please specify", "school not listed",
-  "university not listed", "institution not listed", "other school", "other university", "not listed", "none of the above", "other",
+/** Questions asking where the applicant is: a place list's "Other" (or a place named "Other...") is never the answer. */
+export const PLACE_LABEL = /\blocation\b|\bcity\b|\bcountry\b|province|(?<!please )\bstate\b|where .*(located|based|live|reside)|zip|postal/i;
+
+/**
+ * Option texts that stand for "my answer is not listed", compared whole (after normalizing): an option is one of these
+ * exactly, or one of these followed only by a qualifier in parentheses or after a dash that says "specify" or "not
+ * listed" ("Other (School Not Listed)", "Other - please specify below"). Never a prefix of other words: "Other Cast,
+ * Bihar, India" is a place, "Otherton" a school.
+ */
+const OTHER_PHRASES = [
+  "other", "other (please specify)", "other - please specify", "other please specify", "other - school not listed",
+  "other school not listed", "school not listed", "university not listed", "institution not listed", "not listed",
+  "my school is not listed", "my university is not listed", "none of the above", "other school", "other university",
+  "other institution", "other company", "other employer",
 ];
 
-const words = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
-const OPTION_KINDS = new Set<FieldSpec["kind"]>(["select", "combobox", "radio"]);
+/** Lowercased, whitespace/dash/parenthesis spacing made uniform, a leading enumerator ("0 - ") and end punctuation dropped. */
+function normalizeOther(option: string): string {
+  return option.toLowerCase().replace(/[\u2010-\u2015]/g, "-").replace(/\s+/g, " ").trim()
+    .replace(/^\d+ ?[-.):] ?/, "")
+    .replace(/ ?\( ?/g, " (").replace(/ ?\)/g, ")").replace(/ ?- ?/g, " - ").replace(/ ?: ?/g, ": ")
+    .replace(/[\s.:;,]+$/, "").trim();
+}
 
-/** How specific an option is as an "Other" choice (the matched pattern's length), or 0 when it is not one. */
+const OPTION_KINDS = new Set<FieldSpec["kind"]>(["select", "combobox", "radio"]);
+const QUALIFIER = /^(?: \((?<paren>[^()]*)\)| ?[-:] (?<dash>.+))$/;
+
+/** How specific an option is as an "Other" choice (its normalized length: "Other school" over "Other"), or 0 when it is not one. */
 function otherScore(option: string): number {
-  // A leading enumerator ("0 - School Not Listed", sorted first on Greenhouse) is not part of the option's meaning.
-  const o = words(option).replace(/^\d+ /, "");
-  let best = 0;
-  for (const p of OTHER_PATTERNS) if ((o === p || o.startsWith(`${p} `)) && p.length > best) best = p.length;
-  return best;
+  const o = normalizeOther(option);
+  for (const p of OTHER_PHRASES) {
+    if (o === p) return o.length;
+    if (!o.startsWith(p)) continue;
+    const q = QUALIFIER.exec(o.slice(p.length))?.groups;
+    if (/specify|not listed/.test(q?.paren ?? q?.dash ?? "")) return o.length;
+  }
+  return 0;
 }
 
 export const isOtherOption = (option: string) => otherScore(option) > 0;
@@ -65,18 +86,15 @@ export function entityText(value: string | boolean | string[] | FieldAnswer | nu
  * that came from an entity profile key (`entity`) or, for bank/derived/override answers, whose label asks for a name.
  */
 export function otherEligible(field: FieldSpec, r: { source: string; answer: FieldAnswer; entity?: boolean }): boolean {
-  if (!OPTION_KINDS.has(field.kind) || NEVER_OTHER.test(field.label) || entityText(r.answer) === null) return false;
+  if (!OPTION_KINDS.has(field.kind) || NEVER_OTHER.test(field.label) || PLACE_LABEL.test(field.label) || entityText(r.answer) === null) return false;
   if (r.entity) return true;
   return ["bank", "derived", "template", "override"].includes(r.source) && ENTITY_LABEL.test(field.label);
 }
 
 /** Whether a profile key's value may fall back to "Other" in this field. */
 export function entityProfileField(field: FieldSpec, key: ProfileKey, value: string | boolean | string[] | null): boolean {
-  if (!ENTITY_KEYS.has(key) || !OPTION_KINDS.has(field.kind) || NEVER_OTHER.test(field.label)) return false;
-  const text = entityText(value);
-  if (text === null) return false;
-  // A country only when the value reads as a country name.
-  return key !== "country" || /^[a-z][a-z .'&()-]*$/i.test(text);
+  if (!ENTITY_KEYS.has(key) || !OPTION_KINDS.has(field.kind) || NEVER_OTHER.test(field.label) || PLACE_LABEL.test(field.label)) return false;
+  return entityText(value) !== null;
 }
 
 /** Labels of the box that asks to type what "Other" stands for. */

@@ -1,5 +1,5 @@
 import { expect, test } from "vitest";
-import { adaptAnswer, pickOption } from "../../src/answers/adapt.js";
+import { adaptAnswer, isLocationAnswer, locationQueries, pickLocation, pickOption } from "../../src/answers/adapt.js";
 import type { FieldSpec, JobContext } from "../../src/forms/types.js";
 import { FakeLlm } from "../helpers/fake-llm.js";
 
@@ -65,4 +65,53 @@ test("adaptAnswer is deterministic when it can be", async () => {
   expect(await adaptAnswer(llm, "Hispanic or Latino", { ...select(["Hispanic or Latino", "White", "Asian"]), kind: "checkbox-group" }, job))
     .toEqual({ type: "options", options: ["Hispanic or Latino"] });
   expect(llm.calls).toHaveLength(0);
+});
+
+test("pickLocation takes only an option naming the city and its state", () => {
+  expect(pickLocation("Houston, Texas", ["Houston County, Alabama", "Houston, Texas, United States"])).toBe("Houston, Texas, United States");
+  expect(pickLocation("Houston, Texas", ["Houston, TX, USA"])).toBe("Houston, TX, USA");
+  expect(pickLocation("Houston, TX", ["Houston, Texas, United States"])).toBe("Houston, Texas, United States");
+  // The city itself over a neighborhood or a same-named county; the country-naming one among equals.
+  expect(pickLocation("Houston, Texas", ["Houston Heights, Houston, Texas, United States", "Houston, Texas"])).toBe("Houston, Texas");
+  expect(pickLocation("Houston, Texas", ["Houston, Texas", "Houston, Texas, United States"])).toBe("Houston, Texas");
+  expect(pickLocation("Houston, Texas", ["Houston, TX", "Houston, TX, United States"])).toBe("Houston, TX, United States");
+  // Never a list without the city, the city in another state, or the state's name standing in for the city.
+  expect(pickLocation("Houston, Texas", ["Other Cast, Bihar, India", "Houston County, Alabama", "Houston, MS, USA"])).toBeNull();
+  expect(pickLocation("Houston, Texas", ["Austin, Texas, United States", "Texas City, Texas"])).toBeNull();
+  expect(pickLocation("New York, New York", ["Albany, New York, United States"])).toBeNull();
+  expect(pickLocation("New York, New York", ["Albany, New York", "New York, NY, USA"])).toBe("New York, NY, USA");
+  // Without a state, only an unambiguous city.
+  expect(pickLocation("Houston", ["Houston, TX", "Houston, MS"])).toBeNull();
+  expect(pickLocation("Houston", ["Houston, TX", "Austin, TX"])).toBe("Houston, TX");
+  expect(pickLocation("Houston", ["Houston County, Alabama"])).toBeNull();
+  expect(locationQueries("Houston, Texas")).toEqual(["Houston, Texas", "Houston", "Houston, TX"]);
+});
+
+test("isLocationAnswer: a place answer to a location question, not a yes/no or relocation", () => {
+  const f = (label: string): FieldSpec => ({ id: "l", label, kind: "combobox", required: true });
+  expect(isLocationAnswer(f("Location (City)"), "Houston, Texas")).toBe(true);
+  expect(isLocationAnswer(f("Where are you currently located?"), "Houston, Texas")).toBe(true);
+  expect(isLocationAnswer(f("Are you able to work from this location?"), "Yes")).toBe(false);
+  expect(isLocationAnswer(f("Are you able to work from this location?"), true)).toBe(false);
+  expect(isLocationAnswer(f("Are you open to relocation?"), "Houston, Texas")).toBe(false);
+  expect(isLocationAnswer(f("School"), "Houston, Texas")).toBe(false);
+});
+
+test("adaptAnswer maps a place only onto that place; an LLM pick lacking the city is rejected", async () => {
+  const loc = (options: string[]): FieldSpec => ({ id: "l", label: "Location (City)", kind: "combobox", required: true, options });
+  const noLlm = new FakeLlm();
+  expect(await adaptAnswer(noLlm, "Houston, Texas", loc(["Houston County, Alabama", "Houston, Texas, United States"]), job))
+    .toEqual({ type: "option", option: "Houston, Texas, United States" });
+  // Containment would have taken the only Houston; a place in another state is not the applicant's.
+  const llm1 = new FakeLlm().on("adapt", () => ({ option: "Other Cast, Bihar, India" }));
+  expect(await adaptAnswer(llm1, "Houston, Texas", loc(["Other Cast, Bihar, India", "Houston County, Alabama"]), job)).toBeNull();
+  const llm2 = new FakeLlm().on("adapt", () => ({ option: "Houston County, Alabama" }));
+  expect(await adaptAnswer(llm2, "Houston, Texas", loc(["Other Cast, Bihar, India", "Houston County, Alabama"]), job)).toBeNull();
+  expect(llm2.calls).toHaveLength(1);
+  // An LLM pick naming the city and state is kept.
+  const llm3 = new FakeLlm().on("adapt", () => ({ option: "Greater Houston Area, TX" }));
+  expect(await adaptAnswer(llm3, "Houston, Texas", loc(["Greater Houston Area, TX", "Austin, TX"]), job))
+    .toEqual({ type: "option", option: "Greater Houston Area, TX" });
+  // A non-place answer to a location question still maps when an option states it.
+  expect(await adaptAnswer(noLlm, "No preference", loc(["New York, NY", "No preference"]), job)).toEqual({ type: "option", option: "No preference" });
 });

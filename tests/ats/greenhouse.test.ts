@@ -229,9 +229,9 @@ test("greenhouse open never clicks a submit-type or in-form Apply control", asyn
 });
 
 /** A minimal react-select stand-in: typing renders the filtered options in the listbox named by aria-controls. */
-const fakeSelect = (options: string[]) => `
+const fakeSelect = (options: string[], label = "School") => `
   <div role="listbox" id="decoy"><div role="option" onclick="document.body.dataset.decoy = 'yes'">${options[0]}</div></div>
-  <form id="application-form"><div class="select"><label id="s-label" for="s">School</label>
+  <form id="application-form"><div class="select"><label id="s-label" for="s">${label}</label>
     <div class="select-shell"><div class="select__value-container"><input id="s" role="combobox" aria-labelledby="s-label"></div></div></div></form>
   <script>(() => {
     const options = ${JSON.stringify(options)};
@@ -281,6 +281,26 @@ test("greenhouse fill refuses an ambiguous prefix match", async () => {
   await expect(greenhouse.fill(page, school, { type: "text", text: "University of Michigan" })).rejects.toThrow(/Ambiguous/);
   expect(await greenhouse.readBack(page, school)).toBeNull();
 });
+
+test("greenhouse fill picks the applicant's real place in a location select, never another place", async () => {
+  const loc = async (options: string[]) => {
+    await page.setContent(fakeSelect(options, "Location (City)"));
+    return (await greenhouse.readFields(page)).find(f => f.label === "Location (City)")!;
+  };
+  let f = await loc(["Houston County, Alabama, United States", "Other Cast, Bihar, India", "Houston, Texas, United States"]);
+  await greenhouse.fill(page, f, { type: "text", text: "Houston, Texas" });
+  expect(await greenhouse.readBack(page, f)).toBe("Houston, Texas, United States");
+
+  // "Houston, Texas" finds nothing: the city alone is searched, and only the Texas one is taken.
+  f = await loc(["Houston County, Alabama", "Houston, TX, USA", "Houston, MS, USA"]);
+  await greenhouse.fill(page, f, { type: "text", text: "Houston, Texas" });
+  expect(await greenhouse.readBack(page, f)).toBe("Houston, TX, USA");
+
+  // The live DoorDash failure: no Houston at all must fail, never pick "Other Cast, Bihar, India".
+  f = await loc(["Other Cast, Bihar, India", "Houston County, Alabama"]);
+  await expect(greenhouse.fill(page, f, { type: "text", text: "Houston, Texas" })).rejects.toThrow(/No option matching/);
+  expect(await greenhouse.readBack(page, f)).toBeNull();
+}, 30000);
 
 test("greenhouse readOptions lists a react-select's whole list with its typed text cleared, and leaves it empty", async () => {
   await page.setContent(fakeSelect(["Associate's Degree", "Bachelor's Degree", "Master's Degree"]));

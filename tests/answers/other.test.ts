@@ -21,6 +21,39 @@ test("findOtherOption picks the most specific 'Other' option, case-insensitively
   expect(isOtherOption("Rice University")).toBe(false);
 });
 
+test("an Other option is the whole option text, never a name that merely starts with Other", () => {
+  // Seen live on DoorDash's Greenhouse location geocoder: a real place.
+  expect(isOtherOption("Other Cast, Bihar, India")).toBe(false);
+  expect(findOtherOption(["Houston County, Alabama", "Other Cast, Bihar, India"])).toBeNull();
+  expect(isOtherOption("Otherton")).toBe(false);
+  expect(isOtherOption("Other Side Academy")).toBe(false);
+  expect(isOtherOption("Not listed elsewhere University")).toBe(false);
+  // Still Other: exact phrases, an ordinal, and a specify/not-listed qualifier.
+  expect(isOtherOption("0 - School Not Listed")).toBe(true);
+  expect(isOtherOption("Other - School Not Listed")).toBe(true);
+  expect(isOtherOption("Other (please specify)")).toBe(true);
+  expect(isOtherOption("Other: please specify below")).toBe(true);
+  expect(isOtherOption("Other \u2013 not listed")).toBe(true);
+  expect(isOtherOption("Other Company")).toBe(true);
+  expect(isOtherOption("Other (Asia)")).toBe(false);
+  expect(isOtherOption("Other - Engineering")).toBe(false);
+});
+
+test("places never fall back to Other", () => {
+  const place = { source: "profile", answer: text("Houston, Texas"), entity: true };
+  expect(otherEligible(f("Location (City)", "combobox"), place)).toBe(false);
+  expect(otherEligible(f("City", "select"), place)).toBe(false);
+  expect(otherEligible(f("Where are you currently located?", "combobox"), place)).toBe(false);
+  expect(otherEligible(f("Country"), { source: "bank", answer: text("United States") })).toBe(false);
+  expect(otherEligible(f("State"), { source: "override", answer: text("Texas") })).toBe(false);
+  expect(entityProfileField(f("Location (City)", "combobox"), "location", "Houston, Texas")).toBe(false);
+  expect(entityProfileField(f("City", "combobox"), "city", "Houston")).toBe(false);
+  expect(entityProfileField(f("State"), "state", "Texas")).toBe(false);
+  expect(entityProfileField(f("Country"), "country", "United States")).toBe(false);
+  // Names still do, also when a label asks to "please state" one.
+  expect(entityProfileField(f("Please state your school", "combobox"), "school", "Rice University")).toBe(true);
+});
+
 test("only names may fall back to Other: entity profile keys, or bank/derived answers whose label asks for a name", () => {
   expect(otherEligible(f("School", "combobox"), { source: "profile", answer: text("Rice University"), entity: true })).toBe(true);
   expect(otherEligible(f("Which university do you attend?"), { source: "bank", answer: text("Rice University") })).toBe(true);
@@ -36,8 +69,6 @@ test("only names may fall back to Other: entity profile keys, or bank/derived an
   expect(otherEligible(f("School"), { source: "profile", answer: text("Rice University") })).toBe(false); // e.g. firstName
 
   expect(entityProfileField(f("School"), "school", "Rice University")).toBe(true);
-  expect(entityProfileField(f("Country"), "country", "United States")).toBe(true);
-  expect(entityProfileField(f("Country"), "country", "1234")).toBe(false);
   expect(entityProfileField(f("Are you willing to relocate?"), "willingToRelocate", true)).toBe(false);
   expect(entityProfileField(f("Race"), "ethnicity", "Hispanic or Latino")).toBe(false);
 });

@@ -19,6 +19,7 @@
  * - description: `.job__description` (absent on the bare /embed/job_app page).
  */
 import type { Frame, Locator, Page } from "playwright";
+import { isLocationAnswer, locationQueries, pickLocation } from "../answers/adapt.js";
 import { extractFields } from "../forms/extract.js";
 import { fillField, readBack as readBackField, readOptions as readOptionsField } from "../forms/fill.js";
 import { inPage } from "../forms/in-page.js";
@@ -206,6 +207,7 @@ async function pickOption(root: Page | Frame, field: FieldSpec, answer: FieldAns
   const want = norm(typed);
   const input = byId(root, field);
   const loading = root.locator(".select-shell", { has: input }).locator('[class*="loading"]');
+  if (isLocationAnswer(field, typed)) return pickPlace(root, field, typed, input, loading);
   await input.click();
   await input.fill(typed).catch(() => {});
   let seen: string[] = [];
@@ -228,6 +230,40 @@ async function pickOption(root: Page | Frame, field: FieldSpec, answer: FieldAns
     }
     await new Promise(r => setTimeout(r, 200));
   }
+  await input.press("Escape").catch(() => {});
+  throw new Error(`No option matching "${typed}" for "${field.label}" (saw: ${seen.slice(0, 10).join(" | ")})`);
+}
+
+/**
+ * Picks the applicant's place in a location select (the `#candidate-location` geocoder): searches the value, the city
+ * alone and "City, ST", waits for each search's results to settle, and clicks only an option naming that city and
+ * state (pickLocation: "Houston, Texas, United States", never "Houston County, Alabama" or "Other Cast, Bihar, India").
+ * No such option → error (the field fails; a place is never guessed).
+ */
+async function pickPlace(root: Page | Frame, field: FieldSpec, typed: string, input: Locator, loading: Locator): Promise<void> {
+  const seen: string[] = [];
+  await input.click();
+  for (const q of locationQueries(typed)) {
+    await input.fill(q).catch(() => {});
+    await new Promise(r => setTimeout(r, 300)); // let the search start before reading
+    let texts: string[] = [];
+    let stable = "";
+    let stableSince = Date.now();
+    const deadline = Date.now() + 6000;
+    for (;;) {
+      const options = await listboxOptions(root, input);
+      texts = options ? (await options.allInnerTexts()).map(t => t.replace(/\s+/g, " ").trim()) : [];
+      const settled = !(await loading.count());
+      const key = texts.join("\n");
+      if (key !== stable || !settled) { stable = key; stableSince = Date.now(); }
+      const pick = settled && texts.length ? pickLocation(typed, texts) : null;
+      if (options && pick !== null) return options.nth(texts.indexOf(pick)).click();
+      if ((settled && Date.now() - stableSince > (texts.length ? 800 : 1500)) || Date.now() >= deadline) break;
+      await new Promise(r => setTimeout(r, 200));
+    }
+    seen.push(...texts.filter(t => t && !seen.includes(t)));
+  }
+  await input.fill("").catch(() => {});
   await input.press("Escape").catch(() => {});
   throw new Error(`No option matching "${typed}" for "${field.label}" (saw: ${seen.slice(0, 10).join(" | ")})`);
 }
