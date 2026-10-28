@@ -2,7 +2,7 @@ import { expect, test } from "vitest";
 import { openDb } from "../../src/db/db.js";
 import { countByStatus, listJobs, setStatus } from "../../src/jobs/repo.js";
 import { pollAll } from "../../src/sources/poller.js";
-import { listSources, setSourceEnabled } from "../../src/sources/repo.js";
+import { addSource, listSources, setSourceEnabled } from "../../src/sources/repo.js";
 import type { FetchResult, Posting, SourceAdapter } from "../../src/sources/types.js";
 
 const now = new Date("2026-10-27");
@@ -51,9 +51,38 @@ test("re-polling does not duplicate jobs; posting gone inactive closes a queued 
 test("a posting the source no longer lists is closed, only for that source", async () => {
   const db = openDb(":memory:");
   await pollAll(db, { adapters: fakeAdapters([nyPosting]), now });
-  const r = await pollAll(db, { adapters: fakeAdapters([]), now });
+  const elsewhere = mk({ listingId: "7", url: "https://other.test/7", company: "Gamma" });
+  const r = await pollAll(db, { adapters: fakeAdapters([elsewhere]), now });
   expect(r[0].closed).toBe(1);
-  expect(countByStatus(db).closed).toBe(1);
+  expect(listJobs(db, { status: "closed" }).map(j => j.listingId)).toEqual(["1"]);
+});
+
+test("an empty successful fetch closes nothing and reports why", async () => {
+  const db = openDb(":memory:");
+  await pollAll(db, { adapters: fakeAdapters([nyPosting]), now });
+  const r = await pollAll(db, { adapters: fakeAdapters([], '"e2"'), now });
+  expect(r[0]).toMatchObject({ fetched: 0, closed: 0, error: "source returned 0 postings; skipped closing" });
+  expect(countByStatus(db)).toMatchObject({ queued: 1, closed: 0 });
+});
+
+test("a job matched by URL under a new listing id is not closed by the sweep", async () => {
+  const db = openDb(":memory:");
+  await pollAll(db, { adapters: fakeAdapters([nyPosting]), now });
+  const r = await pollAll(db, { adapters: fakeAdapters([{ ...nyPosting, listingId: "B" }]), now });
+  expect(r[0]).toMatchObject({ newJobs: 0, closed: 0 });
+  expect(countByStatus(db)).toMatchObject({ queued: 1, closed: 0 });
+});
+
+test("polling source Y leaves source X's queued job alone", async () => {
+  const db = openDb(":memory:");
+  await pollAll(db, { adapters: fakeAdapters([nyPosting]), now });
+  addSource(db, { id: "y", kind: "readme-table", url: "https://y.test/R.md", enabled: true });
+  setSourceEnabled(db, "simplify-summer2027", false);
+  const yPosting = mk({ sourceId: "y", listingId: "y1", url: "https://y.test/1", company: "Delta" });
+  const r = await pollAll(db, { adapters: fakeAdapters([yPosting]), now });
+  expect(r.map(x => x.sourceId)).toEqual(["y"]);
+  expect(listJobs(db, { status: "queued" }).map(j => j.sourceId).sort()).toEqual(["simplify-summer2027", "y"]);
+  expect(countByStatus(db).closed).toBe(0);
 });
 
 test("submitted jobs are never re-queued or closed by later polls", async () => {
@@ -63,8 +92,8 @@ test("submitted jobs are never re-queued or closed by later polls", async () => 
   setStatus(db, job.id, "submitted");
   await pollAll(db, { adapters: fakeAdapters([nyPosting]), now });
   await pollAll(db, { adapters: fakeAdapters([{ ...nyPosting, active: false }]), now });
-  await pollAll(db, { adapters: fakeAdapters([]), now });
-  expect(listJobs(db, {})[0].status).toBe("submitted");
+  await pollAll(db, { adapters: fakeAdapters([mk({ listingId: "7", url: "https://other.test/7", company: "Gamma" })]), now });
+  expect(listJobs(db, {}).find(j => j.listingId === "1")!.status).toBe("submitted");
 });
 
 test("fetch error is reported and changes nothing", async () => {

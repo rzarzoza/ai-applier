@@ -26,6 +26,7 @@ function processPostings(db: Db, sourceId: string, postings: Posting[], now: Dat
   for (const p of postings) {
     listed.add(p.listingId);
     const { job, isNew } = upsertPosting(db, p);
+    listed.add(job.listingId);
     if (!isNew) {
       if (!p.active && CLOSABLE.includes(job.status)) close(job.id, "posting is no longer active");
       continue;
@@ -55,6 +56,10 @@ export async function pollAll(db: Db, deps: PollDeps): Promise<PollReport[]> {
       const res = await deps.adapters[cfg.kind].fetch(cfg, deps.fetchFn);
       if (res.notModified) { markPolled(db, cfg.id, cfg.etag, deps.now); continue; }
       report.fetched = res.postings.length;
+      if (res.postings.length === 0) {
+        report.error = "source returned 0 postings; skipped closing";
+        continue;
+      }
       db.exec("BEGIN");
       try {
         processPostings(db, cfg.id, res.postings, deps.now, report);
