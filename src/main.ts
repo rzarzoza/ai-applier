@@ -12,7 +12,8 @@ import { getSecret, setSecret } from "./secrets.js";
 import { getJson, getSettings, saveSettings, setJson } from "./settings.js";
 import { persistentChromium } from "./runner/browser.js";
 import { macNotify } from "./runner/notify.js";
-import { flagInterruptedRuns, runJob, runNext, type RunnerDeps } from "./runner/runner.js";
+import { clearRunnerCurrent } from "./runner/current.js";
+import { flagInterruptedRuns, runJob, runNext, type RunMode, type RunnerDeps } from "./runner/runner.js";
 import { pollAll, type PollReport } from "./sources/poller.js";
 import { readmeTableAdapter } from "./sources/readme-table.js";
 import { simplifyAdapter } from "./sources/simplify.js";
@@ -46,6 +47,8 @@ export async function startApp(opts: StartOptions = {}): Promise<{ url: string; 
   // Nothing is running yet, so a job still "filling" was cut off by the last shutdown.
   const interrupted = flagInterruptedRuns(db);
   if (interrupted.length) log(`${interrupted.length} interrupted ${interrupted.length === 1 ? "run needs" : "runs need"} checking (see the Inbox)`);
+  // Nothing is running yet: whatever the dashboard's "Applying now" card last showed is over.
+  clearRunnerCurrent(db);
   const secrets: Secrets = opts.secrets ?? { get: getSecret, set: setSecret };
 
   // The app talks to the LLM through this wrapper, so a key saved in Settings takes effect without a restart.
@@ -91,11 +94,16 @@ export async function startApp(opts: StartOptions = {}): Promise<{ url: string; 
       if (status) log(`${what}: job finished as ${status}`);
       return status;
     });
-  const runById = (jobId: string, mode: "interactive" | "submit-reviewed") => {
+  /** Jobs the user asked to run that are waiting in the queue (or running); a second click doesn't queue them twice. */
+  const requested = new Set<string>();
+  const runById = (jobId: string, mode: Exclude<RunMode, "auto">) => {
+    if (requested.has(jobId)) return;
+    requested.add(jobId);
     queue.run(async () => {
       const status = await runJob(runnerDeps(), jobId, mode);
       log(`${mode} ${getJob(db, jobId)?.company ?? jobId}: job finished as ${status}`);
-    }).catch(e => log(`Run of job ${jobId} failed: ${errText(e)}`));
+    }).catch(e => log(`Run of job ${jobId} failed: ${errText(e)}`))
+      .finally(() => requested.delete(jobId));
   };
 
   let polling: Promise<void> | null = null;
@@ -125,6 +133,8 @@ export async function startApp(opts: StartOptions = {}): Promise<{ url: string; 
     db, llm, secrets, pollNow, syncTracker: runSync, localPort: () => port,
     runInteractive: id => runById(id, "interactive"),
     runReviewed: id => runById(id, "submit-reviewed"),
+    runHandFinish: id => runById(id, "hand-finish"),
+    requestedRuns: () => [...requested],
     onApiKeySaved: () => { void refreshLlm(); },
   });
 
@@ -177,7 +187,8 @@ export async function startApp(opts: StartOptions = {}): Promise<{ url: string; 
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  const app = await startApp({ startLoops: true });
+  const envPort = Number(process.env.AI_APPLIER_PORT);
+  const app = await startApp({ startLoops: true, port: Number.isInteger(envPort) && envPort > 0 ? envPort : undefined });
   log(`AI Applier running at ${app.url}`);
   process.once("SIGINT", () => { void app.stop().finally(() => process.exit(0)); });
 }

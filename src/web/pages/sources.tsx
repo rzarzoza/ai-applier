@@ -5,7 +5,8 @@ import type { PollReport } from "../../sources/poller.js";
 import { listJobs } from "../../jobs/repo.js";
 import { listSources } from "../../sources/repo.js";
 import type { Posting } from "../../sources/types.js";
-import { Layout, pauseProps } from "../layout.js";
+import { Alert, Layout, pauseProps } from "../layout.js";
+import { Chip, PageHead } from "../ui.js";
 import { inboxCount } from "./inbox.js";
 
 const LIST_KEYS = ["categories", "includeCountries", "excludeCountries", "includeLocations", "excludeLocations", "excludeCompanies", "titleRequire", "titleBlock", "degrees"] as const;
@@ -54,57 +55,64 @@ export function SourcesPage(props: { db: Db; notice?: string; error?: string }) 
   const reports = getJson<Record<string, { at: string; report: PollReport }>>(props.db, "pollReports", {});
   const preview = previewCount(props.db, rules, now);
   return (
-    <Layout active="sources" inboxCount={inboxCount(props.db)} {...pauseProps(props.db)}>
-      <h1>Sources &amp; filters</h1>
-      {props.notice ? <div class="card saved">{props.notice}</div> : null}
-      {props.error ? <div class="note">{props.error}</div> : null}
-      <h2>Sources</h2>
-      {sources.map(s => (
-        <div class="card">
-          <strong>{s.id}</strong> <span class="meta">({s.kind})</span>
-          <div class="meta">{s.url}</div>
-          <div class="meta">Last polled: {s.lastPolledAt ?? "not polled yet"}</div>
-          {reports[s.id] ? (
-            reports[s.id]!.report.error
-              ? <div class="note">Last error: {reports[s.id]!.report.error}</div>
-              : <div class="meta">OK: {reports[s.id]!.report.fetched} fetched, {reports[s.id]!.report.newJobs} new, {reports[s.id]!.report.queued} queued, {reports[s.id]!.report.skipped} skipped</div>
-          ) : null}
-          <form method="post" action={`/sources/${s.id}/toggle`} class="row">
-            <input type="hidden" name="enabled" value={s.enabled ? "0" : "1"} />
-            <button type="submit">{s.enabled ? "Disable" : "Enable"}</button>
-            <span class="meta">{s.enabled ? "Enabled" : "Disabled"}</span>
-          </form>
-        </div>
-      ))}
-      <form method="post" action="/sources/poll" class="row"><button type="submit">Poll now</button></form>
-      <div class="card">
-        <h3>Add a GitHub source</h3>
-        <form method="post" action="/sources">
-          <input type="text" name="url" placeholder="https://github.com/owner/repo or a listings.json URL" required />
-          <div class="row"><button class="primary" type="submit">Add source</button></div>
+    <Layout active="sources" inboxCount={inboxCount(props.db)} {...pauseProps(props.db)} title="Sources & filters">
+      <PageHead title="Sources & filters" subtitle="Where postings come from, and which ones are worth applying to."
+        actions={<form method="post" action="/sources/poll"><button type="submit">Poll now</button></form>} />
+      {props.notice ? <Alert kind="success">{props.notice}</Alert> : null}
+      {props.error ? <Alert kind="danger">{props.error}</Alert> : null}
+      <section class="card list-card">
+        <div class="card-head"><h2>Sources <span class="count">· {sources.length}</span></h2></div>
+        {sources.length === 0 ? <p class="empty">No sources yet. Add a GitHub repo below.</p> : sources.map(s => {
+          const r = reports[s.id]?.report;
+          return (
+            <div class="jrow">
+              <div class="jrow-body">
+                <div><strong style="overflow-wrap:anywhere">{s.id}</strong> <Chip cls="chip-muted">{s.kind}</Chip> <Chip cls={s.enabled ? "chip-green" : "chip-muted"}>{s.enabled ? "Enabled" : "Disabled"}</Chip></div>
+                <div class="jrow-meta">{s.url}</div>
+                <div class="jrow-meta">Last polled: {s.lastPolledAt ?? "not polled yet"}</div>
+                {r ? (
+                  r.error
+                    ? <div class="jrow-reason" style="color:var(--danger)">Last error: {r.error}</div>
+                    : <div class="jrow-meta">OK: {r.fetched} fetched, {r.newJobs} new, {r.queued} queued, {r.skipped} skipped</div>
+                ) : null}
+              </div>
+              <form method="post" action={`/sources/${s.id}/toggle`} class="jrow-action plain">
+                <input type="hidden" name="enabled" value={s.enabled ? "0" : "1"} />
+                <button type="submit" class={s.enabled ? "tertiary" : ""}>{s.enabled ? "Disable" : "Enable"}</button>
+              </form>
+            </div>
+          );
+        })}
+      </section>
+      <section class="card">
+        <div class="card-head"><h2>Add a GitHub source</h2></div>
+        <form method="post" action="/sources" class="row" style="margin-top:0;flex-wrap:nowrap">
+          <input type="text" name="url" placeholder="https://github.com/owner/repo or a listings.json URL" aria-label="Source URL" required />
+          <button class="primary" type="submit">Add source</button>
         </form>
-      </div>
-      <h2>Filters</h2>
+      </section>
       <form method="post" action="/filters" class="card" hx-get="/filters/preview" hx-trigger="input changed delay:300ms" hx-target="#preview">
-        {LIST_KEYS.map(k => (
-          <label class="meta" style="display:block;margin:8px 0">
-            {LABELS[k]} (comma-separated)
-            <input type="text" name={k} value={rules[k].join(", ")} />
+        <div class="card-head"><h2>Filters</h2><span class="meta" id="preview"><PreviewFragment {...preview} /></span></div>
+        <div class="fields-grid">
+          {LIST_KEYS.map(k => (
+            <label class="field">
+              <span>{LABELS[k]} <span class="hint">(comma-separated)</span></span>
+              <input type="text" name={k} value={rules[k].join(", ")} />
+            </label>
+          ))}
+          <label class="field">
+            <span>Location mode</span>
+            <select name="locationMode">
+              <option value="any" selected={rules.locationMode === "any"}>Any location may match</option>
+              <option value="all" selected={rules.locationMode === "all"}>Every location must match</option>
+            </select>
           </label>
-        ))}
-        <label class="meta" style="display:block;margin:8px 0">
-          Location mode
-          <select name="locationMode">
-            <option value="any" selected={rules.locationMode === "any"}>Any location may match</option>
-            <option value="all" selected={rules.locationMode === "all"}>Every location must match</option>
-          </select>
-        </label>
-        <label class="meta" style="display:block;margin:8px 0">
-          Posted within (days, blank for any)
-          <input type="text" name="postedWithinDays" value={rules.postedWithinDays === null ? "" : String(rules.postedWithinDays)} />
-        </label>
-        <div class="meta" id="preview"><PreviewFragment {...preview} /></div>
-        <div class="row"><button class="primary" type="submit">Save filters</button></div>
+          <label class="field">
+            <span>Posted within <span class="hint">(days, blank for any)</span></span>
+            <input type="text" name="postedWithinDays" value={rules.postedWithinDays === null ? "" : String(rules.postedWithinDays)} />
+          </label>
+        </div>
+        <div class="form-foot"><button class="primary" type="submit">Save filters</button></div>
       </form>
     </Layout>
   );

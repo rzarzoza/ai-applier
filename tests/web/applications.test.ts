@@ -18,7 +18,7 @@ const p = (n: number): Posting => ({ sourceId: "s", listingId: String(n), compan
 function setup() {
   const db = openDb(":memory:");
   const runReviewed = vi.fn();
-  const app = createApp({ db, llm: new FakeLlm(), runInteractive: vi.fn(), runReviewed, pollNow: vi.fn() });
+  const app = createApp({ db, llm: new FakeLlm(), runInteractive: vi.fn(), runReviewed, runHandFinish: vi.fn(), pollNow: vi.fn() });
   const mk = (n: number, status: Parameters<typeof setStatus>[2], reason: string | null = null) => {
     const j = upsertPosting(db, p(n)).job;
     setStatus(db, j.id, status, reason);
@@ -64,7 +64,7 @@ test("inbox badge count is passed to the layout", async () => {
   const q = createQuestion(db, { canonical: "Q?", kind: "global", isFactual: true });
   const { addBlocker } = await import("../../src/answers/bank.js");
   addBlocker(db, j.id, q.id, "missing");
-  expect(await (await app.request("/applications")).text()).toContain('class="badge"');
+  expect(await (await app.request("/applications")).text()).toMatch(/class="badge nav-badge">1</);
 });
 
 test("detail of a ready-to-review job renders an editable input per snapshot field, escaped", async () => {

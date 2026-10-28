@@ -9,7 +9,7 @@ export function setupApp() {
   const pollNow = vi.fn();
   const secrets = { get: vi.fn().mockResolvedValue(null as string | null), set: vi.fn().mockResolvedValue(undefined) };
   const trackerSync = vi.fn().mockResolvedValue({ csv: true, sheet: "skipped" });
-  const app = createApp({ db, llm, runInteractive: vi.fn(), runReviewed: vi.fn(), pollNow, secrets, syncTracker: trackerSync });
+  const app = createApp({ db, llm, runInteractive: vi.fn(), runReviewed: vi.fn(), runHandFinish: vi.fn(), pollNow, secrets, syncTracker: trackerSync });
   return { db, llm, app, pollNow, secrets, trackerSync };
 }
 

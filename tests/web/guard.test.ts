@@ -6,7 +6,7 @@ import { FakeLlm } from "../helpers/fake-llm.js";
 
 function guarded() {
   const db = openDb(":memory:");
-  const app = createApp({ db, llm: new FakeLlm(), runInteractive: vi.fn(), runReviewed: vi.fn(), pollNow: vi.fn(), localPort: () => 4310 });
+  const app = createApp({ db, llm: new FakeLlm(), runInteractive: vi.fn(), runReviewed: vi.fn(), runHandFinish: vi.fn(), pollNow: vi.fn(), localPort: () => 4310 });
   return { db, app };
 }
 const get = (host?: string) => new Request("http://127.0.0.1:4310/inbox", { headers: host ? { host } : {} });

@@ -7,6 +7,7 @@ import { listOpenNeedsYou } from "../src/answers/bank.js";
 import { openDb } from "../src/db/db.js";
 import { getJob, setStatus, upsertPosting } from "../src/jobs/repo.js";
 import { startApp } from "../src/main.js";
+import { getRunnerCurrent, setRunnerCurrent } from "../src/runner/current.js";
 
 const secrets = { get: async () => null, set: async () => {} };
 
@@ -64,4 +65,19 @@ test("the running dashboard refuses other hosts and cross-site changes", async (
   const crossSite = await fetch(`${app.url}/settings`, { method: "POST", headers: { origin: "http://evil.test" }, body: new URLSearchParams({ reviewMode: "all", pollMinutes: "1" }) });
   expect(crossSite.status).toBe(403);
   await app.stop();
+});
+
+test("a stale Applying now pointer from the last session is cleared at startup", async () => {
+  const dataDir = mkdtempSync(path.join(tmpdir(), "ai-applier-main-"));
+  const seed = openDb(path.join(dataDir, "app.db"));
+  setRunnerCurrent(seed, { jobId: "old", step: "Submitting", startedAt: new Date().toISOString() });
+  seed.close();
+  const app = await startApp({ dataDir, port: 0, startLoops: false, secrets });
+  const html = await (await fetch(`${app.url}/`)).text();
+  await app.stop();
+  expect(html).toContain("Applying now");
+  expect(html).not.toContain("Submitting");
+  const db = openDb(path.join(dataDir, "app.db"));
+  expect(getRunnerCurrent(db)).toBeNull();
+  db.close();
 });

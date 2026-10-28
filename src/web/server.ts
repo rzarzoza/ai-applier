@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSyn
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Hono } from "hono";
-import { answerFromInbox, answerQuestion, canDoItNow, deleteQuestionAndRequeue, recheckBlockedJobs, requeueWaitingForResume } from "../answers/inbox.js";
+import { answerFromInbox, answerQuestion, canDoItNow, canHandFinish, deleteQuestionAndRequeue, recheckBlockedJobs, requeueWaitingForResume } from "../answers/inbox.js";
 import { getQuestion, listQuestions, approveAnswer, resolveNeedsYouForJob, setDraft, setOverride } from "../answers/bank.js";
 import { reviseDraft } from "../answers/draft.js";
 import type { Db } from "../db/db.js";
@@ -27,7 +27,8 @@ import { BankPage } from "./pages/bank.js";
 import { PROFILE_FIELDS, ProfilePage } from "./pages/profile.js";
 import { SettingsPage } from "./pages/settings.js";
 import { PreviewFragment, SourcesPage, parseFilterForm, previewCount } from "./pages/sources.js";
-import { CardFragment, InboxPage, OpeningBrowser, SavedNotice } from "./pages/inbox.js";
+import { CardFragment, InboxPage, OpeningBrowser, OpeningHandFinish, SavedNotice } from "./pages/inbox.js";
+import { HomeLists, HomePage, NowCard } from "./pages/home.js";
 
 export interface AppContext {
   db: Db;
@@ -35,6 +36,13 @@ export interface AppContext {
   runInteractive(jobId: string): void;
   /** Submits a job that is ready to review (runs in the background). */
   runReviewed(jobId: string): void;
+  /**
+   * Opens a job that needs the user in a visible browser, fills what the app can and waits for the user to finish
+   * and submit it by hand (runs in the background, through the same queue as every run).
+   */
+  runHandFinish(jobId: string): void;
+  /** Jobs the user asked to run (Do it now, Open & finish, Submit) that are queued or running. */
+  requestedRuns?(): readonly string[];
   pollNow(): void;
   /** Keychain access; defaults to the real macOS Keychain. Tests inject fakes. */
   secrets?: { get(name: string): Promise<string | null>; set(name: string, value: string): Promise<void> };
@@ -91,7 +99,19 @@ export function createApp(ctx: AppContext): Hono {
     });
   }
 
-  app.get("/", c => c.redirect("/inbox"));
+  const home = () => ({ db, requested: ctx.requestedRuns?.() ?? [] });
+  app.get("/", c => c.html(HomePage(home())));
+  app.get("/home/now", c => c.html(NowCard(home())));
+  app.get("/home/lists", c => c.html(HomeLists(home())));
+
+  app.post("/applications/:id/hand-finish", c => {
+    const jobId = c.req.param("id");
+    if (!getJob(db, jobId)) return c.text("Unknown job", 404);
+    if (!canHandFinish(db, jobId))
+      return c.text("Only a job waiting for your input can be finished by hand (a CAPTCHA, code or login uses Do it now; a possibly sent application needs checking first)", 409);
+    ctx.runHandFinish(jobId);
+    return c.html(OpeningHandFinish());
+  });
   app.get("/inbox", c => {
     const rechecked = c.req.query("rechecked");
     return c.html(InboxPage({ db, rechecked: rechecked !== undefined && /^\d+$/.test(rechecked) ? Number(rechecked) : undefined }));

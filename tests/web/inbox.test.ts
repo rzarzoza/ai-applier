@@ -14,18 +14,12 @@ function setup() {
   const llm = new FakeLlm();
   const runInteractive = vi.fn();
   const pollNow = vi.fn();
-  const app = createApp({ db, llm, runInteractive, runReviewed: vi.fn(), pollNow });
+  const app = createApp({ db, llm, runInteractive, runReviewed: vi.fn(), runHandFinish: vi.fn(), pollNow });
   const mk = (n: number) => { const j = upsertPosting(db, p(n)).job; setStatus(db, j.id, "needs-you"); return j; };
   return { db, llm, app, runInteractive, mk };
 }
 const form = (o: Record<string, string>) => ({ method: "POST", body: new URLSearchParams(o), headers: { "content-type": "application/x-www-form-urlencoded" } });
 
-test("GET / redirects to /inbox", async () => {
-  const { app } = setup();
-  const res = await app.request("/");
-  expect(res.status).toBe(302);
-  expect(res.headers.get("location")).toBe("/inbox");
-});
 
 test("GET /inbox lists a blocked question with its blocked-job count, variants and needs-you items", async () => {
   const { db, app, mk } = setup();
@@ -45,7 +39,8 @@ test("GET /inbox lists a blocked question with its blocked-job count, variants a
   expect(html).toContain("Solve the captcha");
   expect(html).toContain("Do it now");
   expect(html).toContain("https://unpkg.com/htmx.org@2.0.4/dist/htmx.min.js");
-  for (const tab of ["Inbox", "Applications", "Answer bank", "Profile &amp; resume", "Sources &amp; filters", "Settings"]) expect(html).toContain(tab);
+  for (const tab of ["Home", "Inbox", "Applications", "Answer bank", "Profile", "Sources &amp; filters", "Settings"])
+    expect(html).toContain(`<span class="tab-label">${tab}</span>`);
 });
 
 test("a draft shows Use draft / Edit / Tell AI; options render a select; template shows the checkbox", async () => {
@@ -294,7 +289,7 @@ test("POST /inbox/recheck requeues blocked jobs only, clearing their blockers", 
 
 test("the dashboard's own Re-check form passes the host and origin guard", async () => {
   const db = openDb(":memory:");
-  const app = createApp({ db, llm: new FakeLlm(), runInteractive: vi.fn(), runReviewed: vi.fn(), pollNow: vi.fn(), localPort: () => 4310 });
+  const app = createApp({ db, llm: new FakeLlm(), runInteractive: vi.fn(), runReviewed: vi.fn(), runHandFinish: vi.fn(), pollNow: vi.fn(), localPort: () => 4310 });
   const j = upsertPosting(db, p(1)).job; setStatus(db, j.id, "needs-you");
   const req = (origin: string) => new Request("http://127.0.0.1:4310/inbox/recheck", { method: "POST", headers: { host: "127.0.0.1:4310", origin } });
   expect((await app.request(req("http://evil.test"))).status).toBe(403);

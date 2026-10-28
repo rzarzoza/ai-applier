@@ -1,6 +1,7 @@
 import type { Db } from "../../db/db.js";
 import { getProfile, type Profile } from "../../profile/profile.js";
-import { Layout, pauseProps } from "../layout.js";
+import { Alert, Layout, pauseProps } from "../layout.js";
+import { PageHead } from "../ui.js";
 import { inboxCount } from "./inbox.js";
 
 type Kind = "text" | "bool" | "list";
@@ -52,12 +53,12 @@ function Input(props: { field: Field; profile: Profile }) {
 export function ProfilePage(props: { db: Db; notice?: string; error?: string }) {
   const profile = getProfile(props.db);
   return (
-    <Layout active="profile" inboxCount={inboxCount(props.db)} {...pauseProps(props.db)}>
-      <h1>Profile &amp; resume</h1>
-      {props.notice ? <div class="card saved">{props.notice}</div> : null}
-      {props.error ? <div class="note">{props.error}</div> : null}
-      <div class="card">
-        <h3>Resume</h3>
+    <Layout active="profile" inboxCount={inboxCount(props.db)} {...pauseProps(props.db)} title="Profile">
+      <PageHead title="Profile & resume" subtitle="What the applier knows about you. Every application is filled from here." />
+      {props.notice ? <Alert kind="success">{props.notice}</Alert> : null}
+      {props.error ? <Alert kind="danger">{props.error}</Alert> : null}
+      <section class="card">
+        <div class="card-head"><h2>Resume</h2></div>
         <div class="meta">{profile.resumePath ? "A resume is on file." : "No resume uploaded yet."} Uploading fills empty profile fields.</div>
         <form method="post" action="/profile/resume" enctype="multipart/form-data">
           <div class="row">
@@ -65,22 +66,22 @@ export function ProfilePage(props: { db: Db; notice?: string; error?: string }) 
             <button class="primary" type="submit">Upload PDF</button>
           </div>
         </form>
-      </div>
+      </section>
       <form method="post" action="/profile">
         {PROFILE_GROUPS.map(g => (
-          <>
-            <h2>{g.title}</h2>
-            <div class="card">
+          <section class="card">
+            <div class="card-head"><h2>{g.title}</h2></div>
+            <div class="fields-grid">
               {g.fields.map(field => (
-                <label class="meta" style="display:block;margin:8px 0">
-                  {field.label}
+                <label class="field">
+                  <span>{field.label}</span>
                   <Input field={field} profile={profile} />
                 </label>
               ))}
             </div>
-          </>
+          </section>
         ))}
-        <div class="row"><button class="primary" type="submit">Save profile</button></div>
+        <div class="form-foot"><button class="primary" type="submit">Save profile</button></div>
       </form>
     </Layout>
   );

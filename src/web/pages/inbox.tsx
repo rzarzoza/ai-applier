@@ -1,9 +1,11 @@
 import { raw } from "hono/html";
 import type { Db } from "../../db/db.js";
 import { listOpenNeedsYou, type Question } from "../../answers/bank.js";
-import { blockerOptions, canDoItNow, inboxItems, type BlockedJob, type InboxItem } from "../../answers/inbox.js";
+import { blockerOptions, canDoItNow, canHandFinish, inboxItems, type BlockedJob, type InboxItem } from "../../answers/inbox.js";
 import type { FieldKind } from "../../forms/types.js";
-import { Layout, pauseProps } from "../layout.js";
+import { getJob } from "../../jobs/repo.js";
+import { Alert, Layout, pauseProps } from "../layout.js";
+import { Avatar, Chip, PageHead } from "../ui.js";
 
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 
@@ -12,8 +14,10 @@ export function inboxCount(db: Db): number {
 }
 
 export function SavedNotice(props: { requeued: number }) {
-  return <div class="card saved">Saved · {plural(props.requeued, "job", "jobs")} re-queued</div>;
+  return <Alert kind="success">Saved · {plural(props.requeued, "job", "jobs")} re-queued</Alert>;
 }
+
+const NEEDS_KIND: Record<string, string> = { captcha: "CAPTCHA", code: "Verification code", login: "Login", other: "Needs you" };
 
 const KIND_NAMES: Record<FieldKind, string> = {
   text: "Short text", textarea: "Long text", email: "Email", tel: "Phone number", url: "Link", number: "Number", date: "Date",
@@ -109,7 +113,7 @@ export function QuestionCard(props: { item: InboxItem; error?: string }) {
   return (
     <div class="card" id={`q-${q.id}`}>
       <h3>{q.canonical}</h3>
-      <div class="meta">Blocking {plural(jobs.length, "job", "jobs")} · {shown}</div>
+      <div class="meta"><Chip cls="chip-amber">Blocking {plural(jobs.length, "job", "jobs")}</Chip> {shown}</div>
       {q.variants.length > 0 ? <div class="meta">Also asked as: {q.variants.join(" · ")}</div> : null}
       {savedNotOffered
         ? <div class="note">Your saved answer “{q.answer}” isn't an option on {jobs.length === 1 ? "this form" : "these forms"} — what you pick is used for {jobs.length === 1 ? "this job" : "these jobs"} only</div>
@@ -145,30 +149,45 @@ export function InboxPage(props: { db: Db; rechecked?: number }) {
   const items = inboxItems(props.db);
   const needs = listOpenNeedsYou(props.db);
   return (
-    <Layout active="inbox" inboxCount={items.length + needs.length} {...pauseProps(props.db)}>
-      <h1>Inbox</h1>
+    <Layout active="inbox" inboxCount={items.length + needs.length} {...pauseProps(props.db)} title="Inbox">
+      <PageHead title="Inbox" subtitle="Questions only you can answer, and steps only you can take."
+        actions={items.length > 0 ? (
+          <form method="post" action="/inbox/recheck">
+            <button type="submit">Re-check with my profile</button>
+          </form>
+        ) : undefined} />
       {props.rechecked !== undefined
-        ? <div class="card saved">Re-checking {plural(props.rechecked, "job", "jobs")} with your profile and resume · queued to run again</div>
+        ? <Alert kind="success">Re-checking {plural(props.rechecked, "job", "jobs")} with your profile and resume · queued to run again</Alert>
         : null}
-      {items.length > 0 ? (
-        <form method="post" action="/inbox/recheck" class="row">
-          <button type="submit">Re-check with my profile</button>
-          <span class="meta">Runs the blocked jobs again so answers your profile or resume now gives are suggested for approval.</span>
-        </form>
-      ) : null}
-      {items.length === 0 ? <p class="empty">No questions waiting. Nothing is blocked on you.</p> : items.map(item => <QuestionCard item={item} />)}
-      <h2>Needs you</h2>
-      {needs.length === 0 ? <p class="empty">Nothing needs you right now.</p> : needs.map(n => (
-        <div class="card" id={`needs-${n.id}`}>
-          <strong>{n.kind}</strong>
-          <div class="meta">{n.message}</div>
-          <div class="row">
-            {canDoItNow(props.db, n.jobId)
-              ? <button class="primary" hx-post={`/needs-you/${n.jobId}/do-it-now`} hx-target={`#needs-${n.id}`} hx-swap="innerHTML">Do it now</button>
-              : <a href={`/applications/${n.jobId}`}>Open job</a>}
-          </div>
-        </div>
-      ))}
+      {items.length > 0
+        ? <p class="meta">Re-check runs the blocked jobs again so answers your profile or resume now gives are suggested for approval.</p>
+        : null}
+      <h2 class="section-title">Questions <span class="meta">· {items.length}</span></h2>
+      {items.length === 0 ? <div class="card"><p class="empty">No questions waiting. Nothing is blocked on you.</p></div> : items.map(item => <QuestionCard item={item} />)}
+      <h2 class="section-title">Needs you <span class="meta">· {needs.length}</span></h2>
+      {needs.length === 0 ? <div class="card"><p class="empty">Nothing needs you right now.</p></div> : (
+        <section class="card list-card">
+          {needs.map(n => {
+            const job = getJob(props.db, n.jobId);
+            return (
+              <div class="jrow" id={`needs-${n.id}`}>
+                <Avatar company={job?.company ?? "?"} />
+                <div class="jrow-body">
+                  <strong>{NEEDS_KIND[n.kind] ?? n.kind}</strong>
+                  <div class="jrow-meta">{n.message}</div>
+                </div>
+                <div class="jrow-action">
+                  {canDoItNow(props.db, n.jobId)
+                    ? <button class="primary" hx-post={`/needs-you/${n.jobId}/do-it-now`} hx-target={`#needs-${n.id} .jrow-action`} hx-swap="innerHTML">Do it now</button>
+                    : canHandFinish(props.db, n.jobId)
+                      ? <button class="primary" hx-post={`/applications/${n.jobId}/hand-finish`} hx-target={`#needs-${n.id} .jrow-action`} hx-swap="innerHTML">Open &amp; finish</button>
+                      : <a class="btn" href={`/applications/${n.jobId}`}>Open job</a>}
+                </div>
+              </div>
+            );
+          })}
+        </section>
+      )}
       <script>{raw(COPY_SCRIPT)}</script>
     </Layout>
   );
@@ -181,5 +200,9 @@ export function CardFragment(props: { db: Db; id: number; error?: string }) {
 }
 
 export function OpeningBrowser() {
-  return <span>Opening browser…</span>;
+  return <span class="working">Opening browser…</span>;
+}
+
+export function OpeningHandFinish() {
+  return <span class="working">Opening the application in a browser window…</span>;
 }

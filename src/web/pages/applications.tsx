@@ -1,5 +1,6 @@
 import path from "node:path";
 import { getOverrides } from "../../answers/bank.js";
+import { canDoItNow, canHandFinish } from "../../answers/inbox.js";
 import type { Resolution } from "../../answers/resolve.js";
 import type { Db } from "../../db/db.js";
 import type { FieldAnswer, FieldSpec } from "../../forms/types.js";
@@ -8,6 +9,7 @@ import type { Job, JobStatus } from "../../jobs/types.js";
 import { paths } from "../../paths.js";
 import { getSnapshot } from "../../runner/records.js";
 import { Layout, pauseProps } from "../layout.js";
+import { Avatar, Chip, jobLocation, PageHead, shortDate, StatusChip, statusLabel } from "../ui.js";
 import { inboxCount } from "./inbox.js";
 
 export const PAGE_SIZE = 50;
@@ -23,48 +25,63 @@ export const canRetry = (j: Job) => j.status === "failed" || j.status === "unsup
 export const canSkip = (j: Job) => ["new", "queued", "needs-you", "ready-to-review", "failed", "unsupported"].includes(j.status);
 export const canMarkApplied = (j: Job) => !["submitted", "applied-manually", "filling"].includes(j.status);
 
-const day = (d: Date) => d.toISOString().slice(0, 10);
 const safeHref = (url: string) => (/^https?:\/\//i.test(url) ? url : undefined);
 const recordUrl = (file: string) => "/records/" + path.relative(paths.records, file).split(path.sep).map(encodeURIComponent).join("/");
 
 export function ApplicationsPage(props: { db: Db; status?: JobStatus; page: number }) {
   const { db, status } = props;
   const counts = countByStatus(db);
-  const total = status ? counts[status] : Object.values(counts).reduce((a, b) => a + b, 0);
+  const all = Object.values(counts).reduce((a, b) => a + b, 0);
+  const total = status ? counts[status] : all;
   const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
   const page = Math.min(Math.max(1, props.page), pages);
   const jobs = listJobs(db, { status, limit: PAGE_SIZE, offset: (page - 1) * PAGE_SIZE });
   const link = (p: number) => `/applications?${status ? `status=${status}&` : ""}page=${p}`;
   return (
-    <Layout active="applications" inboxCount={inboxCount(db)} {...pauseProps(db)}>
-      <h1>Applications</h1>
-      <div class="row">
-        <a href="/applications" class={status ? "" : "active"}>All <span class="badge">{Object.values(counts).reduce((a, b) => a + b, 0)}</span></a>
+    <Layout active="applications" inboxCount={inboxCount(db)} {...pauseProps(db)} title="Applications">
+      <PageHead title="Applications" subtitle={`${all} ${all === 1 ? "posting" : "postings"} tracked`} />
+      <nav class="pills" aria-label="Filter by status">
+        <a href="/applications" class={status ? "" : "active"}>All <span class="count">{all}</span></a>
         {STATUSES.map(s => (
-          <a href={`/applications?status=${s}`} class={s === status ? "active" : ""}>{s}<span class="badge">{counts[s]}</span></a>
+          <a href={`/applications?status=${s}`} class={s === status ? "active" : ""}>{statusLabel(s)}<span class="count">{counts[s]}</span></a>
         ))}
-      </div>
-      {jobs.length === 0 ? <p class="empty">No applications here yet.</p> : (
-        <table>
-          <tr><th>Company</th><th>Title</th><th>Location</th><th>Posted</th><th>ATS</th><th>Status</th><th>Reason</th></tr>
-          {jobs.map(j => (
-            <tr>
-              <td><a href={`/applications/${j.id}`}>{j.company}</a></td>
-              <td>{j.title}</td>
-              <td>{j.chosenLocation ?? j.locations.join(", ")}</td>
-              <td>{day(j.datePosted)}</td>
-              <td>{j.ats ?? ""}</td>
-              <td>{j.status}</td>
-              <td>{j.statusReason ?? ""}</td>
-            </tr>
-          ))}
-        </table>
-      )}
-      <div class="row">
-        {page > 1 ? <a href={link(page - 1)}>Previous</a> : null}
-        <span class="meta">Page {page} of {pages}</span>
-        {page < pages ? <a href={link(page + 1)}>Next</a> : null}
-      </div>
+      </nav>
+      <section class="card list-card">
+        {jobs.length === 0 ? <p class="empty" style="padding:16px">No applications here yet.</p> : (
+          <table>
+            <thead>
+              <tr><th>Job</th><th>Location</th><th>Posted</th><th>ATS</th><th>Status</th><th>Reason</th></tr>
+            </thead>
+            <tbody>
+              {jobs.map(j => (
+                <tr>
+                  <td>
+                    <div class="job-cell">
+                      <Avatar company={j.company} />
+                      <div class="jrow-body">
+                        <a class="jrow-title" href={`/applications/${j.id}`}>{j.title}</a>
+                        <div class="jrow-sub">{j.company}</div>
+                      </div>
+                    </div>
+                  </td>
+                  <td class="jrow-meta">{jobLocation(j)}</td>
+                  <td class="jrow-meta td-hide" style="white-space:nowrap">{shortDate(j.datePosted)}</td>
+                  <td class="td-hide">{j.ats ? <Chip cls="chip-ats">{j.ats}</Chip> : ""}</td>
+                  <td><StatusChip status={j.status} /></td>
+                  <td class="reason">{j.statusReason ?? ""}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </section>
+      {pages > 1 ? (
+        <div class="pager">
+          {page > 1 ? <a class="btn" href={link(page - 1)}>Previous</a> : null}
+          <span class="meta">Page {page} of {pages}</span>
+          {page < pages ? <a class="btn" href={link(page + 1)}>Next</a> : null}
+        </div>
+      ) : null}
     </Layout>
   );
 }
@@ -119,35 +136,38 @@ function FieldRow(props: { jobId: string; view: FieldView; editable: boolean }) 
   const opts = field.options?.length ? field.options : null;
   const chosen = new Set(answer?.type === "options" ? answer.options : [text]);
   const input = opts && field.kind === "checkbox-group"
-    ? <div>{opts.map(o => <label class="meta"><input type="checkbox" name="value" value={o} checked={chosen.has(o)} /> {o}{" "}</label>)}</div>
+    ? <div>{opts.map(o => <label class="check"><input type="checkbox" name="value" value={o} checked={chosen.has(o)} /> {o}{" "}</label>)}</div>
     : opts && ["select", "combobox", "radio"].includes(field.kind)
       ? <select name="value">{opts.map(o => <option value={o} selected={o === text}>{o}</option>)}</select>
       : field.kind === "textarea" || text.length > 80
         ? <textarea name="value">{text}</textarea>
         : <input type="text" name="value" value={text} />;
+  const missing = source === "needs an answer" || source === "needs a file";
   return (
-    <div class="card">
-      <strong>{field.label}</strong>{field.required ? " *" : ""}
-      <div class="meta">{source}</div>
+    <div class="field-row">
+      <div class="field-head">
+        <span class="label">{field.label}{field.required ? <span class="req"> *</span> : ""}</span>
+        <Chip cls={missing ? "chip-amber" : "chip-muted"}>{source}</Chip>
+      </div>
       {canEdit ? (
         <form method="post" action={`/applications/${props.jobId}/field`}>
           <input type="hidden" name="label" value={field.label} />
           {input}
           <div class="row">
-            {fromBank ? <label class="meta"><input type="checkbox" name="saveToBank" value="1" /> Also save to my answer bank</label> : null}
-            <button type="submit">Save</button>
+            {fromBank ? <label class="check" style="margin:0"><input type="checkbox" name="saveToBank" value="1" /> Also save to my answer bank</label> : null}
+            <button type="submit" class="tertiary">Save</button>
           </div>
         </form>
-      ) : <div class="draft">{text || "(blank)"}</div>}
+      ) : <div class={text ? "value" : "value value-blank"}>{text || "(blank)"}</div>}
     </div>
   );
 }
 
-function Action(props: { jobId: string; name: string; label: string; primary?: boolean; children?: unknown }) {
+function Action(props: { jobId: string; name: string; label: string; primary?: boolean; tertiary?: boolean; children?: unknown }) {
   return (
-    <form method="post" action={`/applications/${props.jobId}/${props.name}`} class="row">
+    <form method="post" action={`/applications/${props.jobId}/${props.name}`}>
       {props.children as never}
-      <button type="submit" class={props.primary ? "primary" : ""}>{props.label}</button>
+      <button type="submit" class={props.primary ? "primary" : props.tertiary ? "tertiary" : ""}>{props.label}</button>
     </form>
   );
 }
@@ -161,33 +181,70 @@ export function JobDetailPage(props: { db: Db; job: Job; notice?: string }) {
   const { views, screenshot } = fieldViews(db, job);
   const editable = job.status === "ready-to-review";
   const href = safeHref(job.url);
+  const handFinish = canHandFinish(db, job.id);
+  const doItNow = canDoItNow(db, job.id);
   return (
-    <Layout active="applications" inboxCount={inboxCount(db)} {...pauseProps(db)}>
-      <h1>{job.company} · {job.title}</h1>
-      <div class="meta">
-        {job.chosenLocation ?? job.locations.join(", ")} · posted {day(job.datePosted)} · {job.ats ?? "ATS unknown"} ·{" "}
-        {href ? <a href={href} target="_blank" rel="noopener noreferrer">View posting</a> : "no link"}
-      </div>
-      {props.notice && NOTICES[props.notice] ? <div class="note">{NOTICES[props.notice]}</div> : null}
-      <p><strong>{job.status}</strong>{job.statusReason ? `: ${job.statusReason}` : ""}</p>
-      {isUnknownSubmission(job) ? (
-        <div class="note">This application may already have been sent — check your email or the company's site first.</div>
-      ) : null}
-      <div class="row">
-        {editable ? <Action jobId={job.id} name="submit" label="Submit" primary /> : null}
-        {canRetry(job) ? (
-          <Action jobId={job.id} name="retry" label="Retry">
-            {isUnknownSubmission(job) ? (
-              <label class="meta"><input type="checkbox" name="confirm" value="1" required /> I checked, retry anyway</label>
-            ) : null}
-          </Action>
+    <Layout active="applications" inboxCount={inboxCount(db)} {...pauseProps(db)} title={`${job.company} · ${job.title}`}>
+      <p class="meta" style="margin:0 0 12px"><a href="/applications">← Applications</a></p>
+      <section class="card">
+        <div class="job-head">
+          <Avatar company={job.company} size="lg" />
+          <div class="job-head-body">
+            <h1>{job.title}</h1>
+            <div class="job-company">{job.company}</div>
+            <div class="meta">
+              {jobLocation(job)} · posted {shortDate(job.datePosted)} · {job.ats ?? "ATS unknown"} ·{" "}
+              {href ? <a href={href} target="_blank" rel="noopener noreferrer">View posting</a> : "no link"}
+            </div>
+            <div class="row" style="margin-top:8px">
+              <StatusChip status={job.status} />
+              {job.statusReason ? <span class="meta">{job.statusReason}</span> : null}
+            </div>
+          </div>
+        </div>
+        {props.notice && NOTICES[props.notice] ? <div class="note">{NOTICES[props.notice]}</div> : null}
+        {isUnknownSubmission(job) ? (
+          <div class="note">This application may already have been sent — check your email or the company's site first.</div>
         ) : null}
-        {canSkip(job) ? <Action jobId={job.id} name="skip" label="Skip" /> : null}
-        {canMarkApplied(job) ? <Action jobId={job.id} name="mark-applied" label="Mark applied manually" /> : null}
-      </div>
-      {screenshot ? <p><img src={screenshot} alt="Screenshot of the application form" style="max-width:100%;border:1px solid var(--border)" /></p> : null}
-      <h2>Fields</h2>
-      {views.length === 0 ? <p class="empty">No fields were captured for this job yet.</p> : views.map(v => <FieldRow jobId={job.id} view={v} editable={editable} />)}
+        <div class="actions">
+          {editable ? <Action jobId={job.id} name="submit" label="Submit" primary /> : null}
+          {handFinish ? (
+            <span id="hand-finish">
+              <button class="primary" hx-post={`/applications/${job.id}/hand-finish`} hx-target="#hand-finish" hx-swap="innerHTML">Open &amp; finish</button>
+            </span>
+          ) : null}
+          {doItNow ? (
+            <span id="do-it-now">
+              <button class="primary" hx-post={`/needs-you/${job.id}/do-it-now`} hx-target="#do-it-now" hx-swap="innerHTML">Do it now</button>
+            </span>
+          ) : null}
+          {canRetry(job) ? (
+            <Action jobId={job.id} name="retry" label="Retry">
+              {isUnknownSubmission(job) ? (
+                <label class="check" style="margin:0"><input type="checkbox" name="confirm" value="1" required /> I checked, retry anyway</label>
+              ) : null}
+            </Action>
+          ) : null}
+          {canMarkApplied(job) ? <Action jobId={job.id} name="mark-applied" label="Mark applied manually" /> : null}
+          {canSkip(job) ? <Action jobId={job.id} name="skip" label="Skip" tertiary /> : null}
+        </div>
+        {handFinish ? (
+          <p class="meta" style="margin-top:10px">
+            Open &amp; finish opens the form in a browser window with everything the app knows filled in and the fields left for you
+            highlighted. Complete them and press the site's own submit button; what you type is saved to your answer bank.
+          </p>
+        ) : null}
+      </section>
+      {screenshot ? (
+        <section class="card">
+          <div class="card-head"><h2>Last screenshot</h2></div>
+          <img class="shot" src={screenshot} alt="Screenshot of the application form" />
+        </section>
+      ) : null}
+      <section class="card list-card">
+        <div class="card-head"><h2>Fields <span class="count">· {views.length}</span></h2></div>
+        {views.length === 0 ? <p class="empty">No fields were captured for this job yet.</p> : views.map(v => <FieldRow jobId={job.id} view={v} editable={editable} />)}
+      </section>
     </Layout>
   );
 }
