@@ -6,7 +6,7 @@ import { atsNameFromUrl, detectAts, HANDLERS } from "../ats/registry.js";
 import type { AtsHandler, OpenResult, SubmitOutcome } from "../ats/types.js";
 import type { Db } from "../db/db.js";
 import type { FieldAnswer, FieldSpec, JobContext } from "../forms/types.js";
-import { getJob, incrementAttempts, nextQueued, setAts, setStatus, setUsedDocuments, submittedSince } from "../jobs/repo.js";
+import { getJob, incrementAttempts, nextQueued, setAts, setStatus, setUsedDocuments, submittedSince, UNKNOWN_SUBMISSION } from "../jobs/repo.js";
 import type { Job, JobStatus } from "../jobs/types.js";
 import type { Llm } from "../llm/llm.js";
 import { getSettings, type Settings } from "../settings.js";
@@ -60,7 +60,6 @@ const errorMessage = (err: unknown) =>
 const FINAL: ReadonlySet<JobStatus> = new Set(["submitted", "applied-manually", "closed", "skipped", "duplicate-role"]);
 /** New questions can appear after answers (conditional fields); fill at most this many extra rounds. */
 const MAX_EXTRA_ROUNDS = 3;
-const UNKNOWN_SUBMISSION = "Submission state unknown — check before retrying";
 
 const isHuman = (o: SubmitOutcome) => o.kind === "captcha" || o.kind === "verification-code";
 

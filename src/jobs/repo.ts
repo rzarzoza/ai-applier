@@ -30,6 +30,12 @@ function toJob(r: Row): Job {
 
 const touch = () => new Date().toISOString();
 
+/** The needs-you reason for a job whose application may already have gone out. */
+export const UNKNOWN_SUBMISSION = "Submission state unknown — check before retrying";
+export const UNKNOWN_SUBMISSION_PREFIX = "Submission state unknown";
+/** Its application may have been sent: never re-run it without the user confirming it wasn't. */
+export const isUnknownSubmission = (j: Job) => j.status === "needs-you" && !!j.statusReason?.startsWith(UNKNOWN_SUBMISSION_PREFIX);
+
 export function getJob(db: Db, id: string): Job | null {
   const r = db.prepare("SELECT * FROM jobs WHERE id = ?").get(id) as Row | undefined;
   return r ? toJob(r) : null;
@@ -108,7 +114,10 @@ export function submittedSince(db: Db, since: Date): number {
   return r.n;
 }
 
+/** Whether an application to the company went out: submitted, applied manually, or possibly sent (state unknown). */
 export function hasSubmittedToCompany(db: Db, company: string): boolean {
-  const r = db.prepare("SELECT 1 AS x FROM jobs WHERE status = 'submitted' AND lower(company) = lower(?) LIMIT 1").get(company);
+  const r = db.prepare(`SELECT 1 AS x FROM jobs WHERE lower(company) = lower(?) AND (status IN ('submitted', 'applied-manually')
+      OR (status = 'needs-you' AND substr(status_reason, 1, ?) = ?)) LIMIT 1`)
+    .get(company, UNKNOWN_SUBMISSION_PREFIX.length, UNKNOWN_SUBMISSION_PREFIX);
   return r !== undefined;
 }

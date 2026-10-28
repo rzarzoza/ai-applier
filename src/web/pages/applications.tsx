@@ -4,7 +4,7 @@ import { getOverrides } from "../../answers/bank.js";
 import type { Resolution } from "../../answers/resolve.js";
 import type { Db } from "../../db/db.js";
 import type { FieldAnswer, FieldSpec } from "../../forms/types.js";
-import { countByStatus, listJobs } from "../../jobs/repo.js";
+import { countByStatus, isUnknownSubmission, listJobs } from "../../jobs/repo.js";
 import type { Job, JobStatus } from "../../jobs/types.js";
 import { paths } from "../../paths.js";
 import { getSnapshot } from "../../runner/records.js";
@@ -12,7 +12,6 @@ import { Layout } from "../layout.js";
 import { inboxCount } from "./inbox.js";
 
 export const PAGE_SIZE = 50;
-export const UNKNOWN_SUBMISSION_PREFIX = "Submission state unknown";
 
 const STATUSES: JobStatus[] = [
   "new", "queued", "filling", "needs-you", "ready-to-review", "submitted", "failed", "unsupported",
@@ -20,7 +19,7 @@ const STATUSES: JobStatus[] = [
 ];
 export const isStatus = (s: unknown): s is JobStatus => typeof s === "string" && (STATUSES as string[]).includes(s);
 
-export const isUnknownSubmission = (j: Job) => j.status === "needs-you" && !!j.statusReason?.startsWith(UNKNOWN_SUBMISSION_PREFIX);
+export { isUnknownSubmission };
 export const canRetry = (j: Job) => j.status === "failed" || j.status === "unsupported" || isUnknownSubmission(j);
 export const canSkip = (j: Job) => ["new", "queued", "needs-you", "ready-to-review", "failed", "unsupported"].includes(j.status);
 export const canMarkApplied = (j: Job) => !["submitted", "applied-manually", "filling"].includes(j.status);

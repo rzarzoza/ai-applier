@@ -50,3 +50,18 @@ test("submittedSince and hasSubmittedToCompany", () => {
   expect(submittedSince(db, new Date(Date.now() + 60_000))).toBe(0);
   expect(hasSubmittedToCompany(db, "ACME")).toBe(true);
 });
+
+test("hasSubmittedToCompany also counts applied-manually and possibly-sent applications", () => {
+  const db = openDb(":memory:");
+  const j = upsertPosting(db, p()).job;
+  for (const [status, reason, expected] of [
+    ["applied-manually", "Marked applied by you", true],
+    ["needs-you", "Submission state unknown — check before retrying", true],
+    ["needs-you", "1 question needs you", false],
+    ["failed", "Submission state unknown", false],
+    ["queued", null, false],
+  ] as const) {
+    setStatus(db, j.id, status, reason);
+    expect(hasSubmittedToCompany(db, "acme"), `${status}: ${reason}`).toBe(expected);
+  }
+});
