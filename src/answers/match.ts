@@ -39,12 +39,16 @@ function similarity(a: Set<string>, b: Set<string>): number {
 }
 
 /**
- * Finds the saved question with the same meaning as `canonical`. Prefilters to the most similar
- * candidates, then asks the LLM. Accepts a high-confidence match, or a medium one for non-factual
- * questions. Returns the matched question id or null.
+ * Finds the saved question with the same meaning as `canonical`. A saved question whose wording (or
+ * any variant) is exactly `canonical` or one of `labels` (ignoring case and punctuation) matches without the
+ * LLM. Otherwise prefilters to the most similar candidates, then asks the LLM, accepting a
+ * high-confidence match, or a medium one for non-factual questions. Returns the matched id or null.
  */
-export async function matchQuestion(llm: Llm, canonical: string, isFactual: boolean, candidates: Question[]): Promise<number | null> {
+export async function matchQuestion(llm: Llm, canonical: string, isFactual: boolean, candidates: Question[], labels: string[] = []): Promise<number | null> {
   if (!candidates.length) return null;
+  const wanted = new Set([canonical, ...labels].map(norm).filter(Boolean));
+  const exact = candidates.find(q => [q.canonical, ...q.variants].some(t => wanted.has(norm(t))));
+  if (exact) return exact.id;
   const target = trigrams(canonical);
   const shortlist = candidates
     .map((q, i) => ({ q, i, score: Math.max(...[q.canonical, ...q.variants].map(t => similarity(target, trigrams(t)))) }))

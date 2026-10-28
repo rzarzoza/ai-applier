@@ -154,7 +154,8 @@ async function fromBank(ctx: Ctx, field: FieldSpec, c: Classification): Promise<
   // A file can't be drafted, so treat it like a fact only the user can provide.
   const isFactual = c.isFactual || field.kind === "file";
 
-  const matchId = await matchQuestion(llm, canonical, isFactual, listQuestions(db));
+  const label = cleanLabel(field.label);
+  const matchId = await matchQuestion(llm, canonical, isFactual, listQuestions(db), [label, withCompanyPlaceholder(label, job.company)]);
   const matched = matchId === null ? null : getQuestion(db, matchId);
   if (matched) {
     addVariant(db, matched.id, field.label);
