@@ -96,26 +96,38 @@ export function createApp(ctx: AppContext): Hono {
 
   app.get("/applications/:id", c => {
     const job = getJob(db, c.req.param("id"));
-    return job ? c.html(JobDetailPage({ db, job })) : c.text("Unknown job", 404);
+    return job ? c.html(JobDetailPage({ db, job, notice: c.req.query("notice") })) : c.text("Unknown job", 404);
   });
 
   app.post("/applications/:id/field", async c => {
     const job = getJob(db, c.req.param("id"));
     if (!job) return c.text("Unknown job", 404);
     if (job.status !== "ready-to-review") return c.text("Only jobs ready to review can be edited", 409);
-    const form = await c.req.parseBody();
+    const form = await c.req.parseBody({ all: true });
     const label = typeof form.label === "string" ? form.label : "";
-    const value = typeof form.value === "string" ? form.value : "";
+    const raw = form.value;
+    const value = Array.isArray(raw) ? raw.filter((v): v is string => typeof v === "string").join(", ") : typeof raw === "string" ? raw : "";
     const view = fieldViews(db, job).views.find(v => v.field.label === label);
     if (!view) return c.text("Unknown field", 400);
-    const answer = parseAnswer(view.field, view.answer, value);
-    setOverride(db, job.id, label, answer);
-    if (form.saveToBank && answer.type === "text" && (view.source === "bank" || view.source === "template")) {
-      const key = normalizeLabel(label, job.company);
-      const q = listQuestions(db).find(x => [x.canonical, ...x.variants].some(t => normalizeLabel(t, job.company) === key));
-      if (q) approveAnswer(db, q.id, answer.text);
+    if (view.field.kind === "file" || view.answer?.type === "file") return c.text("File fields can't be edited here", 400);
+    let answer = parseAnswer(view.field, view.answer, value);
+    const known = view.field.options;
+    if (known?.length && (answer.type === "option" || answer.type === "options")) {
+      const canon = (v: string) => known.find(o => o.trim().toLowerCase() === v.trim().toLowerCase());
+      const picked = answer.type === "option" ? [answer.option] : answer.options;
+      const mapped = picked.map(canon);
+      if (mapped.some(m => m === undefined)) return c.text("That is not one of the field's options", 400);
+      answer = answer.type === "option" ? { type: "option", option: mapped[0]! } : { type: "options", options: mapped as string[] };
     }
-    return c.redirect(`/applications/${job.id}`, 303);
+    setOverride(db, job.id, label, answer);
+    let notice = "";
+    if (form.saveToBank && answer.type === "text" && view.source === "bank") {
+      const key = normalizeLabel(label, job.company);
+      const matches = listQuestions(db).filter(x => [x.canonical, ...x.variants].some(t => normalizeLabel(t, job.company) === key));
+      if (matches.length === 1) approveAnswer(db, matches[0]!.id, answer.text);
+      else notice = "?notice=bank-miss";
+    }
+    return c.redirect(`/applications/${job.id}${notice}`, 303);
   });
 
   app.post("/applications/:id/submit", c => {

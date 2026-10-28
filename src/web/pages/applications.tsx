@@ -114,11 +114,17 @@ export function parseAnswer(field: FieldSpec, current: FieldAnswer | null, value
 function FieldRow(props: { jobId: string; view: FieldView; editable: boolean }) {
   const { field, answer, source } = props.view;
   const text = answerText(answer);
-  const canEdit = props.editable && answer?.type !== "file";
-  const fromBank = source === "bank" || source === "template";
-  const input = field.kind === "textarea" || text.length > 80
-    ? <textarea name="value">{text}</textarea>
-    : <input type="text" name="value" value={text} />;
+  const canEdit = props.editable && field.kind !== "file" && answer?.type !== "file";
+  const fromBank = source === "bank";
+  const opts = field.options?.length ? field.options : null;
+  const chosen = new Set(answer?.type === "options" ? answer.options : [text]);
+  const input = opts && field.kind === "checkbox-group"
+    ? <div>{opts.map(o => <label class="meta"><input type="checkbox" name="value" value={o} checked={chosen.has(o)} /> {o}{" "}</label>)}</div>
+    : opts && ["select", "combobox", "radio"].includes(field.kind)
+      ? <select name="value">{opts.map(o => <option value={o} selected={o === text}>{o}</option>)}</select>
+      : field.kind === "textarea" || text.length > 80
+        ? <textarea name="value">{text}</textarea>
+        : <input type="text" name="value" value={text} />;
   return (
     <div class="card">
       <strong>{field.label}</strong>{field.required ? " *" : ""}
@@ -146,7 +152,11 @@ function Action(props: { jobId: string; name: string; label: string; primary?: b
   );
 }
 
-export function JobDetailPage(props: { db: Db; job: Job }) {
+export const NOTICES: Record<string, string> = {
+  "bank-miss": "Saved for this job only — no matching answer-bank question",
+};
+
+export function JobDetailPage(props: { db: Db; job: Job; notice?: string }) {
   const { db, job } = props;
   const { views, screenshot } = fieldViews(db, job);
   const editable = job.status === "ready-to-review";
@@ -158,6 +168,7 @@ export function JobDetailPage(props: { db: Db; job: Job }) {
         {job.chosenLocation ?? job.locations.join(", ")} · posted {day(job.datePosted)} · {job.ats ?? "ATS unknown"} ·{" "}
         {href ? <a href={href} target="_blank" rel="noopener noreferrer">View posting</a> : "no link"}
       </div>
+      {props.notice && NOTICES[props.notice] ? <div class="note">{NOTICES[props.notice]}</div> : null}
       <p><strong>{job.status}</strong>{job.statusReason ? `: ${job.statusReason}` : ""}</p>
       {isUnknownSubmission(job) ? (
         <div class="note">This application may already have been sent — check your email or the company's site first.</div>
