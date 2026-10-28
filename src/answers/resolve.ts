@@ -3,8 +3,9 @@ import type { FieldAnswer, FieldSpec, JobContext } from "../forms/types.js";
 import { hasSubmittedToCompany } from "../jobs/repo.js";
 import type { Llm } from "../llm/llm.js";
 import { getProfile, profileValue, type Profile } from "../profile/profile.js";
-import { adaptAnswer } from "./adapt.js";
+import { adaptAnswer, type AdaptHints } from "./adapt.js";
 import { addVariant, createQuestion, getOverrides, getQuestion, incrementUse, listQuestions, setDraft, type Question } from "./bank.js";
+import { degreeInProgress } from "./degree.js";
 import { classifyFields, normalizeLabel, withCompanyPlaceholder, type Classification, type DerivedKey } from "./classify.js";
 import { draftAnswer, factAnswer, fillTemplate } from "./draft.js";
 import { matchQuestion } from "./match.js";
@@ -39,6 +40,10 @@ const filled = (field: FieldSpec, answer: FieldAnswer, source: FillSource, extra
 const skip = (field: FieldSpec): Resolution => ({ fieldId: field.id, status: "skip" });
 const blocked = (field: FieldSpec, questionId: number, reason: "missing" | "approval"): Resolution =>
   ({ fieldId: field.id, status: "blocked", questionId, reason });
+
+/** What adaptAnswer may know about the applicant: whether their degree is still in progress (by graduation month). */
+const hintsFor = (ctx: Ctx, degreeField = false): AdaptHints =>
+  ({ degreeField, inProgress: degreeInProgress(ctx.profile.graduationMonth) });
 
 const cleanLabel = (label: string) => label.trim().replace(/\s*\*+$/, "").trim();
 const nonEmpty = (v: Value): Value => (v === "" || (Array.isArray(v) && v.length === 0) ? null : v);
@@ -81,7 +86,7 @@ async function byCategory(ctx: Ctx, field: FieldSpec, c: Classification): Promis
   switch (c.category) {
     case "profile": {
       const value = profileValue(ctx.profile, c.profileKey!);
-      return fromValue(ctx, field, value, "profile", entityProfileField(field, c.profileKey!, value));
+      return fromValue(ctx, field, value, "profile", entityProfileField(field, c.profileKey!, value), c.profileKey === "degree");
     }
     case "derived":
       return fromValue(ctx, field, derivedValue(ctx, c.derivedKey!), "derived");
@@ -142,10 +147,10 @@ function workedAt(employers: string[] | null, company: string): boolean | null {
  * the name into the box for it). A combobox's list may be partial or searchable, so there the name is kept as typed text
  * when the list has an "Other": the runner searches the control before it ever falls back to "Other".
  */
-async function fromValue(ctx: Ctx, field: FieldSpec, value: Value, source: FillSource, entity = false): Promise<Resolution> {
+async function fromValue(ctx: Ctx, field: FieldSpec, value: Value, source: FillSource, entity = false, degree = false): Promise<Resolution> {
   const v = nonEmpty(value);
   if (v !== null) {
-    const answer = await adaptAnswer(ctx.llm, v, field, ctx.job);
+    const answer = await adaptAnswer(ctx.llm, v, field, ctx.job, hintsFor(ctx, degree));
     const name = typeof v === "string" ? v.trim() : Array.isArray(v) ? v.join(", ") : "";
     // adaptAnswer never maps a name onto "Other": only the fallback below picks it, for a name the list truly lacks.
     if (answer) return filled(field, answer, source, { entity: entity || undefined });
@@ -167,7 +172,7 @@ async function unresolvedFact(ctx: Ctx, field: FieldSpec): Promise<Resolution> {
   const existing = listQuestions(db).find(q => q.kind !== "template" && [q.canonical, ...q.variants].some(t => normalizeLabel(t, job.company) === key));
 
   if (existing?.status === "approved" && existing.answer !== null) {
-    const answer = await adaptAnswer(llm, existing.answer, field, job);
+    const answer = await adaptAnswer(llm, existing.answer, field, job, hintsFor(ctx));
     if (answer) {
       incrementUse(db, existing.id);
       return filled(field, answer, "bank");
@@ -225,7 +230,7 @@ async function fromMatched(ctx: Ctx, field: FieldSpec, q: Question, isFactual: b
   if (q.status === "approved" && q.answer !== null) {
     const isTemplate = q.kind === "template";
     const text = isTemplate ? await fillTemplate(llm, profile, q.answer, field, job) : q.answer;
-    const answer = await adaptAnswer(llm, text, field, job);
+    const answer = await adaptAnswer(llm, text, field, job, hintsFor(ctx));
     if (answer) {
       incrementUse(db, q.id);
       return filled(field, answer, isTemplate ? "template" : "bank");

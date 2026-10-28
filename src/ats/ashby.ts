@@ -177,7 +177,7 @@ async function isYesNo(page: Page, f: FieldSpec): Promise<boolean> {
 async function fillYesNo(page: Page, field: FieldSpec, answer: FieldAnswer): Promise<void> {
   if (answer.type !== "option") throw new Error(`yes/no needs an option answer`);
   const want = norm(answer.option);
-  if (want !== "yes" && want !== "no") throw new Error(`No option "${answer.option}" among: Yes, No`);
+  if (want !== "yes" && want !== "no") throw new Error(`No option matching "${answer.option}" (saw: Yes | No)`);
   const button = box(page, field).locator("button").filter({ hasText: new RegExp(`^\\s*${want}\\s*$`, "i") });
   if ((await button.getAttribute("aria-pressed")) !== "true") await button.click();
 }

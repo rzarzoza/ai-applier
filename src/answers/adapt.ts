@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { FieldAnswer, FieldSpec, JobContext } from "../forms/types.js";
 import type { Llm } from "../llm/llm.js";
+import { isDegreeQuestion, pickDegree, degreeCompatible, type DegreeHints } from "./degree.js";
 import { isOtherOption } from "./other.js";
 
 const OPTION_KINDS = new Set<FieldSpec["kind"]>(["select", "combobox", "radio"]);
@@ -184,12 +185,17 @@ function fieldContext(field: FieldSpec, job: JobContext) {
   return { question: field.label, description: field.description ?? null, company: job.company, jobTitle: job.title };
 }
 
+/** What the caller knows beyond the field itself (see answers/degree.ts). */
+export type AdaptHints = DegreeHints;
+
 /**
  * Converts a stored value into an answer for this field: deterministic where possible, otherwise one
  * low-effort LLM call. Returns null when the value cannot be expressed in the field without guessing. Never maps a value
  * onto an "Other"-like option (unless the value itself says "Other"): that is the caller's explicit fallback to make.
+ * A degree ("B.S.") maps onto the form's option of the same level ("Bachelor of Science", "Bachelor's Degree",
+ * "Undergraduate"...) without an LLM, and never onto another level, whoever picks it.
  */
-export async function adaptAnswer(llm: Llm, value: string | boolean | string[], field: FieldSpec, job: JobContext): Promise<FieldAnswer | null> {
+export async function adaptAnswer(llm: Llm, value: string | boolean | string[], field: FieldSpec, job: JobContext, hints: AdaptHints = {}): Promise<FieldAnswer | null> {
   const options = field.options ?? [];
 
   if (field.kind === "checkbox") {
@@ -230,13 +236,20 @@ export async function adaptAnswer(llm: Llm, value: string | boolean | string[], 
 
   if (OPTION_KINDS.has(field.kind) && options.length) {
     const flat = Array.isArray(value) ? value.join(", ") : value;
+    const degree = typeof flat === "string" && isDegreeQuestion(field.label, flat, options, hints);
+    if (degree) {
+      const picked = pickDegree(flat, options, hints.inProgress);
+      if (picked) return { type: "option", option: picked };
+    }
+    // A degree never lands on an option of another level ("Master's" for "B.S."), whether by containment or the LLM.
+    const fits = (o: string) => mayStandFor(value, o) && (!degree || degreeCompatible(flat as string, o));
     const picked = pickOption(flat, options);
-    if (picked && mayStandFor(value, picked)) return { type: "option", option: picked };
+    if (picked && fits(picked)) return { type: "option", option: picked };
     const out = await llm.structured({
       name: "adapt", schema: OptionSchema, system: ADAPT_OPTION_SYSTEM, effort: "low",
       content: JSON.stringify({ ...fieldContext(field, job), options, storedAnswer: asText(value) }),
     });
-    return out.option !== null && options.includes(out.option) && mayStandFor(value, out.option) ? { type: "option", option: out.option } : null;
+    return out.option !== null && options.includes(out.option) && fits(out.option) ? { type: "option", option: out.option } : null;
   }
 
   // A combobox with no known options is a typeahead: type the value and let the filler pick.

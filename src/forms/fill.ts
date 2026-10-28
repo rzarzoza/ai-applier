@@ -9,13 +9,26 @@ const all = (root: Page | Frame, field: FieldSpec) => root.locator(`[data-aa-id=
 const optionLabels = (members: Locator) =>
   members.evaluateAll(inPage((els: Element[]) => els.map(e => e.getAttribute("data-aa-opt") ?? ""))) as Promise<string[]>;
 
-/** Resolves the `data-aa-opt` value of the group member matching `want` (exact, then case-insensitive). */
+/**
+ * The option text equal to `want` (exactly, then ignoring case and whitespace). None → `No option matching "<want>"`,
+ * the error the runner recovers from by reading the real options and mapping the value onto them.
+ */
+function findOption(opts: readonly string[], want: string): number {
+  const exact = opts.indexOf(want);
+  const i = exact >= 0 ? exact : opts.findIndex(o => norm(o) === norm(want));
+  if (i < 0) throw new Error(`No option matching "${want}" (saw: ${opts.slice(0, 10).join(" | ")})`);
+  return i;
+}
+
+/** Resolves the `data-aa-opt` value of the group member matching `want` (exact, then case/whitespace-insensitive). */
 async function matchOption(members: Locator, want: string): Promise<string> {
   const opts = await optionLabels(members);
-  const hit = opts.find(o => o === want) ?? opts.find(o => norm(o) === norm(want));
-  if (hit === undefined) throw new Error(`No option "${want}" among: ${opts.join(", ")}`);
-  return hit;
+  return opts[findOption(opts, want)]!;
 }
+
+/** Each option's label of a native select, as Playwright's selectOption({ label }) sees it. */
+const selectLabels = (el: Locator) =>
+  el.evaluate(inPage((s: HTMLSelectElement) => Array.from(s.options).map(o => o.label.replace(/\s+/g, " ").trim()))) as Promise<string[]>;
 
 export async function fillField(root: Page | Frame, field: FieldSpec, answer: FieldAnswer): Promise<void> {
   const members = all(root, field);
@@ -23,7 +36,8 @@ export async function fillField(root: Page | Frame, field: FieldSpec, answer: Fi
   switch (field.kind) {
     case "select":
       if (answer.type !== "option") throw new Error(`select needs an option answer`);
-      await el.selectOption({ label: answer.option });
+      // selectOption({ label }) waits (until it times out) for a label the select lacks: check first, and pick by index.
+      await el.selectOption({ index: findOption(await selectLabels(el), answer.option) });
       return;
     case "combobox": {
       if (answer.type !== "option" && answer.type !== "text") throw new Error(`combobox needs an option or text answer`);

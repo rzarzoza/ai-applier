@@ -429,7 +429,8 @@ test("a combobox without the answer's option is read and the value mapped onto i
   } }];
   const j = addJob("https://mini-ats.test/apply?degree=1");
   expect(await runJob(deps, j.id)).toBe("submitted");
-  expect(adaptOptions()).toEqual([["Associate's Degree", "Bachelor's Degree", "Master's Degree"]]);
+  // The degree mapper picks "Bachelor's Degree" for "B.S." from the real options, without an LLM call.
+  expect(adaptOptions()).toEqual([]);
   expect(filledLabels).toEqual(["First Name", "Degree", ...LATER_FIELDS]);
   expect(miniAts.submissions).toEqual([{ first: "Luis", degree: "Bachelor's Degree", email: "luis@example.com", phone: "5551234567", reloc: "y", project: "", certify: "on" }]);
   const record = JSON.parse(readFileSync(path.join(listRecords(j.id)[0]!, "record.json"), "utf8"));
@@ -437,22 +438,22 @@ test("a combobox without the answer's option is read and the value mapped onto i
 });
 
 test("a combobox value no real option matches fails the job naming the field, after every later field was filled", async () => {
-  saveProfile(db, { degree: "B.S." });
+  saveProfile(db, { degree: "Diploma" });
   llm.on("classify", classifyBy({ Degree: { category: "profile", profileKey: "degree", isFactual: true } }))
     .on("adapt", () => ({ option: null }));
   const filledLabels = recordingFills();
   // A lazy list shows nothing until something is typed: the value's first letter loads the options.
   const j = addJob("https://mini-ats.test/apply?degree=1&lazy=1");
   expect(await runJob(deps, j.id)).toBe("failed");
-  expect(getJob(db, j.id)!.statusReason).toBe('Could not fill "Degree": no option matches "B.S."');
-  expect(adaptOptions()).toEqual([["Bachelor's Degree"]]);
+  expect(getJob(db, j.id)!.statusReason).toBe('Could not fill "Degree": no option matches "Diploma"');
+  expect(adaptOptions()).toEqual([["Associate's Degree", "Bachelor's Degree", "Master's Degree"]]);
   expect(filledLabels).toEqual(["First Name", ...LATER_FIELDS]);
   expect(fixtureSubmitCount()).toBe(0);
   expectScreenshot(j.id);
 });
 
 test("a blocked job fills every field it can: one that cannot be filled is left blank and the job still needs you", async () => {
-  saveProfile(db, { degree: "B.S.", willingToRelocate: null });
+  saveProfile(db, { degree: "Diploma", willingToRelocate: null });
   llm.on("classify", classifyBy({ Degree: { category: "profile", profileKey: "degree", isFactual: true } }))
     .on("adapt", () => ({ option: null }));
   const filledLabels = recordingFills();
@@ -461,6 +462,50 @@ test("a blocked job fills every field it can: one that cannot be filled is left 
   expect(getJob(db, j.id)!.statusReason).toBe("1 question needs you");
   expect(filledLabels).toEqual(["First Name", "Email", "Phone", "I certify that the information above is accurate"]);
   expect(fixtureSubmitCount()).toBe(0);
+});
+
+test("a native degree select without the profile's \"B.S.\" gets \"Bachelors Degree\" (no LLM, no timeout)", async () => {
+  saveProfile(db, { degree: "B.S.", graduationMonth: "2028-05" });
+  llm.on("classify", classifyBy({ Degree: { category: "profile", profileKey: "degree", isFactual: true } }));
+  const j = addJob("https://mini-ats.test/apply?edu=select");
+  const started = Date.now();
+  expect(await runJob(deps, j.id)).toBe("submitted");
+  expect(Date.now() - started).toBeLessThan(5000);
+  expect(adaptOptions()).toEqual([]);
+  expect(miniAts.submissions[0]).toMatchObject({ first: "Luis", degree: "Bachelors Degree", certify: "on" });
+});
+
+test("a select answer missing from the list fails fast and is mapped onto the real options", async () => {
+  llm.on("classify", classifyBy({ Degree: { category: "profile", profileKey: "degree", isFactual: true } }));
+  // An answer the select does not list (like a stale override): selectOption({ label }) would wait until it timed out.
+  const attempts = recordingAttempts();
+  const j = addJob("https://mini-ats.test/apply?edu=select");
+  setOverride(db, j.id, "Degree", { type: "option", option: "B.S." });
+  const started = Date.now();
+  expect(await runJob(deps, j.id)).toBe("submitted");
+  expect(Date.now() - started).toBeLessThan(5000);
+  expect(picked(attempts, "Degree")).toEqual(["B.S.", "Bachelors Degree"]);
+  expect(miniAts.submissions[0]).toMatchObject({ degree: "Bachelors Degree" });
+});
+
+test("a degree radio group maps \"B.S.\" onto \"Undergraduate\", from the profile or after a fill that missed", async () => {
+  const label = "Highest level of education completed";
+  saveProfile(db, { degree: "B.S." });
+  llm.on("classify", classifyBy({ [label]: { category: "profile", profileKey: "degree", isFactual: true } }));
+  const j = addJob("https://mini-ats.test/apply?edu=radio");
+  expect(await runJob(deps, j.id)).toBe("submitted");
+  expect(miniAts.submissions[0]).toMatchObject({ level: "Undergraduate" });
+
+  miniAts.reset();
+  const attempts = recordingAttempts();
+  const k = addJob("https://mini-ats.test/apply?edu=radio");
+  setOverride(db, k.id, label, { type: "option", option: "B.S." });
+  const started = Date.now();
+  expect(await runJob(deps, k.id)).toBe("submitted");
+  expect(Date.now() - started).toBeLessThan(5000);
+  expect(picked(attempts, label)).toEqual(["B.S.", "Undergraduate"]);
+  expect(miniAts.submissions[0]).toMatchObject({ level: "Undergraduate" });
+  expect(adaptOptions()).toEqual([]);
 });
 
 test("validation error after submit → failed with page messages", async () => {

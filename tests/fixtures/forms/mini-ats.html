@@ -227,6 +227,49 @@
     }
   }
 
+  // ?edu=select: a required native select "Degree" after First Name with High School, Associate's, Bachelors Degree,
+  //   Masters Degree, PhD and Other (no "B.S.").
+  // ?edu=radio: a required radio group "Highest level of education completed" with High School, Undergraduate,
+  //   Graduate and Other.
+  var edu = params.get("edu");
+  if (edu) {
+    var eduAnchor = document.querySelector('label[for="email"]');
+    if (edu === "select") {
+      var eLabel = document.createElement("label");
+      eLabel.htmlFor = "degree";
+      eLabel.textContent = "Degree";
+      var eSel = document.createElement("select");
+      eSel.id = "degree";
+      eSel.name = "degree";
+      eSel.required = true;
+      ["", "High School", "Associate's", "Bachelors Degree", "Masters Degree", "PhD", "Other"].forEach(function (o) {
+        var op = document.createElement("option");
+        op.value = o;
+        op.textContent = o || "Select...";
+        eSel.appendChild(op);
+      });
+      form.insertBefore(eLabel, eduAnchor);
+      form.insertBefore(eSel, eduAnchor);
+    } else {
+      var fs = document.createElement("fieldset");
+      var legend = document.createElement("legend");
+      legend.textContent = "Highest level of education completed";
+      fs.appendChild(legend);
+      ["High School", "Undergraduate", "Graduate", "Other"].forEach(function (o, i) {
+        var l = document.createElement("label");
+        var r = document.createElement("input");
+        r.type = "radio";
+        r.name = "level";
+        r.value = o;
+        if (i === 0) r.required = true;
+        l.appendChild(r);
+        l.appendChild(document.createTextNode(" " + o));
+        fs.appendChild(l);
+      });
+      form.insertBefore(fs, eduAnchor);
+    }
+  }
+
   // ?auth=1: a required "Are you authorized to work in the US?" combobox offering Yes, No and Other.
   if (params.has("auth")) {
     combo("auth", "Are you authorized to work in the US?", function (q) {

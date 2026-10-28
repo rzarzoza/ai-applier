@@ -2,6 +2,7 @@ import path from "node:path";
 import type { Frame, Page, Request } from "playwright";
 import { addBlocker, addNeedsYou, clearBlockersForJob, getOverrides, getQuestion, resolveNeedsYouForJob } from "../answers/bank.js";
 import { adaptAnswer, nameVariants, pickOption } from "../answers/adapt.js";
+import { degreeInProgress, degreeQueries, pickDegree } from "../answers/degree.js";
 import { normalizeLabel, withCompanyPlaceholder } from "../answers/classify.js";
 import { answerQuestion, canHandFinish } from "../answers/inbox.js";
 import { distinctiveWords, findOtherOption, followUpBox, looksLikeFollowUp, otherEligible } from "../answers/other.js";
@@ -19,6 +20,7 @@ import {
 import type { Job, JobStatus } from "../jobs/types.js";
 import { llmHaltReason, type Llm } from "../llm/llm.js";
 import { getFilters } from "../filters/filters.js";
+import { getProfile } from "../profile/profile.js";
 import { getSettings, haltRunner, type Settings } from "../settings.js";
 import { recheckQueued } from "../sources/poller.js";
 import type { BrowserProvider } from "./browser.js";
@@ -244,17 +246,19 @@ export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "a
     const searchOptions = async (field: FieldSpec, value: string, start: string[]): Promise<string[]> => {
       const seen = [...start];
       const searched = new Set<string>();
+      // A degree ("B.S.") is found by its level's word ("Bachelor") as well as by its own text.
+      const found = () => !!pickOption(value, seen) || !!pickDegree(value, seen);
       const searchAll = async (queries: string[]) => {
         for (const q of queries) {
-          if (pickOption(value, seen)) return;
+          if (found()) return;
           const key = q.trim().toLowerCase();
           if (!key || searched.has(key)) continue;
           searched.add(key);
           for (const o of await readOpts(field, q, true)) if (!seen.includes(o)) seen.push(o);
         }
       };
-      await searchAll([value, ...distinctiveWords(value)]);
-      if (!pickOption(value, seen)) {
+      await searchAll([value, ...degreeQueries(value), ...distinctiveWords(value)]);
+      if (!found()) {
         const variants = await nameVariants(deps.llm, value, field, ctx!).catch((err: unknown): string[] => {
           if (llmHaltReason(err)) throw err;
           return [];
@@ -284,7 +288,8 @@ export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "a
         const eligible = otherEligible(field, r);
         let options = await readOpts(field, value);
         if (eligible && field.kind === "combobox") options = await searchOptions(field, value, options);
-        const adapted = options.length ? await adaptAnswer(deps.llm, value, { ...field, options }, ctx) : null;
+        const inProgress = degreeInProgress(getProfile(db).graduationMonth, deps.now());
+        const adapted = options.length ? await adaptAnswer(deps.llm, value, { ...field, options }, ctx, { inProgress }) : null;
         const same = adapted?.type === r.answer.type && JSON.stringify(adapted) === JSON.stringify(r.answer);
         if (adapted && !same) {
           await handler.fill(page, field, adapted);

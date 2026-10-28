@@ -76,3 +76,18 @@ test("readBack of an unselected radio group and select is null", async () => {
   expect(await readBack(page, fields.find(x => x.kind === "radio")!)).toBeNull();
   expect(await readBack(page, fields.find(x => x.kind === "select")!)).toBeNull();
 });
+
+test("a select or radio answer the control does not list fails fast with a recoverable error; case/whitespace are ignored", async () => {
+  await page.setContent(basicHtml);
+  const fields = await extractFields(page);
+  const degree = fields.find(x => x.label === "Degree")!;
+  const auth = fields.find(x => x.kind === "radio")!;
+  const started = Date.now();
+  await expect(fillField(page, degree, { type: "option", option: "B.S." })).rejects.toThrow(/^No option matching "B\.S\."/);
+  await expect(fillField(page, auth, { type: "option", option: "Maybe" })).rejects.toThrow(/^No option matching "Maybe"/);
+  expect(Date.now() - started).toBeLessThan(2000);
+  await fillField(page, degree, { type: "option", option: "  master's " });
+  expect(await readBack(page, degree)).toBe("Master's");
+  await fillField(page, auth, { type: "option", option: "yes" });
+  expect(await readBack(page, auth)).toBe("Yes");
+});
