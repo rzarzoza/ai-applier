@@ -85,10 +85,20 @@ export function addNeedsYou(db: Db, n: { jobId: string; kind: NeedsYou["kind"]; 
   return Number(res.lastInsertRowid);
 }
 
+type NeedsYouRow = { id: number; job_id: string; kind: NeedsYou["kind"]; message: string; created_at: string };
+const toNeedsYou = (r: NeedsYouRow): NeedsYou => ({ id: r.id, jobId: r.job_id, kind: r.kind, message: r.message, createdAt: r.created_at });
+
+/** Open items of jobs still waiting on the user (status needs-you); items of jobs that moved on are not listed. */
 export function listOpenNeedsYou(db: Db): NeedsYou[] {
-  const rows = db.prepare("SELECT * FROM needs_you WHERE resolved = 0 ORDER BY id").all() as unknown as
-    { id: number; job_id: string; kind: NeedsYou["kind"]; message: string; created_at: string }[];
-  return rows.map(r => ({ id: r.id, jobId: r.job_id, kind: r.kind, message: r.message, createdAt: r.created_at }));
+  const rows = db.prepare(`SELECT n.* FROM needs_you n JOIN jobs j ON j.id = n.job_id
+      WHERE n.resolved = 0 AND j.status = 'needs-you' ORDER BY n.id`).all() as unknown as NeedsYouRow[];
+  return rows.map(toNeedsYou);
+}
+
+/** The job's open needs-you items, whatever its status. */
+export function openNeedsYouForJob(db: Db, jobId: string): NeedsYou[] {
+  const rows = db.prepare("SELECT * FROM needs_you WHERE job_id = ? AND resolved = 0 ORDER BY id").all(jobId) as unknown as NeedsYouRow[];
+  return rows.map(toNeedsYou);
 }
 
 export function resolveNeedsYouForJob(db: Db, jobId: string): void {

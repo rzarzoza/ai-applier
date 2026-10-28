@@ -112,9 +112,44 @@ test("POST /inbox/:id/revise calls the LLM and re-renders the card with the new 
   expect(getQuestion(db, q.id)!.draft).toBe("Shorter draft");
 });
 
-test("POST /needs-you/:jobId/do-it-now starts the interactive run", async () => {
-  const { app, runInteractive } = setup();
-  const res = await app.request("/needs-you/job-1/do-it-now", { method: "POST" });
-  expect(await res.text()).toContain("Opening browser");
-  expect(runInteractive).toHaveBeenCalledWith("job-1");
+test("POST /needs-you/:jobId/do-it-now starts the interactive run for a CAPTCHA, code or login", async () => {
+  const { db, app, runInteractive, mk } = setup();
+  for (const [n, kind] of [[1, "captcha"], [2, "code"], [3, "login"]] as const) {
+    const j = mk(n);
+    addNeedsYou(db, { jobId: j.id, kind, message: kind });
+    const res = await app.request(`/needs-you/${j.id}/do-it-now`, { method: "POST" });
+    expect(await res.text()).toContain("Opening browser");
+    expect(runInteractive).toHaveBeenLastCalledWith(j.id);
+  }
+});
+
+test("do-it-now refuses unknown jobs, jobs not in needs-you, and possibly sent applications", async () => {
+  const { db, app, runInteractive, mk } = setup();
+  expect((await app.request("/needs-you/nope/do-it-now", { method: "POST" })).status).toBe(404);
+  const noItem = mk(1);
+  const moved = mk(2);
+  addNeedsYou(db, { jobId: moved.id, kind: "captcha", message: "solve" });
+  setStatus(db, moved.id, "queued");
+  const unknown = mk(3);
+  setStatus(db, unknown.id, "needs-you", "Submission state unknown — check before retrying");
+  addNeedsYou(db, { jobId: unknown.id, kind: "other", message: "may have been sent" });
+  const unknownCaptcha = mk(4);
+  setStatus(db, unknownCaptcha.id, "needs-you", "Submission state unknown — check before retrying");
+  addNeedsYou(db, { jobId: unknownCaptcha.id, kind: "captcha", message: "stale captcha" });
+  for (const j of [noItem, moved, unknown, unknownCaptcha]) {
+    expect((await app.request(`/needs-you/${j.id}/do-it-now`, { method: "POST" })).status).toBe(409);
+  }
+  expect(runInteractive).not.toHaveBeenCalled();
+});
+
+test("a possibly sent application shows an Open job link instead of Do it now", async () => {
+  const { db, app, mk } = setup();
+  const j = mk(1);
+  setStatus(db, j.id, "needs-you", "Submission state unknown — check before retrying");
+  addNeedsYou(db, { jobId: j.id, kind: "other", message: "Co1 · Intern: may have been sent" });
+  const html = await (await app.request("/inbox")).text();
+  expect(html).toContain("may have been sent");
+  expect(html).not.toContain("Do it now");
+  expect(html).toContain(`href="/applications/${j.id}"`);
+  expect(html).toContain("Open job");
 });

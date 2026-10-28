@@ -6,7 +6,7 @@ import { atsNameFromUrl, detectAts, HANDLERS } from "../ats/registry.js";
 import type { AtsHandler, OpenResult, SubmitOutcome } from "../ats/types.js";
 import type { Db } from "../db/db.js";
 import type { FieldAnswer, FieldSpec, JobContext } from "../forms/types.js";
-import { getJob, incrementAttempts, nextQueued, setAts, setStatus, setUsedDocuments, submittedSince, UNKNOWN_SUBMISSION } from "../jobs/repo.js";
+import { getJob, incrementAttempts, isUnknownSubmission, nextQueued, setAts, setStatus, setUsedDocuments, submittedSince, UNKNOWN_SUBMISSION } from "../jobs/repo.js";
 import type { Job, JobStatus } from "../jobs/types.js";
 import type { Llm } from "../llm/llm.js";
 import { getSettings, type Settings } from "../settings.js";
@@ -68,7 +68,8 @@ const isHuman = (o: SubmitOutcome) => o.kind === "captcha" || o.kind === "verifi
  * field (and any questions the answers reveal), verifies the values, then stops for review, for the
  * user's input, or submits. Never submits while a required field, a draft, or a CAPTCHA/code is
  * unresolved. Always leaves the job in a final status with a reason, and closes the browser page.
- * Jobs already done or set aside are left untouched; "submit-reviewed" only runs a job awaiting review.
+ * Jobs already done or set aside are left untouched; "submit-reviewed" only runs a job awaiting review,
+ * and "interactive" never re-runs a job whose application may already have been sent.
  */
 export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "auto"): Promise<JobStatus> {
   const { db } = deps;
@@ -76,6 +77,8 @@ export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "a
   if (!job) throw new Error(`No job with id ${jobId}`);
   if (FINAL.has(job.status)) return job.status;
   if (mode === "submit-reviewed" && job.status !== "ready-to-review") return job.status;
+  // Only the confirmed Retry on the job's page may re-run a possibly sent application.
+  if (mode === "interactive" && isUnknownSubmission(job)) return job.status;
 
   clearBlockersForJob(db, job.id);
   const handler = detectAts(job.url, deps.handlers ?? HANDLERS);
@@ -98,12 +101,18 @@ export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "a
   let submitClicked = false;
   let beforeSubmit: Buffer | null = null;
 
-  /** Saves what this run saw (with a screenshot) and sets the final status. */
+  /**
+   * Saves what this run saw (with a screenshot) and sets the final status. A job that no longer needs
+   * the user has its open needs-you items resolved; needs-you endings add their own item first.
+   */
   const end = async (status: JobStatus, reason: string | null, shot?: Buffer | null): Promise<JobStatus> => {
     if (session) {
       try {
         saveSnapshot(db, job.id, { fields, resolutions, screenshot: shot ?? (await screenshot(session.page)) });
       } catch { /* a missing snapshot must not hide the status */ }
+    }
+    if (status !== "needs-you") {
+      try { resolveNeedsYouForJob(db, job.id); } catch { /* the status below still stands */ }
     }
     setStatus(db, job.id, status, reason);
     if (status === "applied-manually") notifySubmitted();
@@ -128,7 +137,6 @@ export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "a
     } catch (err) {
       reason = `Submitted, but the record could not be saved: ${errorMessage(err)}`;
     }
-    try { resolveNeedsYouForJob(db, job.id); } catch { /* the submission stands */ }
     try {
       const docs = usedDocuments(fields, resolutions);
       setUsedDocuments(db, job.id, docs.resume, docs.coverLetter);
@@ -141,6 +149,7 @@ export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "a
   /** The application may already have gone out: flag it for the user and never invite a blind retry. */
   const endUnknown = (detail: string): Promise<JobStatus> => {
     try {
+      resolveNeedsYouForJob(db, job.id);
       addNeedsYou(db, { jobId: job.id, kind: "other", message: `${job.company} · ${job.title}: ${UNKNOWN_SUBMISSION} (${detail})` });
     } catch { /* the status below still flags it */ }
     return end("needs-you", UNKNOWN_SUBMISSION);
@@ -167,6 +176,7 @@ export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "a
       const blocked = res.filter(r => r.status === "blocked");
       if (blocked.length) {
         for (const b of blocked) addBlocker(db, job.id, b.questionId, b.reason);
+        resolveNeedsYouForJob(db, job.id); // this run supersedes any earlier CAPTCHA or code request
         const n = new Set(blocked.map(b => b.questionId)).size;
         return await end("needs-you", n === 1 ? "1 question needs you" : `${n} questions need you`);
       }
@@ -219,7 +229,10 @@ export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "a
       const humanWait = deps.humanWaitMs ?? HUMAN_WAIT_MS;
       outcome = await pollOutcome(handler, page, userPresent ? Math.max(humanWait, INTERACTIVE_WAIT_MS) : humanWait, pollMs,
         o => o.kind === "pending" || isHuman(o));
-      if (outcome.kind === "pending" || isHuman(outcome)) return await end("needs-you", step.reason);
+      // The user may have solved it and sent the form without the page confirming: never invite a blind retry.
+      if (page.isClosed()) return await endUnknown(`The browser window was closed during the ${step.reason.toLowerCase()} wait`);
+      if (isHuman(outcome)) return await end("needs-you", step.reason);
+      if (outcome.kind === "pending") return await endUnknown(`No confirmation after the ${step.reason.toLowerCase()} wait`);
       resolveNeedsYouForJob(db, job.id);
     }
 
@@ -275,12 +288,15 @@ function dailyLimitReached(db: Db, s: Settings, now: Date): boolean {
   return submittedSince(db, startOfDay) >= s.dailyLimit;
 }
 
-/** Polls the outcome every `pollMs` while `keepWaiting` holds, for up to `waitMs`. A check that throws counts as pending. */
+/**
+ * Polls the outcome every `pollMs` while `keepWaiting` holds, for up to `waitMs`, stopping early if
+ * the page is closed. A check that throws counts as pending.
+ */
 async function pollOutcome(handler: AtsHandler, page: Page, waitMs: number, pollMs: number, keepWaiting: (o: SubmitOutcome) => boolean): Promise<SubmitOutcome> {
   const check = () => handler.outcome(page).catch((): SubmitOutcome => ({ kind: "pending" }));
   const deadline = Date.now() + waitMs;
   let out = await check();
-  while (keepWaiting(out) && Date.now() < deadline) {
+  while (keepWaiting(out) && Date.now() < deadline && !page.isClosed()) {
     await sleep(Math.min(pollMs, Math.max(0, deadline - Date.now())));
     out = await check();
   }

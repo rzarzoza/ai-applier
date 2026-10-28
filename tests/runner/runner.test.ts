@@ -16,6 +16,7 @@ import { listRecords } from "../../src/runner/records.js";
 import type { Resolution } from "../../src/answers/resolve.js";
 import type { FieldAnswer, FieldSpec } from "../../src/forms/types.js";
 import { runJob, runNext, usedDocuments, type RunnerDeps } from "../../src/runner/runner.js";
+import { inPage } from "../../src/forms/in-page.js";
 import { FakeLlm } from "../helpers/fake-llm.js";
 import { fixtureSubmitCount, miniAts, miniAtsHandler } from "../helpers/mini-ats-handler.js";
 
@@ -293,6 +294,47 @@ test("headless captcha goes straight to needs-you without waiting", async () => 
   expect(notifications).toHaveLength(1);
   expect(listOpenNeedsYou(db).map(n => n.kind)).toEqual(["captcha"]);
   expect(getJob(db, captchaJob.id)!.statusReason).toBe("CAPTCHA");
+});
+
+test("captcha cleared but no confirmation after the wait → state unknown, never a plain CAPTCHA retry", async () => {
+  const captchaJob = addJob("https://mini-ats.test/apply?captcha=1");
+  const clearing = { ...deps, humanWaitMs: 400, notify: async () => {
+    // The challenge goes away but the page never confirms (as if the user submitted elsewhere).
+    setTimeout(() => void lastPage!.evaluate(inPage(() => { document.getElementById("challenge")!.hidden = true; }), undefined), 50);
+  } };
+  expect(await runJob(clearing, captchaJob.id)).toBe("needs-you");
+  expect(getJob(db, captchaJob.id)!.statusReason).toBe("Submission state unknown — check before retrying");
+  expect(listOpenNeedsYou(db).map(n => n.kind)).toEqual(["other"]);
+});
+
+test("a browser window closed during the human wait stops waiting and ends state unknown", async () => {
+  const captchaJob = addJob("https://mini-ats.test/apply?captcha=1");
+  const closing = { ...deps, humanWaitMs: 20_000, notify: async () => { setTimeout(() => void lastPage!.close(), 100); } };
+  const started = Date.now();
+  expect(await runJob(closing, captchaJob.id)).toBe("needs-you");
+  expect(Date.now() - started).toBeLessThan(10_000);
+  expect(getJob(db, captchaJob.id)!.statusReason).toBe("Submission state unknown — check before retrying");
+  expect(listOpenNeedsYou(db).map(n => n.message).join()).toContain("window was closed");
+});
+
+test("interactive mode never re-runs a possibly sent application", async () => {
+  setStatus(db, job.id, "needs-you", "Submission state unknown — check before retrying");
+  expect(await runJob(deps, job.id, "interactive")).toBe("needs-you");
+  expect(opened).toEqual([]);
+  expect(getJob(db, job.id)!.attempts).toBe(0);
+  expect(fixtureSubmitCount()).toBe(0);
+});
+
+test("a run ending in any status but needs-you resolves the job's open needs-you items", async () => {
+  addNeedsYou(db, { jobId: job.id, kind: "captcha", message: "old captcha" });
+  const failing = addJob("https://mini-ats.test/gone");
+  addNeedsYou(db, { jobId: failing.id, kind: "captcha", message: "old captcha" });
+  setStatus(db, job.id, "needs-you", "CAPTCHA");
+  setStatus(db, failing.id, "needs-you", "CAPTCHA");
+  saveSettings(db, { reviewMode: "all" });
+  expect(await runJob(deps, job.id, "interactive")).toBe("ready-to-review");
+  expect(await runJob(deps, failing.id, "interactive")).toBe("failed");
+  expect(db.prepare("SELECT COUNT(*) AS n FROM needs_you WHERE resolved = 0").get()).toEqual({ n: 0 });
 });
 
 test("submit-reviewed waits for the user past humanWaitMs", async () => {

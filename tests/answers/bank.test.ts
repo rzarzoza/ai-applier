@@ -99,3 +99,20 @@ test("needs-you items and per-job overrides", () => {
   setOverride(db, j.id, "Agree", { type: "check", checked: true });
   expect(getOverrides(db, j.id)).toEqual({ Phone: { type: "text", text: "2" }, Agree: { type: "check", checked: true } });
 });
+
+test("inbox questions and needs-you items only count jobs still in needs-you", () => {
+  const db = openDb(":memory:");
+  const q1 = q(db, "Need sponsorship?");
+  const a = mkJob(db, 1), b = mkJob(db, 2);
+  addBlocker(db, a.id, q1.id, "missing"); addBlocker(db, b.id, q1.id, "missing");
+  addNeedsYou(db, { jobId: a.id, kind: "captcha", message: "solve" });
+  addNeedsYou(db, { jobId: b.id, kind: "captcha", message: "solve too" });
+  setStatus(db, a.id, "skipped", "Skipped by you");
+  expect(inboxItems(db).map(i => i.jobs.map(j => j.id))).toEqual([[b.id]]);
+  expect(listOpenNeedsYou(db).map(n => n.jobId)).toEqual([b.id]);
+  for (const status of ["closed", "applied-manually", "submitted"] as const) {
+    setStatus(db, b.id, status);
+    expect(inboxItems(db), status).toEqual([]);
+    expect(listOpenNeedsYou(db), status).toEqual([]);
+  }
+});

@@ -1,7 +1,7 @@
 import { getSettings } from "../../settings.js";
 import type { Db } from "../../db/db.js";
 import { listOpenNeedsYou } from "../../answers/bank.js";
-import { inboxItems, type InboxItem } from "../../answers/inbox.js";
+import { canDoItNow, inboxItems, type InboxItem } from "../../answers/inbox.js";
 import { Layout } from "../layout.js";
 
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
@@ -83,7 +83,9 @@ export function InboxPage(props: { db: Db }) {
           <strong>{n.kind}</strong>
           <div class="meta">{n.message}</div>
           <div class="row">
-            <button class="primary" hx-post={`/needs-you/${n.jobId}/do-it-now`} hx-target={`#needs-${n.id}`} hx-swap="innerHTML">Do it now</button>
+            {canDoItNow(props.db, n.jobId)
+              ? <button class="primary" hx-post={`/needs-you/${n.jobId}/do-it-now`} hx-target={`#needs-${n.id}`} hx-swap="innerHTML">Do it now</button>
+              : <a href={`/applications/${n.jobId}`}>Open job</a>}
           </div>
         </div>
       ))}

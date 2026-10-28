@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSyn
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Hono } from "hono";
-import { answerQuestion } from "../answers/inbox.js";
+import { answerQuestion, canDoItNow } from "../answers/inbox.js";
 import { getQuestion, listQuestions, approveAnswer, deleteQuestion, resolveNeedsYouForJob, setDraft, setOverride } from "../answers/bank.js";
 import { reviseDraft } from "../answers/draft.js";
 import type { Db } from "../db/db.js";
@@ -111,7 +111,10 @@ export function createApp(ctx: AppContext): Hono {
   });
 
   app.post("/needs-you/:jobId/do-it-now", c => {
-    ctx.runInteractive(c.req.param("jobId"));
+    const jobId = c.req.param("jobId");
+    if (!getJob(db, jobId)) return c.text("Unknown job", 404);
+    if (!canDoItNow(db, jobId)) return c.text("This job is not waiting for a CAPTCHA, code or login — open it instead", 409);
+    ctx.runInteractive(jobId);
     return c.html(OpeningBrowser());
   });
 
