@@ -52,6 +52,23 @@ test("a job left filling by an interrupted run is flagged state unknown at start
   db.close();
 });
 
+test("a job cut off before submitting is queued again at startup, not flagged", async () => {
+  const dataDir = mkdtempSync(path.join(tmpdir(), "ai-applier-main-"));
+  const seed = openDb(path.join(dataDir, "app.db"));
+  const { job } = upsertPosting(seed, { sourceId: "s", listingId: "1", company: "Acme", title: "Intern", locations: ["NYC"], category: null,
+    terms: [], degrees: [], sponsorship: null, url: "https://acme.test/1", datePosted: new Date(), active: true });
+  setStatus(seed, job.id, "filling");
+  setRunnerCurrent(seed, { jobId: job.id, step: "Filling fields", startedAt: new Date().toISOString(), mode: "auto" });
+  seed.close();
+  const app = await startApp({ dataDir, port: 0, startLoops: false, secrets });
+  await app.stop();
+  const db = openDb(path.join(dataDir, "app.db"));
+  expect(getJob(db, job.id)!.status).toBe("queued");
+  expect(listOpenNeedsYou(db)).toEqual([]);
+  expect(getRunnerCurrent(db)).toBeNull();
+  db.close();
+});
+
 test("the running dashboard refuses other hosts and cross-site changes", async () => {
   const dataDir = mkdtempSync(path.join(tmpdir(), "ai-applier-main-"));
   const app = await startApp({ dataDir, port: 0, startLoops: false, secrets });

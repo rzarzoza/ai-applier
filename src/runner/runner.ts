@@ -22,7 +22,7 @@ import { getFilters } from "../filters/filters.js";
 import { getSettings, haltRunner, type Settings } from "../settings.js";
 import { recheckQueued } from "../sources/poller.js";
 import type { BrowserProvider } from "./browser.js";
-import { clearRunnerCurrent, getRunnerCurrent, setRunnerCurrent, type RunnerStep } from "./current.js";
+import { clearRunnerCurrent, getRunnerCurrent, setRunnerCurrent, STEPS, type RunnerCurrent, type RunnerStep } from "./current.js";
 import { getSnapshot, saveRecord, saveSnapshot, type Snapshot } from "./records.js";
 
 export interface RunnerDeps {
@@ -141,7 +141,7 @@ export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "a
   const userPresent = mode !== "auto";
   const hand = mode === "hand-finish";
   const startedAt = deps.now().toISOString();
-  const step = (s: RunnerStep) => setRunnerCurrent(db, { jobId: job.id, step: s, startedAt, mode });
+  const step = (s: RunnerStep, extra: { maybeSent?: boolean } = {}) => setRunnerCurrent(db, { jobId: job.id, step: s, startedAt, mode, ...extra });
   /** Hand-finish: the fields left for the user, each with the bank question it answers (when it is one). */
   const forUser = new Map<string, { field: FieldSpec; questionId: number | null }>();
   const leaveToUser = (field: FieldSpec, questionId: number | null = null) => {
@@ -426,14 +426,20 @@ export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "a
       const todo = [...forUser.values()].filter(t => onForm.has(t.field.id));
       const root = await handler.root(page);
       await root.evaluate(inPage(highlightFields), todo.map(t => t.field.id)).catch(() => {});
-      step("Waiting for you to finish and submit");
-
-      // Anything that may mean the form went out: a form post or a navigation of the page.
+      // Anything that may mean the form went out: a form post or a navigation of the page. Recorded in runnerCurrent
+      // too, so a crash during the wait is flagged as a possibly sent application only when one was seen.
       let maybeSent = false;
-      const onRequest = (req: Request) => {
-        if (req.method() !== "GET" && ["document", "xhr", "fetch"].includes(req.resourceType())) maybeSent = true;
+      const WAIT_STEP = "Waiting for you to finish and submit";
+      step(WAIT_STEP, { maybeSent: false });
+      const flagSent = () => {
+        if (maybeSent) return;
+        maybeSent = true;
+        step(WAIT_STEP, { maybeSent: true });
       };
-      const onNavigate = (frame: Frame) => { if (frame === page.mainFrame()) maybeSent = true; };
+      const onRequest = (req: Request) => {
+        if (req.method() !== "GET" && ["document", "xhr", "fetch"].includes(req.resourceType())) flagSent();
+      };
+      const onNavigate = (frame: Frame) => { if (frame === page.mainFrame()) flagSent(); };
       page.on("request", onRequest);
       page.on("framenavigated", onNavigate);
       const captured = new Map<string, string | string[] | boolean>();
@@ -459,7 +465,7 @@ export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "a
           outcome = await handler.outcome(page).catch((): SubmitOutcome => ({ kind: "pending" }));
           if (outcome.kind === "submitted" || outcome.kind === "already-applied") break;
           // A CAPTCHA, code or error message only shows once submit was clicked; the user deals with it here.
-          if (outcome.kind !== "pending" && outcome.kind !== "validation-error") maybeSent = true;
+          if (outcome.kind !== "pending" && outcome.kind !== "validation-error") flagSent();
           await sleep(Math.min(pollMs, Math.max(0, deadline - Date.now())));
         }
       } finally {
@@ -690,19 +696,52 @@ function bankText(got: string | string[] | boolean): string | null {
   return text || null;
 }
 
+/** Steps at or after clicking submit: the application may have gone out. */
+const MAYBE_SENT_STEPS: ReadonlySet<string> = new Set<RunnerStep>(["Submitting", "Waiting for confirmation", "Waiting for you (CAPTCHA/code)"]);
+const HAND_WAIT_STEP: RunnerStep = "Waiting for you to finish and submit";
+
+/** The queued reason of a job whose run was cut off before anything could have been sent. */
+export const INTERRUPTED_REQUEUED = "Interrupted before submitting — queued again";
+
 /**
- * A job left "filling" means the app stopped mid-run (Ctrl-C, crash), possibly after clicking submit.
- * Flags each one as state unknown, so only the confirmed Retry on its page runs it again. Call at
- * startup, before any run. Returns the flagged job ids.
+ * Whether a run of `jobId` cut off at `current` (the runner's last recorded step) certainly never sent the application:
+ * it stopped while opening, reading, answering, uploading, filling, checking or at the review gate, or while waiting for
+ * the user to finish a hand-finish run with nothing on the page suggesting the form went out. False (possibly sent) when
+ * the record is missing, is for another job, names an unknown step, or the run had reached submitting.
  */
-export function flagInterruptedRuns(db: Db): string[] {
+export function interruptedBeforeSending(current: RunnerCurrent | null, jobId: string): boolean {
+  if (!current || current.jobId !== jobId || !(STEPS as readonly string[]).includes(current.step)) return false;
+  if (MAYBE_SENT_STEPS.has(current.step)) return false;
+  if (current.step === HAND_WAIT_STEP) return current.mode === "hand-finish" && current.maybeSent === false;
+  return true;
+}
+
+/**
+ * A job left "filling" means the app stopped mid-run (Ctrl-C, crash). The runner's last recorded step (kv
+ * runnerCurrent) tells how far it got: a run cut off before anything could have been sent is queued again (its attempt
+ * not counted, no needs-you item); any other — submit possibly clicked, or no usable record — is flagged as state
+ * unknown, so only the confirmed Retry on its page runs it again. Call at startup, before any run and before the record
+ * is cleared.
+ */
+export function flagInterruptedRuns(db: Db): { flagged: string[]; requeued: string[] } {
   const rows = db.prepare("SELECT id, company, title FROM jobs WHERE status = 'filling' ORDER BY rowid").all() as unknown as { id: string; company: string; title: string }[];
+  const current = getRunnerCurrent(db);
+  const flagged: string[] = [];
+  const requeued: string[] = [];
   for (const j of rows) {
     resolveNeedsYouForJob(db, j.id);
-    addNeedsYou(db, { jobId: j.id, kind: "other", message: `${j.company} · ${j.title}: ${UNKNOWN_SUBMISSION} (the app stopped during this application)` });
+    if (interruptedBeforeSending(current, j.id)) {
+      setStatus(db, j.id, "queued", INTERRUPTED_REQUEUED);
+      decrementAttempts(db, j.id);
+      requeued.push(j.id);
+      continue;
+    }
+    const at = current?.jobId === j.id ? `, at "${current.step}"` : "";
+    addNeedsYou(db, { jobId: j.id, kind: "other", message: `${j.company} · ${j.title}: ${UNKNOWN_SUBMISSION} (the app stopped during this application${at})` });
     setStatus(db, j.id, "needs-you", UNKNOWN_SUBMISSION);
+    flagged.push(j.id);
   }
-  return rows.map(j => j.id);
+  return { flagged, requeued };
 }
 
 /**

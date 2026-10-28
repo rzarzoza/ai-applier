@@ -6,9 +6,11 @@ export const RUNNER_CURRENT_KEY = "runnerCurrent";
 
 /**
  * What the runner is doing right now, shown on the dashboard's "Applying now" card. `mode` is the run's mode
- * ("auto", "interactive", "submit-reviewed" or "hand-finish").
+ * ("auto", "interactive", "submit-reviewed" or "hand-finish"). `maybeSent` is set while a hand-finish run waits for the
+ * user: false until something on the page may mean the form went out (a form post, a navigation), then true. Kept after
+ * a crash, it tells startup whether the interrupted run may have sent the application (see flagInterruptedRuns).
  */
-export interface RunnerCurrent { jobId: string; step: RunnerStep; startedAt: string; mode?: string }
+export interface RunnerCurrent { jobId: string; step: RunnerStep; startedAt: string; mode?: string; maybeSent?: boolean }
 
 export const STEPS = [
   "Opening application", "Reading the form", "Working out answers", "Uploading resume", "Filling fields", "Checking answers",

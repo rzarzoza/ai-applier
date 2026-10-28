@@ -1013,6 +1013,8 @@ test("hand-finish fills what it can, highlights the open questions without typin
   const hand = { ...deps, pollMs: 50, handFinishWaitMs: 20_000 };
   const running = runJob(hand, j.id, "hand-finish");
   const page = await untilWaitingForUser(j.id);
+  // Nothing on the page suggests a send yet: a crash now would requeue the job (see flagInterruptedRuns).
+  expect(getRunnerCurrent(db)).toMatchObject({ jobId: j.id, step: "Waiting for you to finish and submit", mode: "hand-finish", maybeSent: false });
 
   // Answered fields are filled; the two open questions are outlined and left empty.
   expect(await page.locator("#first").inputValue()).toBe("Luis");
@@ -1089,6 +1091,8 @@ test("a window closed after the form may have been sent is flagged as possibly s
   await page.locator("#phone").fill("5559876543");
   await page.locator("#submit").click();
   await new Promise(r => setTimeout(r, 200));
+  // The possible send is recorded, so a crash now would flag the job instead of requeuing it.
+  expect(getRunnerCurrent(db)).toMatchObject({ jobId: j.id, mode: "hand-finish", maybeSent: true });
   await page.close();
   expect(await running).toBe("needs-you");
   const after = getJob(db, j.id)!;

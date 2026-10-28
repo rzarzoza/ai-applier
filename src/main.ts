@@ -46,7 +46,10 @@ export async function startApp(opts: StartOptions = {}): Promise<{ url: string; 
   if (!db.prepare("SELECT 1 FROM kv WHERE key = 'settings'").get()) saveSettings(db, { paused: true });
   // Nothing is running yet, so a job still "filling" was cut off by the last shutdown.
   const interrupted = flagInterruptedRuns(db);
-  if (interrupted.length) log(`${interrupted.length} interrupted ${interrupted.length === 1 ? "run needs" : "runs need"} checking (see the Inbox)`);
+  if (interrupted.flagged.length)
+    log(`${interrupted.flagged.length} interrupted ${interrupted.flagged.length === 1 ? "run needs" : "runs need"} checking (see the Inbox)`);
+  if (interrupted.requeued.length)
+    log(`${interrupted.requeued.length} interrupted ${interrupted.requeued.length === 1 ? "run" : "runs"} stopped before submitting · queued again`);
   // Nothing is running yet: whatever the dashboard's "Applying now" card last showed is over.
   clearRunnerCurrent(db);
   const secrets: Secrets = opts.secrets ?? { get: getSecret, set: setSecret };
