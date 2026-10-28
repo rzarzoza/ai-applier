@@ -120,8 +120,9 @@ export async function startApp(opts: StartOptions = {}): Promise<{ url: string; 
   };
   const pollInFlight = () => polling ?? Promise.resolve();
 
+  let port = 0;
   const app = createApp({
-    db, llm, secrets, pollNow, syncTracker: runSync,
+    db, llm, secrets, pollNow, syncTracker: runSync, localPort: () => port,
     runInteractive: id => runById(id, "interactive"),
     runReviewed: id => runById(id, "submit-reviewed"),
     onApiKeySaved: () => { void refreshLlm(); },
@@ -130,7 +131,8 @@ export async function startApp(opts: StartOptions = {}): Promise<{ url: string; 
   const server = await new Promise<ReturnType<typeof serve>>(resolve => {
     const s = serve({ fetch: app.fetch, port: opts.port ?? DEFAULT_PORT, hostname: "127.0.0.1" }, () => resolve(s));
   });
-  const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  port = (server.address() as AddressInfo).port;
+  const url = `http://127.0.0.1:${port}`;
 
   let stopped = false;
   const wakers = new Set<() => void>();

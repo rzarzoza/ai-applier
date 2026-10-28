@@ -42,6 +42,11 @@ export interface AppContext {
   onApiKeySaved?(): void;
   /** Rewrites the CSV and pushes to the Google Sheet. Never rejects; overlapping calls are merged. */
   syncTracker?(): Promise<SyncResult>;
+  /**
+   * The port the dashboard listens on. When given, only requests addressed to 127.0.0.1 or localhost
+   * on that port are served, and changes must come from a page of the dashboard itself (Origin).
+   */
+  localPort?(): number;
 }
 
 const API_KEY_NAME = "anthropic-api-key";
@@ -72,6 +77,19 @@ export function createApp(ctx: AppContext): Hono {
   const { db } = ctx;
   const secrets = ctx.secrets ?? { get: getSecret, set: setSecret };
   const card = (id: number, error?: string) => CardFragment({ db, id, error });
+
+  // Another site open in the browser must not drive the dashboard: a DNS-rebinding page arrives with
+  // its own Host, and a cross-site form or fetch carries its own Origin (or none).
+  if (ctx.localPort) {
+    const localPort = ctx.localPort;
+    app.use("*", async (c, next) => {
+      const hosts = [`127.0.0.1:${localPort()}`, `localhost:${localPort()}`];
+      if (!hosts.includes(c.req.header("host")?.toLowerCase() ?? "")) return c.text("Forbidden: unknown host", 403);
+      const safe = c.req.method === "GET" || c.req.method === "HEAD";
+      if (!safe && !hosts.some(h => `http://${h}` === c.req.header("origin")?.toLowerCase())) return c.text("Forbidden: cross-site request", 403);
+      await next();
+    });
+  }
 
   app.get("/", c => c.redirect("/inbox"));
   app.get("/inbox", c => c.html(InboxPage({ db })));
