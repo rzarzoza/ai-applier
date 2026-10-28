@@ -118,6 +118,122 @@
     dInput.addEventListener("keydown", function (e) { if (e.key === "Escape") close(); });
   }
 
+  // A react-select-like combobox inserted before `before`: `optionsFor(typed)` lists the options to show for the typed
+  // text, clicking one picks it (and calls `onPick`), typed text that was not picked is cleared on blur or Escape.
+  // Returns the listbox, after which any follow-up box goes.
+  function combo(id, labelText, optionsFor, onPick, before) {
+    var chosen = "";
+    var label = document.createElement("label");
+    label.htmlFor = id;
+    label.textContent = labelText;
+    var input = document.createElement("input");
+    input.id = id;
+    input.name = id;
+    input.type = "text";
+    input.required = true;
+    input.autocomplete = "off";
+    input.setAttribute("role", "combobox");
+    input.setAttribute("aria-controls", id + "-list");
+    var list = document.createElement("div");
+    list.id = id + "-list";
+    list.setAttribute("role", "listbox");
+    list.hidden = true;
+    list.addEventListener("mousedown", function (e) { e.preventDefault(); });
+    form.insertBefore(label, before);
+    form.insertBefore(input, before);
+    form.insertBefore(list, before);
+    var render = function () {
+      list.innerHTML = "";
+      optionsFor(input.value.toLowerCase()).forEach(function (d) {
+        var o = document.createElement("div");
+        o.setAttribute("role", "option");
+        o.textContent = d;
+        o.addEventListener("click", function () { chosen = d; input.value = d; list.hidden = true; if (onPick) onPick(d); });
+        list.appendChild(o);
+      });
+      list.hidden = !list.children.length;
+    };
+    var close = function () { input.value = chosen; list.hidden = true; };
+    input.addEventListener("click", render);
+    input.addEventListener("input", render);
+    input.addEventListener("blur", close);
+    input.addEventListener("keydown", function (e) { if (e.key === "Escape") close(); });
+    return list;
+  }
+
+  // Inserts a text box (label + input) right after `after`.
+  function textBox(id, labelText, required, after) {
+    var label = document.createElement("label");
+    label.htmlFor = id;
+    label.textContent = labelText;
+    var input = document.createElement("input");
+    input.id = id;
+    input.name = id;
+    input.type = "text";
+    input.required = required;
+    after.after(label);
+    label.after(input);
+  }
+
+  // ?school=...: a required "School" question after First Name, whose list never has "Rice University" as such.
+  //   combo:  a combobox listing Harvard, Stanford and "Other"; picking "Other" reveals a required "Please specify your
+  //           school" box right after it.
+  //   lazy:   a combobox showing nothing until something is typed, then at most 5 schools containing the typed text;
+  //           "Other" only shows once "oth..." is typed. Picking "Other" reveals the same box. &rice=1 adds
+  //           "Rice Univ. (Houston, TX)", which typing "R" alone never shows (the list is cut at 5).
+  //   nobox:  like combo, but picking "Other" reveals nothing.
+  //   select: a native select with Harvard, Stanford and "Other (please specify)", followed by an optional
+  //           "If other, school name" box that is always there.
+  //   both:   a native select with Harvard, "Rice University" and "Other".
+  var school = params.get("school");
+  if (school) {
+    var anchor = document.querySelector('label[for="email"]');
+    var reveal = function (list) {
+      return function (d) { if (d === "Other" && !document.getElementById("school_other")) textBox("school_other", "Please specify your school", true, list); };
+    };
+    if (school === "combo" || school === "nobox") {
+      var fixed = ["Harvard University", "Stanford University", "Other"];
+      var holder = { list: null };
+      holder.list = combo("school", "School", function (q) { return fixed.filter(function (d) { return d.toLowerCase().indexOf(q) >= 0; }); },
+        school === "combo" ? function (d) { reveal(holder.list)(d); } : null, anchor);
+    } else if (school === "lazy") {
+      var many = ["Radford University", "Ramapo College", "Reed College", "Regis University", "Rensselaer Polytechnic Institute"]
+        .concat(params.has("rice") ? ["Rice Univ. (Houston, TX)"] : [], ["Rutgers University", "Harvard University", "Stanford University"]);
+      var lazyHolder = { list: null };
+      lazyHolder.list = combo("school", "School", function (q) {
+        if (!q) return [];
+        var out = many.filter(function (d) { return d.toLowerCase().indexOf(q) >= 0; }).slice(0, 5);
+        if (q.length >= 3 && "other".indexOf(q) === 0) out.push("Other");
+        return out;
+      }, function (d) { reveal(lazyHolder.list)(d); }, anchor);
+    } else {
+      var sLabel = document.createElement("label");
+      sLabel.htmlFor = "school";
+      sLabel.textContent = "School";
+      var sel = document.createElement("select");
+      sel.id = "school";
+      sel.name = "school";
+      sel.required = true;
+      var opts = school === "both" ? ["Harvard University", "Rice University", "Other"] : ["Harvard University", "Stanford University", "Other (please specify)"];
+      [""].concat(opts).forEach(function (o) {
+        var op = document.createElement("option");
+        op.value = o;
+        op.textContent = o || "Select...";
+        sel.appendChild(op);
+      });
+      form.insertBefore(sLabel, anchor);
+      form.insertBefore(sel, anchor);
+      if (school === "select") textBox("school_other", "If other, school name", false, sel);
+    }
+  }
+
+  // ?auth=1: a required "Are you authorized to work in the US?" combobox offering Yes, No and Other.
+  if (params.has("auth")) {
+    combo("auth", "Are you authorized to work in the US?", function (q) {
+      return ["Yes", "No", "Other"].filter(function (d) { return d.toLowerCase().indexOf(q) >= 0; });
+    }, null, document.querySelector('label[for="email"]'));
+  }
+
   // ?file=<label>: adds a required file upload with that label (e.g. "Resume/CV" or "Transcript").
   if (params.has("file")) {
     var submitBtn = document.getElementById("submit");

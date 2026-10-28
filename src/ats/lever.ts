@@ -28,7 +28,7 @@
  */
 import type { Frame, Page } from "playwright";
 import { extractFields } from "../forms/extract.js";
-import { fillField, readBack as readBackField } from "../forms/fill.js";
+import { fillField, readBack as readBackField, readOptions as readOptionsField } from "../forms/fill.js";
 import { inPage } from "../forms/in-page.js";
 import type { FieldAnswer, FieldSpec } from "../forms/types.js";
 import type { AtsHandler, OpenResult, SubmitOutcome } from "./types.js";
@@ -107,6 +107,11 @@ export const lever: AtsHandler = {
   async fill(page, field, answer) {
     if (field.kind === "combobox") return pickSelect2(page, field, answer);
     await fillField(page, field, answer);
+  },
+
+  async readOptions(page, field, typed, search) {
+    if (field.kind !== "combobox") return readOptionsField(page, field, typed, search);
+    return listSelect2(page, field, typed, search);
   },
 
   async afterUpload(page) {
@@ -188,6 +193,50 @@ async function pickSelect2(page: Page, field: FieldSpec, answer: FieldAnswer): P
   }
   await search.press("Escape").catch(() => {});
   throw new Error(`No option matching "${typed}" for "${field.label}" (saw: ${seen.slice(0, 10).join(" | ")})`);
+}
+
+const SELECT2_ITEMS = ".select2-results__option:not(.select2-results__message):not(.loading-results)";
+
+/**
+ * The option texts of a select2 widget, read from the results it owns: with the search box cleared (the whole list), or,
+ * when that shows nothing, after typing the first letter of `typed`; with `search`, after typing all of `typed`. Waits
+ * for an ajax search to settle; leaves the widget closed and its search box empty.
+ */
+async function listSelect2(page: Page, field: FieldSpec, typed?: string, search = false): Promise<string[]> {
+  const box = page.locator(`[data-aa-id="${field.id}"]`).first();
+  await box.click();
+  const input = page.locator(".select2-search__field:visible").first();
+  await input.waitFor({ state: "visible", timeout: 5000 });
+  const owns = await box.getAttribute("aria-owns");
+  const results = owns ? page.locator(`[id=${JSON.stringify(owns)}]`) : page.locator(".select2-container--open .select2-results__options");
+  const read = async (waitMs: number) => {
+    const deadline = Date.now() + waitMs;
+    await new Promise(r => setTimeout(r, 300)); // let an ajax search start before reading
+    for (;;) {
+      const loading = await results.locator(".loading-results, .select2-results__option--load-more").count().catch(() => 0);
+      const texts = (await results.locator(SELECT2_ITEMS).allInnerTexts().catch(() => [] as string[]))
+        .map(t => t.replace(/\s+/g, " ").trim()).filter(Boolean);
+      if ((texts.length && !loading) || Date.now() >= deadline) return [...new Set(texts)];
+      await new Promise(r => setTimeout(r, 200));
+    }
+  };
+  try {
+    const query = typed?.trim() ?? "";
+    if (search && query) {
+      await input.fill(query);
+      return await read(5000);
+    }
+    await input.fill("");
+    let texts = await read(1500);
+    if (!texts.length && query) {
+      await input.fill(query.slice(0, 1));
+      texts = await read(5000);
+    }
+    return texts;
+  } finally {
+    await input.fill("").catch(() => {});
+    await input.press("Escape").catch(() => {});
+  }
 }
 
 type FieldFacts = { label: string; required: boolean };

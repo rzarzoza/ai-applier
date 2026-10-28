@@ -1,9 +1,10 @@
 import path from "node:path";
 import type { Page } from "playwright";
-import { addBlocker, addNeedsYou, clearBlockersForJob, resolveNeedsYouForJob } from "../answers/bank.js";
-import { adaptAnswer } from "../answers/adapt.js";
+import { addBlocker, addNeedsYou, clearBlockersForJob, getOverrides, resolveNeedsYouForJob } from "../answers/bank.js";
+import { adaptAnswer, nameVariants, pickOption } from "../answers/adapt.js";
 import { normalizeLabel } from "../answers/classify.js";
-import { resolveFields, type FillSource, type Preset, type Resolution } from "../answers/resolve.js";
+import { distinctiveWords, findOtherOption, followUpBox, isOtherOption, looksLikeFollowUp, otherEligible } from "../answers/other.js";
+import { resolveFields, type Extra, type FillSource, type Preset, type Resolution } from "../answers/resolve.js";
 import { atsNameFromUrl, detectAts, HANDLERS } from "../ats/registry.js";
 import type { AtsHandler, OpenResult, SubmitOutcome } from "../ats/types.js";
 import type { Db } from "../db/db.js";
@@ -125,6 +126,9 @@ export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "a
   const fields: FieldSpec[] = [];
   const resolutions: Resolution[] = [];
   const byId = new Map<string, FieldSpec>();
+  /** What the user should know about this run (e.g. an "Other" picked with no box to type the real value in). */
+  const notes: string[] = [];
+  const withNotes = (reason: string) => [reason, ...notes].join("; ");
   let submitClicked = false;
   let beforeSubmit: Buffer | null = null;
   // Submitting after review sends exactly what the user reviewed; anything else goes back for review.
@@ -170,7 +174,7 @@ export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "a
       const docs = usedDocuments(fields, resolutions);
       setUsedDocuments(db, job.id, docs.resume, docs.coverLetter);
     } catch { /* the tracker columns are a convenience */ }
-    const status = await end("submitted", reason, confirmation);
+    const status = await end("submitted", reason ?? (notes.length ? notes.join("; ") : null), confirmation);
     notifySubmitted();
     return status;
   };
@@ -193,12 +197,49 @@ export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "a
     }
     const { page } = session;
     let ctx: JobContext | null = null;
+    /** "Please specify" boxes held back from the round they were first seen in (see the loop below). */
+    const deferred = new Set<string>();
+
+    /** The options a choice control offers (see AtsHandler.readOptions); none when they cannot be read. */
+    const readOpts = (field: FieldSpec, typed?: string, search = false): Promise<string[]> =>
+      (handler.readOptions ? handler.readOptions(page, field, typed, search)
+        : handler.root(page).then(root => readOptionsField(root, field, typed, search))).catch((): string[] => []);
+
+    /**
+     * Searches a searchable list for a name before anything else is concluded: with the whole name, its distinctive
+     * words ("Rice"), then other names the LLM knows the same entity by ("William Marsh Rice University"), stopping once
+     * an option matches. Returns `start` plus every option the searches surfaced.
+     */
+    const searchOptions = async (field: FieldSpec, value: string, start: string[]): Promise<string[]> => {
+      const seen = [...start];
+      const searched = new Set<string>();
+      const searchAll = async (queries: string[]) => {
+        for (const q of queries) {
+          if (pickOption(value, seen)) return;
+          const key = q.trim().toLowerCase();
+          if (!key || searched.has(key)) continue;
+          searched.add(key);
+          for (const o of await readOpts(field, q, true)) if (!seen.includes(o)) seen.push(o);
+        }
+      };
+      await searchAll([value, ...distinctiveWords(value)]);
+      if (!pickOption(value, seen)) {
+        const variants = await nameVariants(deps.llm, value, field, ctx!).catch((err: unknown): string[] => {
+          if (llmHaltReason(err)) throw err;
+          return [];
+        });
+        await searchAll(variants);
+      }
+      return seen;
+    };
 
     /**
      * Fills one answer. When a choice control offers no option matching it (or the field's options were never known),
-     * reads the options the control really offers, maps the answer's value onto one of them (adaptAnswer: never an
-     * option outside the list) and fills that once; the resolution then holds the answer actually filled. Returns why
-     * the field could not be filled, or null. API-wide LLM errors propagate.
+     * reads the options the control really offers (a name's searchable list is also searched: see searchOptions), maps
+     * the answer's value onto one of them (adaptAnswer: never an option outside the list) and fills that once; the
+     * resolution then holds the answer actually filled. Only when nothing matches, a name (otherEligible) picks the
+     * control's "Other" option and the resolution keeps the real value in `other`, for fillOthers to type in. Returns
+     * why the field could not be filled, or null. API-wide LLM errors propagate.
      */
     const fillOne = async (r: Filled, field: FieldSpec): Promise<string | null> => {
       try {
@@ -209,15 +250,30 @@ export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "a
         if (value === null || !ctx || !OPTION_KINDS.has(field.kind) || (field.options?.length && !NO_OPTION.test(errorMessage(err)))) {
           return shortReason(err);
         }
-        const options = await (handler.readOptions ? handler.readOptions(page, field, value)
-          : handler.root(page).then(root => readOptionsField(root, field, value))).catch((): string[] => []);
-        if (!options.length) return shortReason(err);
-        const adapted = await adaptAnswer(deps.llm, value, { ...field, options }, ctx);
+        const eligible = otherEligible(field, r);
+        let options = await readOpts(field, value);
+        if (eligible && field.kind === "combobox") options = await searchOptions(field, value, options);
+        const adapted = options.length ? await adaptAnswer(deps.llm, value, { ...field, options }, ctx) : null;
         const same = adapted?.type === r.answer.type && JSON.stringify(adapted) === JSON.stringify(r.answer);
-        if (!adapted || same) return `no option matches "${value}"`;
-        await handler.fill(page, field, adapted);
-        r.answer = adapted;
-        return null;
+        if (adapted && !same) {
+          await handler.fill(page, field, adapted);
+          r.answer = adapted;
+          if (eligible && adapted.type === "option" && isOtherOption(adapted.option)) r.other = value;
+          return null;
+        }
+        if (eligible && !same) {
+          // The name is truly not listed: pick "Other" (a lazy list may only show it once "Other" is typed).
+          let other = findOtherOption(options);
+          if (!other && field.kind === "combobox") other = findOtherOption(await readOpts(field, "Other", true));
+          if (other) {
+            const answer: FieldAnswer = { type: "option", option: other };
+            await handler.fill(page, field, answer);
+            r.answer = answer;
+            r.other = value;
+            return null;
+          }
+        }
+        return options.length ? `no option matches "${value}"` : shortReason(err);
       }
     };
 
@@ -274,6 +330,53 @@ export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "a
       return bad ? { field: bad.field } : null;
     };
 
+    /**
+     * For each answer that picked "Other" because its real value is not listed, types the real value into the box the
+     * form shows for it (followUpBox: a new text box right after the control, or the "specify" box already there). The
+     * box is filled as "<control label> (other)" from the answer's source (or the user's override for that label), so it
+     * is never asked about as a new question. With no box, "Other" stays selected (it is true: the value is not listed)
+     * and the job's reason says so. Returns the fields read and a required box that could not be filled.
+     */
+    const fillOthers = async (filled: Filled[]): Promise<{ present: FieldSpec[]; failed: FillFailure | null }> => {
+      let present = await handler.readFields(page);
+      const picked = filled.filter(r => r.other && resolutions.includes(r));
+      if (!picked.length) return { present, failed: null };
+      const overrides = new Map(Object.entries(getOverrides(db, job.id)).map(([label, a]) => [normalizeLabel(label, ""), a]));
+      let failed: FillFailure | null = null;
+      let typed = false;
+      for (const r of picked) {
+        const control = byId.get(r.fieldId)!;
+        const box = followUpBox(present, r.fieldId, id => byId.has(id));
+        if (!box) {
+          notes.push(`Picked Other for ${control.label} ("${r.other}" not listed)`);
+          continue;
+        }
+        const spec: FieldSpec = { ...box, label: `${control.label} (other)`, description: box.label };
+        fields.push(spec);
+        byId.set(spec.id, spec);
+        const override = overrides.get(normalizeLabel(spec.label, ""));
+        const answer = override ?? await adaptAnswer(deps.llm, r.other!, spec, ctx!);
+        if (!answer) {
+          resolutions.push({ fieldId: spec.id, status: "skip" });
+          if (spec.required) failed ??= { field: spec, reason: `"${r.other}" does not fit the box` };
+          continue;
+        }
+        const res: Filled = { fieldId: spec.id, status: "filled", answer, source: override ? "override" : r.source };
+        resolutions.push(res);
+        const reason = await fillOne(res, spec).catch((err: unknown) => {
+          if (llmHaltReason(err)) throw err;
+          return shortReason(err);
+        });
+        typed = true;
+        if (reason === null) continue;
+        resolutions[resolutions.indexOf(res)] = { fieldId: spec.id, status: "skip" };
+        if (spec.required) failed ??= { field: spec, reason };
+      }
+      // Typing into a box may reveal more questions: read the form again.
+      if (typed) present = await handler.readFields(page);
+      return { present, failed };
+    };
+
     const opened = await handler.open(page, job.url);
     if (!opened.ok) return await end(...OPEN_FAILED[opened.reason](opened.detail));
 
@@ -283,8 +386,19 @@ export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "a
     let present = batch;
 
     for (let round = 0; ; round++) {
-      for (const f of batch) { fields.push(f); byId.set(f.id, f); }
-      const res = await resolveFields({ db, llm: deps.llm }, batch, ctx!, reviewed?.preset);
+      // A box that looks like the "please specify" box of the choice right before it is held back one round: an "Other"
+      // picked for that choice claims it (fillOthers). Seen again unclaimed, it is resolved as usual when required and
+      // left blank when optional (its choice got a listed answer).
+      const held = round < MAX_EXTRA_ROUNDS
+        ? batch.filter(f => !deferred.has(f.id) && looksLikeFollowUp(present, present.indexOf(f))) : [];
+      for (const f of held) deferred.add(f.id);
+      const blankBoxes = batch.filter(f => deferred.has(f.id) && !held.includes(f) && !f.required);
+      const toResolve = batch.filter(f => !held.includes(f) && !blankBoxes.includes(f));
+      for (const f of [...toResolve, ...blankBoxes]) { fields.push(f); byId.set(f.id, f); }
+      const res: Resolution[] = [
+        ...await resolveFields({ db, llm: deps.llm }, toResolve, ctx!, reviewed?.preset),
+        ...blankBoxes.map((f): Resolution => ({ fieldId: f.id, status: "skip" })),
+      ];
       resolutions.push(...res);
 
       const files = res.filter(r => r.status === "needs-file");
@@ -304,8 +418,10 @@ export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "a
         // that need the user. Best effort: a field that can't be filled is left blank, the questions are what this run
         // reports, and nothing is submitted.
         try {
-          await fillAll(res.filter((r): r is Filled => r.status === "filled"));
-          await verify(new Set(present.map(f => f.id)));
+          const answered = res.filter((r): r is Filled => r.status === "filled");
+          await fillAll(answered);
+          const after = await fillOthers(answered);
+          await verify(new Set(after.present.map(f => f.id)));
         } catch { /* the needs-you status below still stands */ }
         const n = new Set(blocked.map(b => b.questionId)).size;
         return await end("needs-you", n === 1 ? "1 question needs you" : `${n} questions need you`);
@@ -314,11 +430,15 @@ export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "a
       if (unanswered) return await end("failed", `Required field "${byId.get(unanswered.fieldId)!.label}" has no answer`);
 
       // Every field is attempted; then a required field that could not be filled fails the job (optional ones stay blank).
-      const failed = (await fillAll(res.filter((r): r is Filled => r.status === "filled"))).find(f => f.field.required);
+      const answered = res.filter((r): r is Filled => r.status === "filled");
+      const failed = (await fillAll(answered)).find(f => f.field.required);
       if (failed) return await end("failed", couldNotFill(failed));
 
-      // Answers can reveal follow-up questions; read the form again and handle any new ones.
-      present = await handler.readFields(page);
+      // Answers can reveal follow-up questions; read the form again (typing any "Other" value into its box) and handle
+      // any new ones.
+      const after = await fillOthers(answered);
+      if (after.failed) return await end("failed", couldNotFill(after.failed));
+      present = after.present;
       batch = present.filter(f => !byId.has(f.id));
       if (!batch.length) break;
       if (round === MAX_EXTRA_ROUNDS) {
@@ -334,8 +454,8 @@ export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "a
 
     if (reviewed) {
       const unseen = resolutions.some(r => r.status === "filled" && r.source !== "override" && !reviewed.includes(byId.get(r.fieldId)!, r.answer));
-      if (unseen) return await end("ready-to-review", "Form changed since review");
-    } else if (reviewApplies(settings, job.company)) return await end("ready-to-review", "Waiting for your review");
+      if (unseen) return await end("ready-to-review", withNotes("Form changed since review"));
+    } else if (reviewApplies(settings, job.company)) return await end("ready-to-review", withNotes("Waiting for your review"));
 
     if (dailyLimitReached(db, settings, deps.now())) {
       setStatus(db, job.id, "queued", "Daily limit reached");
@@ -445,13 +565,14 @@ async function jobContext(job: Job, handler: AtsHandler, page: Page): Promise<Jo
  * label had exactly one), and `includes` says whether a value is one the user saw for that label.
  */
 function reviewedValues(snap: Snapshot | null): { preset: Preset; includes(field: FieldSpec, answer: FieldAnswer): boolean } {
-  const byLabel = new Map<string, { answer: FieldAnswer; source: FillSource }[]>();
+  const byLabel = new Map<string, ({ answer: FieldAnswer; source: FillSource } & Extra)[]>();
   const labels = new Map((snap?.fields ?? []).map(f => [f.id, f.label]));
   for (const r of snap?.resolutions ?? []) {
     const label = labels.get(r.fieldId);
     if (r.status !== "filled" || label === undefined) continue;
     const key = normalizeLabel(label, "");
-    byLabel.set(key, [...(byLabel.get(key) ?? []), { answer: r.answer, source: r.source }]);
+    const extra: Extra = { ...(r.entity ? { entity: true } : {}), ...(r.other ? { other: r.other } : {}) };
+    byLabel.set(key, [...(byLabel.get(key) ?? []), { answer: r.answer, source: r.source, ...extra }]);
   }
   const seen = (field: FieldSpec) => byLabel.get(normalizeLabel(field.label, "")) ?? [];
   return {

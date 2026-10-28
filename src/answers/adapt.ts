@@ -137,3 +137,24 @@ export async function adaptAnswer(llm: Llm, value: string | boolean | string[], 
   // select/radio without options, or a file field: nothing safe to put there.
   return null;
 }
+
+const VARIANTS_SYSTEM = `You help find a name in a form's searchable option list (schools, majors, degrees, cities, countries, employers).
+
+You receive the form's question and a name the applicant gave. Return up to 3 other names the SAME entity is commonly listed under: its official full name, a well-known short form or abbreviation, or a former name (e.g. "William Marsh Rice University" or "Rice" for "Rice University"). Never return a different entity (no other campus, branch, or similarly named place). Return an empty list when you know of none.`;
+
+const VariantsSchema = z.object({ variants: z.array(z.string()) });
+
+/** Up to three other names the same entity may be listed under, to search a list with (one low-effort LLM call). */
+export async function nameVariants(llm: Llm, value: string, field: FieldSpec, job: JobContext): Promise<string[]> {
+  const out = await llm.structured({
+    name: "variants", schema: VariantsSchema, system: VARIANTS_SYSTEM, effort: "low",
+    content: JSON.stringify({ ...fieldContext(field, job), name: value }),
+  });
+  const seen = new Set([norm(value)]);
+  return out.variants.map(v => v.trim()).filter(v => {
+    const n = norm(v);
+    if (!n || seen.has(n)) return false;
+    seen.add(n);
+    return true;
+  }).slice(0, 3);
+}

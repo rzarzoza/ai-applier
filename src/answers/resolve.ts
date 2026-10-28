@@ -8,11 +8,20 @@ import { addVariant, createQuestion, getOverrides, getQuestion, incrementUse, li
 import { classifyFields, normalizeLabel, withCompanyPlaceholder, type Classification, type DerivedKey } from "./classify.js";
 import { draftAnswer, factAnswer, fillTemplate } from "./draft.js";
 import { matchQuestion } from "./match.js";
+import { entityProfileField, findOtherOption, isOtherOption } from "./other.js";
 
 export type FillSource = "override" | "profile" | "derived" | "consent" | "resume" | "bank" | "template";
 
+/**
+ * A filled field may carry: `entity` — its value is a name (school, major, degree, city, country, employer) that a list
+ * may simply not include, so the control's "Other" option may stand in for it (see answers/other.ts); `other` — the
+ * answer is that "Other" option, picked because this real value is not listed; the runner types it into the box the
+ * form shows for it.
+ */
+export type Extra = { entity?: true; other?: string };
+
 export type Resolution =
-  | { fieldId: string; status: "filled"; answer: FieldAnswer; source: FillSource }
+  | ({ fieldId: string; status: "filled"; answer: FieldAnswer; source: FillSource } & Extra)
   | { fieldId: string; status: "skip" }
   | { fieldId: string; status: "blocked"; questionId: number; reason: "missing" | "approval" }
   /** A required file upload the app has no file for (the resume when none is uploaded, or any other file). */
@@ -25,7 +34,8 @@ type Value = string | boolean | string[] | null;
 /** Kinds where consent is expressed by ticking or choosing "yes"/"I agree". */
 const CHOICE_KINDS = new Set<FieldSpec["kind"]>(["checkbox", "checkbox-group", "select", "combobox", "radio"]);
 
-const filled = (field: FieldSpec, answer: FieldAnswer, source: FillSource): Resolution => ({ fieldId: field.id, status: "filled", answer, source });
+const filled = (field: FieldSpec, answer: FieldAnswer, source: FillSource, extra: Extra = {}): Resolution =>
+  ({ fieldId: field.id, status: "filled", answer, source, ...(extra.entity ? { entity: true } : {}), ...(extra.other ? { other: extra.other } : {}) });
 const skip = (field: FieldSpec): Resolution => ({ fieldId: field.id, status: "skip" });
 const blocked = (field: FieldSpec, questionId: number, reason: "missing" | "approval"): Resolution =>
   ({ fieldId: field.id, status: "blocked", questionId, reason });
@@ -34,7 +44,7 @@ const cleanLabel = (label: string) => label.trim().replace(/\s*\*+$/, "").trim()
 const nonEmpty = (v: Value): Value => (v === "" || (Array.isArray(v) && v.length === 0) ? null : v);
 
 /** A value already settled for a field (e.g. the one the user reviewed), used as is. */
-export type Preset = (field: FieldSpec) => { answer: FieldAnswer; source: FillSource } | undefined;
+export type Preset = (field: FieldSpec) => ({ answer: FieldAnswer; source: FillSource } & Extra) | undefined;
 
 /**
  * Decides every field's value: a per-job override, then a preset value if given, then by
@@ -49,7 +59,7 @@ export async function resolveFields(deps: { db: Db; llm: Llm }, fields: FieldSpe
     const override = overrideFor(f);
     if (override) return filled(f, override, "override");
     const p = preset?.(f);
-    return p ? filled(f, p.answer, p.source) : undefined;
+    return p ? filled(f, p.answer, p.source, p) : undefined;
   };
 
   const toClassify = fields.filter(f => !settled(f));
@@ -69,8 +79,10 @@ async function byCategory(ctx: Ctx, field: FieldSpec, c: Classification): Promis
     return field.required ? { fieldId: field.id, status: "needs-file", resume } : skip(field);
   }
   switch (c.category) {
-    case "profile":
-      return fromValue(ctx, field, profileValue(ctx.profile, c.profileKey!), "profile");
+    case "profile": {
+      const value = profileValue(ctx.profile, c.profileKey!);
+      return fromValue(ctx, field, value, "profile", entityProfileField(field, c.profileKey!, value));
+    }
     case "derived":
       return fromValue(ctx, field, derivedValue(ctx, c.derivedKey!), "derived");
     case "consent-required":
@@ -124,12 +136,24 @@ function workedAt(employers: string[] | null, company: string): boolean | null {
   return false;
 }
 
-/** Fills from a known value; if there is none or it doesn't fit the field, falls back to the user's own answer. */
-async function fromValue(ctx: Ctx, field: FieldSpec, value: Value, source: FillSource): Promise<Resolution> {
+/**
+ * Fills from a known value; if there is none or it doesn't fit the field, falls back to the user's own answer. A name
+ * (`entity`) that a full option list does not include picks the list's "Other" option instead (the runner then types
+ * the name into the box for it). A combobox's list may be partial or searchable, so there the name is kept as typed text
+ * when the list has an "Other": the runner searches the control before it ever falls back to "Other".
+ */
+async function fromValue(ctx: Ctx, field: FieldSpec, value: Value, source: FillSource, entity = false): Promise<Resolution> {
   const v = nonEmpty(value);
   if (v !== null) {
     const answer = await adaptAnswer(ctx.llm, v, field, ctx.job);
-    if (answer) return filled(field, answer, source);
+    const name = typeof v === "string" ? v.trim() : Array.isArray(v) ? v.join(", ") : "";
+    if (answer) {
+      const other = entity && answer.type === "option" && isOtherOption(answer.option) && name ? name : undefined;
+      return filled(field, answer, source, { entity: entity || undefined, other });
+    }
+    const otherOption = entity && name ? findOtherOption(field.options ?? []) : null;
+    if (otherOption && field.kind === "combobox") return filled(field, { type: "text", text: name }, source, { entity: true });
+    if (otherOption) return filled(field, { type: "option", option: otherOption }, source, { entity: true, other: name });
   }
   return unresolvedFact(ctx, field);
 }

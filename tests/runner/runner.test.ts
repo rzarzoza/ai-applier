@@ -806,3 +806,137 @@ test("usedDocuments picks the resume by source and cover letters by label", () =
   expect(usedDocuments([text], [filled("4", { type: "text", text: "hi" }, "bank")])).toEqual({ resume: null, coverLetter: "written answer" });
   expect(usedDocuments([], [])).toEqual({ resume: null, coverLetter: "none" });
 });
+
+// --- "Other → type the real value": a name the list truly lacks picks "Other" and is typed into the box for it ---
+
+const SCHOOL_CLASS = { School: { category: "profile", profileKey: "school", isFactual: true } };
+/** The fake LLM maps a stored school onto a listed option naming Rice, else on none. */
+const riceAdapt = (req: { content: unknown }) => ({
+  option: (JSON.parse(String(req.content)) as { options: string[] }).options.find(o => /^rice/i.test(o)) ?? null,
+});
+const classifiedLabels = () => llm.calls.filter(c => c.name === "classify")
+  .flatMap(c => (JSON.parse(String(c.content)) as { fields: { label: string }[] }).fields.map(f => f.label));
+/** Wraps the mini handler to record every answer a fill was attempted with, by label. */
+function recordingAttempts() {
+  const attempts: { label: string; answer: FieldAnswer }[] = [];
+  deps.handlers = [{ ...miniAtsHandler, async fill(page, field, answer) {
+    attempts.push({ label: field.label, answer });
+    await miniAtsHandler.fill(page, field, answer);
+  } }];
+  return attempts;
+}
+const picked = (attempts: { label: string; answer: FieldAnswer }[], label: string) =>
+  attempts.filter(a => a.label === label).map(a => (a.answer.type === "option" ? a.answer.option : a.answer.type === "text" ? a.answer.text : null));
+
+/** The applicant studies at Rice; the fake LLM classifies "School" as the profile's school. */
+function riceSetup() {
+  saveProfile(db, { school: "Rice University" });
+  llm.on("classify", classifyBy(SCHOOL_CLASS)).on("adapt", riceAdapt).on("variants", () => ({ variants: ["William Marsh Rice University"] }));
+}
+
+test("a school combobox without the user's school picks Other and types the school into the box it reveals; later fields are filled", async () => {
+  riceSetup();
+  const attempts = recordingAttempts();
+  const j = addJob("https://mini-ats.test/apply?school=combo");
+  expect(await runJob(deps, j.id)).toBe("submitted");
+  expect(miniAts.submissions).toEqual([{
+    first: "Luis", school: "Other", school_other: "Rice University", email: "luis@example.com", phone: "5551234567", reloc: "y", project: "", certify: "on",
+  }]);
+  // Searched with the whole name, its distinctive word and the LLM's variant before falling back.
+  const searches = llm.calls.filter(c => c.name === "variants");
+  expect(searches).toHaveLength(1);
+  expect(picked(attempts, "School")).toEqual(["Rice University", "Other"]);
+  expect(classifiedLabels()).not.toContain("Please specify your school"); // claimed, never a new question
+  const record = JSON.parse(readFileSync(path.join(listRecords(j.id)[0]!, "record.json"), "utf8"));
+  expect(record.answers).toEqual(expect.arrayContaining([
+    { label: "School", value: "Other", source: "profile" },
+    { label: "School (other)", value: "Rice University", source: "profile" },
+  ]));
+  expect(getJob(db, j.id)!.statusReason).toBeNull();
+});
+
+test("a native select with 'Other (please specify)' and an 'If other' box already there: Other is picked, the box gets the school; review then submit", async () => {
+  riceSetup();
+  saveSettings(db, { reviewMode: "all" });
+  const j = addJob("https://mini-ats.test/apply?school=select");
+  expect(await runJob(deps, j.id)).toBe("ready-to-review");
+  expect(getJob(db, j.id)!.statusReason).toBe("Waiting for your review");
+  expect(classifiedLabels()).not.toContain("If other, school name");
+  const snap = snapshotRow(j.id)!;
+  const fields = JSON.parse(snap.fields_json) as FieldSpec[];
+  const resolutions = JSON.parse(snap.resolutions_json) as Resolution[];
+  const by = (label: string) => resolutions.find(r => r.fieldId === fields.find(f => f.label === label)?.id);
+  expect(by("School")).toMatchObject({ status: "filled", answer: { type: "option", option: "Other (please specify)" }, other: "Rice University", source: "profile" });
+  expect(by("School (other)")).toMatchObject({ status: "filled", answer: { type: "text", text: "Rice University" }, source: "profile" });
+
+  expect(await runJob(deps, j.id, "submit-reviewed")).toBe("submitted");
+  expect(miniAts.submissions[0]).toMatchObject({ school: "Other (please specify)", school_other: "Rice University", email: "luis@example.com", certify: "on" });
+});
+
+test("a lazy list that only shows Other once 'Other' is typed: searched first, then Other is picked and the box filled", async () => {
+  riceSetup();
+  const attempts = recordingAttempts();
+  const j = addJob("https://mini-ats.test/apply?school=lazy");
+  expect(await runJob(deps, j.id)).toBe("submitted");
+  expect(miniAts.submissions[0]).toMatchObject({ school: "Other", school_other: "Rice University", email: "luis@example.com", certify: "on" });
+  expect(picked(attempts, "School")).toEqual(["Rice University", "Other"]);
+  // "R" alone shows 5 schools; the searches for "Rice University", "Rice" and the variant surfaced nothing more.
+  expect(adaptOptions()).toEqual([["Radford University", "Ramapo College", "Reed College", "Regis University", "Rensselaer Polytechnic Institute"]]);
+});
+
+test("a school only found by searching its distinctive word (the first letter's list is cut short) is chosen, never Other", async () => {
+  riceSetup();
+  const attempts = recordingAttempts();
+  const j = addJob("https://mini-ats.test/apply?school=lazy&rice=1");
+  expect(await runJob(deps, j.id)).toBe("submitted");
+  expect(miniAts.submissions[0]).toMatchObject({ school: "Rice Univ. (Houston, TX)", email: "luis@example.com" });
+  expect(miniAts.submissions[0]).not.toHaveProperty("school_other");
+  expect(picked(attempts, "School")).toEqual(["Rice University", "Rice Univ. (Houston, TX)"]);
+  expect(adaptOptions()[0]).toContain("Rice Univ. (Houston, TX)");
+});
+
+test("a list with both the school and Other picks the school", async () => {
+  riceSetup();
+  const attempts = recordingAttempts();
+  const j = addJob("https://mini-ats.test/apply?school=both");
+  expect(await runJob(deps, j.id)).toBe("submitted");
+  expect(miniAts.submissions[0]).toMatchObject({ school: "Rice University" });
+  expect(picked(attempts, "School")).toEqual(["Rice University"]);
+});
+
+test("a required school with Other but no box to type in keeps Other and says so in the job's reason", async () => {
+  riceSetup();
+  saveSettings(db, { reviewMode: "all" });
+  const j = addJob("https://mini-ats.test/apply?school=nobox");
+  expect(await runJob(deps, j.id)).toBe("ready-to-review");
+  expect(getJob(db, j.id)!.statusReason).toBe('Waiting for your review; Picked Other for School ("Rice University" not listed)');
+  const snap = snapshotRow(j.id)!;
+  const fields = JSON.parse(snap.fields_json) as FieldSpec[];
+  const school = (JSON.parse(snap.resolutions_json) as Resolution[]).find(r => r.fieldId === fields.find(f => f.label === "School")!.id);
+  expect(school).toMatchObject({ status: "filled", answer: { type: "option", option: "Other" }, other: "Rice University" });
+  expect(fields.map(f => f.label)).not.toContain("School (other)");
+});
+
+test("a work-authorization question offering Other never picks it, even when the answer is not listed", async () => {
+  riceSetup();
+  const AUTH = "Are you authorized to work in the US?";
+  const q = createQuestion(db, { canonical: AUTH, kind: "global", isFactual: true });
+  approveAnswer(db, q.id, "Authorized via OPT");
+  llm.on("classify", classifyBy({ ...SCHOOL_CLASS, [AUTH]: { category: "question", canonicalQuestion: AUTH, isFactual: true } }))
+    .on("match", () => ({ matchId: q.id, confidence: "high" }))
+    .on("adapt", () => ({ option: null }));
+  const attempts = recordingAttempts();
+  // Read without its options (like an async select), so the stored answer is typed and the runner recovers.
+  const base = deps.handlers![0]!;
+  deps.handlers = [{ ...base, async readFields(page) {
+    const fields = await miniAtsHandler.readFields(page);
+    for (const f of fields) if (f.label === AUTH) delete f.options;
+    return fields;
+  } }];
+  const j = addJob("https://mini-ats.test/apply?auth=1");
+  expect(await runJob(deps, j.id)).toBe("failed");
+  expect(getJob(db, j.id)!.statusReason).toBe(`Could not fill "${AUTH}": no option matches "Authorized via OPT"`);
+  expect(picked(attempts, AUTH)).toEqual(["Authorized via OPT"]);
+  expect(llm.calls.filter(c => c.name === "variants")).toHaveLength(0);
+  expect(fixtureSubmitCount()).toBe(0);
+});

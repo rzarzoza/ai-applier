@@ -92,9 +92,11 @@ const uniqueTexts = (texts: string[]) => [...new Set(texts.map(t => t.replace(/\
 /**
  * The option texts a choice control offers. A combobox is opened with its typed text cleared, so the whole list shows;
  * when nothing shows until something is typed (a lazy or search-as-you-type list), the first letter of `typed` is typed
- * to load matching options. The control is left closed and empty. Other kinds have no options (empty list).
+ * to load matching options. With `search`, the whole of `typed` is typed instead and the options it surfaces are read
+ * (a search). The control is left closed and empty. Other kinds have no options (empty list); a select or radio group
+ * always gives its whole list.
  */
-export async function readOptions(root: Page | Frame, field: FieldSpec, typed?: string): Promise<string[]> {
+export async function readOptions(root: Page | Frame, field: FieldSpec, typed?: string, search = false): Promise<string[]> {
   const members = all(root, field);
   const el = members.first();
   switch (field.kind) {
@@ -109,6 +111,10 @@ export async function readOptions(root: Page | Frame, field: FieldSpec, typed?: 
       const { input, controls } = await comboboxParts(el);
       try {
         if (input) await input.fill("");
+        if (search && input && typed?.trim()) {
+          await input.pressSequentially(typed.trim());
+          return uniqueTexts(await (await comboboxOptions(root, controls, 3000)).allInnerTexts());
+        }
         let options = await comboboxOptions(root, controls, 1500);
         const hint = typed?.trim().slice(0, 1);
         if (!(await options.count()) && input && hint) {

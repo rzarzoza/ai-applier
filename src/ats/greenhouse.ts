@@ -123,10 +123,10 @@ export const greenhouse: AtsHandler = {
     if (field.kind === "file") await uploadSettled(root, field);
   },
 
-  async readOptions(page, field, typed) {
+  async readOptions(page, field, typed, search) {
     const root = await greenhouse.root(page);
     if (field.kind !== "combobox") return readOptionsField(root, field, typed);
-    return listOptions(root, field, typed);
+    return listOptions(root, field, typed, search);
   },
 
   async readBack(page, field) {
@@ -235,9 +235,10 @@ async function pickOption(root: Page | Frame, field: FieldSpec, answer: FieldAns
 /**
  * The option texts of a react-select, read with its typed text cleared so a static list shows whole. An async search
  * list (school, degree, discipline) may show nothing until something is typed: then the first letter of `typed` is
- * typed and the options it loads are read. Waits for the loading indicator to clear; leaves the select closed and empty.
+ * typed and the options it loads are read. With `search`, the whole of `typed` is typed and the options it surfaces are
+ * read. Waits for the loading indicator to clear; leaves the select closed and empty.
  */
-async function listOptions(root: Page | Frame, field: FieldSpec, typed?: string): Promise<string[]> {
+async function listOptions(root: Page | Frame, field: FieldSpec, typed?: string, search = false): Promise<string[]> {
   const input = byId(root, field);
   const loading = root.locator(".select-shell", { has: input }).locator('[class*="loading"]');
   const read = async (waitMs: number) => {
@@ -252,6 +253,11 @@ async function listOptions(root: Page | Frame, field: FieldSpec, typed?: string)
   try {
     await input.click();
     await input.fill("").catch(() => {});
+    if (search && typed?.trim()) {
+      await input.fill(typed.trim());
+      await new Promise(r => setTimeout(r, 300)); // let an async search start before reading
+      return await read(5000);
+    }
     let texts = await read(2000);
     const hint = typed?.trim().slice(0, 1);
     if (!texts.length && hint) {
