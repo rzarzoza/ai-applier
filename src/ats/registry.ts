@@ -1,7 +1,8 @@
 import { greenhouse } from "./greenhouse.js";
+import { lever } from "./lever.js";
 import type { AtsHandler } from "./types.js";
 
-export const HANDLERS: AtsHandler[] = [greenhouse];
+export const HANDLERS: AtsHandler[] = [greenhouse, lever];
 
 export function detectAts(url: string, handlers: AtsHandler[] = HANDLERS): AtsHandler | null {
   return handlers.find(h => h.matches(url)) ?? null;

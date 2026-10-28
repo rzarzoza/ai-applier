@@ -15,7 +15,7 @@ test("greenhouse matches its board hosts and gh_jid links only", () => {
     "https://boards.greenhouse.io/embed/job_app?token=6866538002",
     "https://careers.withwaymo.com/jobs?gh_jid=8304574",
   ]) expect(detectAts(u)?.name, u).toBe("greenhouse");
-  for (const u of ["https://jobs.lever.co/x/y", "https://evil.com/greenhouse.io/jobs/1", "not a url", ""]) expect(detectAts(u), u).toBeNull();
+  for (const u of ["https://jobs.ashbyhq.com/x/y", "https://evil.com/greenhouse.io/jobs/1", "not a url", ""]) expect(detectAts(u), u).toBeNull();
 });
 
 test("detectAts uses the given handler list", () => {
@@ -33,4 +33,9 @@ test("atsNameFromUrl names the ATS for display", () => {
   expect(atsNameFromUrl("https://wd1.myworkdaysite.com/recruiting/x/y")).toBe("workday");
   expect(atsNameFromUrl("https://careers.example.com/jobs/1")).toBe("other");
   expect(atsNameFromUrl("garbage")).toBe("other");
+});
+
+test("detectAts routes Lever postings on both hosts", () => {
+  expect(detectAts("https://jobs.lever.co/x/y")?.name).toBe("lever");
+  expect(detectAts("https://jobs.eu.lever.co/x/y/apply")?.name).toBe("lever");
 });
