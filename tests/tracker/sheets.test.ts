@@ -40,3 +40,18 @@ test("replaceTab skips addSheet when the tab exists and surfaces API errors", as
   await expect(googleSheetsClient("{}", { fetch: denied as unknown as typeof fetch, token: async () => "t" }).replaceTab("s", "Applications", []))
     .rejects.toThrow(/403.*PERMISSION_DENIED/);
 });
+
+test("a corrupt stored key gives a fixed error with no JSON snippet", async () => {
+  const f = vi.fn();
+  const err = await googleSheetsClient("{not json SECRETBITS", { fetch: f as unknown as typeof fetch }).replaceTab("s", "A", []).catch((e: Error) => e);
+  expect((err as Error).message).toBe("Stored service-account key is unreadable");
+  expect(f).not.toHaveBeenCalled();
+});
+
+test("every request carries a timeout signal", async () => {
+  const signals: unknown[] = [];
+  const f = vi.fn(async (url: string, init?: RequestInit) => { signals.push(init?.signal); return respond(url.includes("?fields=") ? { sheets: [] } : {}); });
+  await googleSheetsClient("{}", { fetch: f as unknown as typeof fetch, token: async () => "t" }).replaceTab("s", "A", []);
+  expect(signals.length).toBe(4);
+  expect(signals.every(s => s instanceof AbortSignal)).toBe(true);
+});

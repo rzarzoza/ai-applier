@@ -6,11 +6,12 @@ const SERVICE = "ai-applier";
 const NOT_FOUND = 44;
 
 /** Runs a command and resolves with stdout. Injectable so tests never touch the real Keychain. */
-export type Runner = (file: string, args: string[]) => Promise<string>;
+export type Runner = (file: string, args: string[], input?: string) => Promise<string>;
 
-const run: Runner = (file, args) =>
+const run: Runner = (file, args, input) =>
   new Promise((resolve, reject) => {
-    execFile(file, args, (err, stdout) => (err ? reject(err) : resolve(stdout)));
+    const child = execFile(file, args, (err, stdout) => (err ? reject(err) : resolve(stdout)));
+    if (input !== undefined) child.stdin?.end(input);
   });
 
 export async function getSecret(name: string, runner: Runner = run): Promise<string | null> {
@@ -23,6 +24,13 @@ export async function getSecret(name: string, runner: Runner = run): Promise<str
   }
 }
 
+/**
+ * Stores the secret without putting it in the process arguments (visible to other users via `ps`, and
+ * echoed in execFile errors): the command goes to `security -i` on stdin instead.
+ */
 export async function setSecret(name: string, value: string, runner: Runner = run): Promise<void> {
-  await runner(SECURITY, ["add-generic-password", "-U", "-s", SERVICE, "-a", name, "-w", value]);
+  if (/[\r\n\0]/.test(value) || /[\r\n\0\s]/.test(name)) throw new Error("The secret cannot contain line breaks");
+  const quote = (v: string) => `"${v.replace(/[\\"]/g, "\\$&")}"`;
+  const command = `add-generic-password -U -s ${SERVICE} -a ${quote(name)} -w ${quote(value)}\n`;
+  await runner(SECURITY, ["-i"], command);
 }

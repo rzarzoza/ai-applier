@@ -17,8 +17,18 @@ test("getSecret rethrows other failures", async () => {
   await expect(getSecret("x", run)).rejects.toThrow("boom");
 });
 
-test("setSecret adds or updates the item", async () => {
+test("setSecret sends the command on stdin, never in argv, with quoting escaped", async () => {
   const run = vi.fn().mockResolvedValue("");
-  await setSecret("anthropic-api-key", "sk-new", run);
-  expect(run).toHaveBeenCalledWith("/usr/bin/security", ["add-generic-password", "-U", "-s", "ai-applier", "-a", "anthropic-api-key", "-w", "sk-new"]);
+  await setSecret("anthropic-api-key", 'sk-"new"\\x', run);
+  const [file, args, input] = run.mock.calls[0]!;
+  expect(file).toBe("/usr/bin/security");
+  expect(args).toEqual(["-i"]);
+  expect(JSON.stringify(args)).not.toContain("sk-");
+  expect(input).toBe('add-generic-password -U -s ai-applier -a "anthropic-api-key" -w "sk-\\"new\\"\\\\x"\n');
+});
+
+test("setSecret rejects values with line breaks without running anything", async () => {
+  const run = vi.fn();
+  await expect(setSecret("x", "a\nb", run)).rejects.toThrow("line breaks");
+  expect(run).not.toHaveBeenCalled();
 });

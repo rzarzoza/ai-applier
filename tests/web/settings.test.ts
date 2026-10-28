@@ -55,6 +55,7 @@ test("POST /settings still saves other settings and shows an error when the Keyc
   const html = await res.text();
   expect(html).toContain("Couldn&#39;t save the API key");
   expect(html).not.toContain("sk-x");
+  expect(html).not.toContain("keychain locked");
   expect(getSettings(db).pollMinutes).toBe(45);
 });
 
@@ -113,7 +114,8 @@ test("service-account key upload rejects bad files and Keychain errors without a
   const r = await app.request("/tracker/key", upload("key", SA));
   expect(r.status).toBe(200);
   const html = await r.text();
-  expect(html).toContain("keychain locked");
+  expect(html).toContain("Couldn&#39;t save the key to the Keychain");
+  expect(html).not.toContain("keychain locked");
   expect(html).not.toContain("SECRETKEY");
 });
 
@@ -140,4 +142,14 @@ test("tracker section shows last sync time and error", async () => {
   const html = await (await app.request("/settings")).text();
   expect(html).toContain("403 PERMISSION_DENIED");
   expect(html).toContain("/tracker.csv");
+});
+
+test("errors from the Keychain that echo the secret never reach the page", async () => {
+  const { app, secrets } = setupApp();
+  secrets.set.mockImplementation(async (_n: string, v: string) => { throw new Error(`Command failed: security add-generic-password -w ${v}`); });
+  const a = await (await app.request("/tracker/key", upload("key", SA))).text();
+  expect(a).not.toContain("SECRETKEY");
+  expect(a).not.toContain("Command failed");
+  const b = await (await app.request("/settings", form({ ...base, apiKey: "sk-topsecret" }))).text();
+  expect(b).not.toContain("sk-topsecret");
 });

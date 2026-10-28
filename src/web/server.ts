@@ -321,9 +321,10 @@ export function createApp(ctx: AppContext): Hono {
     if (key === null || typeof key !== "object" || key.type !== "service_account" || typeof key.client_email !== "string" || typeof key.private_key !== "string")
       return fail("That is not a Google service-account key file.");
     try {
-      await secrets.set(SERVICE_ACCOUNT_SECRET, text);
-    } catch (e) {
-      return fail(`Couldn't save the key to the Keychain: ${e instanceof Error ? e.message.split("\n")[0] : String(e)}`, 200);
+      // Minified: one line, so it can be handed to the Keychain; the private key's \n stay JSON escapes.
+      await secrets.set(SERVICE_ACCOUNT_SECRET, JSON.stringify(key));
+    } catch {
+      return fail("Couldn't save the key to the Keychain.", 200);
     }
     return c.redirect("/settings", 303);
   });
@@ -365,9 +366,8 @@ export function createApp(ctx: AppContext): Hono {
       try {
         await secrets.set(API_KEY_NAME, key);
         ctx.onApiKeySaved?.();
-      } catch (e) {
-        const why = e instanceof Error ? e.message.split("\n")[0] : String(e);
-        return c.html(await settingsPage({ error: `Couldn't save the API key (other settings were saved): ${why}` }));
+      } catch {
+        return c.html(await settingsPage({ error: "Couldn't save the API key to the Keychain (other settings were saved)." }));
       }
     }
     return c.redirect("/settings", 303);

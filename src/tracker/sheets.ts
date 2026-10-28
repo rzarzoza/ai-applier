@@ -6,6 +6,8 @@ export interface SheetsClient {
 }
 
 const SCOPE = "https://www.googleapis.com/auth/spreadsheets";
+const UNREADABLE_KEY = "Stored service-account key is unreadable";
+const TIMEOUT_MS = 30_000;
 const API = "https://sheets.googleapis.com/v4/spreadsheets";
 
 export function spreadsheetIdFromUrl(url: string): string | null {
@@ -22,7 +24,9 @@ export function googleSheetsClient(
 ): SheetsClient {
   const doFetch = deps.fetch ?? fetch;
   const token = deps.token ?? (async () => {
-    const key = JSON.parse(serviceAccountJson) as { client_email: string; private_key: string };
+    let key: { client_email: string; private_key: string };
+    try { key = JSON.parse(serviceAccountJson); } catch { throw new Error(UNREADABLE_KEY); }
+    if (!key || typeof key.client_email !== "string" || typeof key.private_key !== "string") throw new Error(UNREADABLE_KEY);
     const t = (await new JWT({ email: key.client_email, key: key.private_key, scopes: [SCOPE] }).getAccessToken()).token;
     if (!t) throw new Error("Could not get a Google access token");
     return t;
@@ -33,6 +37,7 @@ export function googleSheetsClient(
       method,
       headers: { authorization: `Bearer ${await token()}`, "content-type": "application/json" },
       body: body === undefined ? undefined : JSON.stringify(body),
+      signal: AbortSignal.timeout(TIMEOUT_MS),
     });
     const text = await res.text();
     if (!res.ok) {
