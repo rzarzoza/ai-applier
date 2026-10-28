@@ -1,6 +1,6 @@
 import type { Db } from "../../db/db.js";
 import { DEFAULT_FILTERS, evaluateFilters, getFilters, type FilterRules } from "../../filters/filters.js";
-import { getJson } from "../../settings.js";
+import { getJson, getSettings } from "../../settings.js";
 import type { PollReport } from "../../sources/poller.js";
 import { listJobs } from "../../jobs/repo.js";
 import { listSources } from "../../sources/repo.js";
@@ -54,7 +54,7 @@ export function SourcesPage(props: { db: Db; notice?: string; error?: string }) 
   const reports = getJson<Record<string, { at: string; report: PollReport }>>(props.db, "pollReports", {});
   const preview = previewCount(props.db, rules, now);
   return (
-    <Layout active="sources" inboxCount={inboxCount(props.db)}>
+    <Layout active="sources" inboxCount={inboxCount(props.db)} paused={getSettings(props.db).paused}>
       <h1>Sources &amp; filters</h1>
       {props.notice ? <div class="card saved">{props.notice}</div> : null}
       {props.error ? <div class="note">{props.error}</div> : null}

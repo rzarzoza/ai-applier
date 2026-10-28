@@ -6,7 +6,7 @@ import { inboxCount } from "./inbox.js";
 export function SettingsPage(props: { db: Db; keySet: boolean | null; notice?: string; error?: string }) {
   const s = getSettings(props.db);
   return (
-    <Layout active="settings" inboxCount={inboxCount(props.db)}>
+    <Layout active="settings" inboxCount={inboxCount(props.db)} paused={getSettings(props.db).paused}>
       <h1>Settings</h1>
       {props.notice ? <div class="card saved">{props.notice}</div> : null}
       {props.error ? <div class="note">{props.error}</div> : null}

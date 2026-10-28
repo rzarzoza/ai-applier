@@ -1,3 +1,4 @@
+import { getSettings } from "../../settings.js";
 import type { Db } from "../../db/db.js";
 import { listOpenNeedsYou } from "../../answers/bank.js";
 import { inboxItems, type InboxItem } from "../../answers/inbox.js";
@@ -73,7 +74,7 @@ export function InboxPage(props: { db: Db }) {
   const items = inboxItems(props.db);
   const needs = listOpenNeedsYou(props.db);
   return (
-    <Layout active="inbox" inboxCount={items.length + needs.length}>
+    <Layout active="inbox" inboxCount={items.length + needs.length} paused={getSettings(props.db).paused}>
       <h1>Inbox</h1>
       {items.length === 0 ? <p class="empty">No questions waiting. Nothing is blocked on you.</p> : items.map(item => <QuestionCard item={item} />)}
       <h2>Needs you</h2>

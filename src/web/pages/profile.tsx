@@ -1,3 +1,4 @@
+import { getSettings } from "../../settings.js";
 import type { Db } from "../../db/db.js";
 import { getProfile, type Profile } from "../../profile/profile.js";
 import { Layout } from "../layout.js";
@@ -52,7 +53,7 @@ function Input(props: { field: Field; profile: Profile }) {
 export function ProfilePage(props: { db: Db; notice?: string; error?: string }) {
   const profile = getProfile(props.db);
   return (
-    <Layout active="profile" inboxCount={inboxCount(props.db)}>
+    <Layout active="profile" inboxCount={inboxCount(props.db)} paused={getSettings(props.db).paused}>
       <h1>Profile &amp; resume</h1>
       {props.notice ? <div class="card saved">{props.notice}</div> : null}
       {props.error ? <div class="note">{props.error}</div> : null}

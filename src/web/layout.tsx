@@ -48,7 +48,7 @@ table { width: 100%; border-collapse: collapse; font-size: 14px; } th, td { text
 .row a { color: var(--muted); text-decoration: none; } .row a.active { color: var(--text); font-weight: 600; }
 `;
 
-export function Layout(props: { active: string; inboxCount: number; children?: Child }) {
+export function Layout(props: { active: string; inboxCount: number; paused?: boolean; children?: Child }) {
   return (
     <html lang="en">
       <head>
@@ -67,6 +67,7 @@ export function Layout(props: { active: string; inboxCount: number; children?: C
             </a>
           ))}
         </nav>
+        {props.paused ? <div class="note" role="status">Paused — nothing will be applied. Turn off in Settings when your profile and resume are ready.</div> : null}
         <main>{props.children}</main>
       </body>
     </html>

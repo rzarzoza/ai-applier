@@ -57,3 +57,13 @@ test("POST /settings still saves other settings and shows an error when the Keyc
   expect(html).not.toContain("sk-x");
   expect(getSettings(db).pollMinutes).toBe(45);
 });
+
+test("every dashboard page shows the paused banner only while paused", async () => {
+  const { db, app } = setupApp();
+  const { saveSettings } = await import("../../src/settings.js");
+  saveSettings(db, { paused: true });
+  for (const p of ["/inbox", "/applications", "/bank", "/profile", "/sources", "/settings"])
+    expect(await (await app.request(p)).text()).toContain("Paused — nothing will be applied");
+  saveSettings(db, { paused: false });
+  expect(await (await app.request("/inbox")).text()).not.toContain("Paused — nothing will be applied");
+});

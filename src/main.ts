@@ -9,7 +9,7 @@ import { ClaudeLlm, type Llm } from "./llm/llm.js";
 import { paths, setDataDir } from "./paths.js";
 import { SerialQueue } from "./scheduler.js";
 import { getSecret, setSecret } from "./secrets.js";
-import { getJson, getSettings, setJson } from "./settings.js";
+import { getJson, getSettings, saveSettings, setJson } from "./settings.js";
 import { persistentChromium } from "./runner/browser.js";
 import { macNotify } from "./runner/notify.js";
 import { runJob, runNext, type RunnerDeps } from "./runner/runner.js";
@@ -40,6 +40,8 @@ export async function startApp(opts: StartOptions = {}): Promise<{ url: string; 
   if (opts.dataDir) setDataDir(opts.dataDir);
   mkdirSync(paths.dataDir, { recursive: true });
   const db = openDb(paths.db);
+  // A fresh database starts paused so nothing applies before the profile, resume and filters are set up.
+  if (!db.prepare("SELECT 1 FROM kv WHERE key = 'settings'").get()) saveSettings(db, { paused: true });
   const secrets: Secrets = opts.secrets ?? { get: getSecret, set: setSecret };
 
   // The app talks to the LLM through this wrapper, so a key saved in Settings takes effect without a restart.
@@ -64,8 +66,10 @@ export async function startApp(opts: StartOptions = {}): Promise<{ url: string; 
       return status;
     });
   const runById = (jobId: string, mode: "interactive" | "submit-reviewed") => {
-    runQueued(() => runJob(runnerDeps(), jobId, mode), `${mode} ${getJob(db, jobId)?.company ?? jobId}`)
-      .catch(e => log(`Run of job ${jobId} failed: ${errText(e)}`));
+    queue.run(async () => {
+      const status = await runJob(runnerDeps(), jobId, mode);
+      log(`${mode} ${getJob(db, jobId)?.company ?? jobId}: job finished as ${status}`);
+    }).catch(e => log(`Run of job ${jobId} failed: ${errText(e)}`));
   };
 
   let polling: Promise<void> | null = null;
