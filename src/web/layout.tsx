@@ -98,7 +98,7 @@ h2 { font-size: 16px; font-weight: 600; margin: 0 0 4px; }
 h3 { font-size: 16px; font-weight: 600; margin: 0 0 4px; }
 .section-title { font-size: 16px; font-weight: 600; margin: 28px 0 10px; }
 .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin-bottom: 12px; min-width: 0; }
-.card-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin-bottom: 8px; }
+.card-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 8px 12px; margin-bottom: 8px; }
 .card-head h2 { margin: 0; }
 .card-head .count { color: var(--muted); font-weight: 400; }
 .list-card { padding: 0; overflow: hidden; }

@@ -181,3 +181,37 @@ function requeueUnblocked(db: Db, jobIds: string[]): string[] {
   }
   return requeued;
 }
+
+/** A draft basis that cites the profile or the resume ("profile.usCitizen = true", "resume: Onshape (PTC)..."). */
+const PROFILE_BASIS = /\b(profile|resume)\b/i;
+
+/**
+ * Suggestions taken from the profile or resume that can be approved in bulk: draft questions whose draft has a basis
+ * citing the profile or resume (fact drafts) and that block at least one job still waiting on the user. Drafts the LLM
+ * wrote for open-ended questions have no basis and are never listed: those are reviewed one by one.
+ */
+export function profileSuggestions(db: Db): InboxItem[] {
+  return inboxItems(db).filter(({ question: q }) =>
+    q.status === "draft" && !!q.draft?.trim() && q.draftBasis !== null && PROFILE_BASIS.test(q.draftBasis));
+}
+
+/**
+ * Approves the listed profile-based suggestions (each with the draft the user saw, `drafts[id]`, when given: a draft
+ * that changed since is left alone) through answerQuestion, which requeues the jobs left unblocked. Ids that are not
+ * (or no longer) profile-based suggestions are ignored. Returns the approved question ids and the requeued job ids.
+ */
+export function approveProfileSuggestions(db: Db, ids: readonly number[], drafts: Readonly<Record<number, string>> = {}):
+  { approved: number[]; requeued: string[] } {
+  const eligible = new Map(profileSuggestions(db).map(i => [i.question.id, i.question]));
+  const approved: number[] = [];
+  const requeued: string[] = [];
+  for (const id of new Set(ids)) {
+    const q = eligible.get(id);
+    // Browsers send line breaks of form values as CRLF.
+    const eol = (t: string) => t.replace(/\r\n?/g, "\n");
+    if (!q || (id in drafts && eol(drafts[id]!) !== eol(q.draft!))) continue;
+    requeued.push(...answerQuestion(db, id, q.draft!).requeued);
+    approved.push(id);
+  }
+  return { approved, requeued: [...new Set(requeued)] };
+}

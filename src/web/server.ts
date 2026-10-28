@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSyn
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Hono } from "hono";
-import { answerFromInbox, answerQuestion, canDoItNow, canHandFinish, deleteQuestionAndRequeue, recheckBlockedJobs, requeueWaitingForResume } from "../answers/inbox.js";
+import { answerFromInbox, answerQuestion, approveProfileSuggestions, canDoItNow, canHandFinish, deleteQuestionAndRequeue, recheckBlockedJobs, requeueWaitingForResume } from "../answers/inbox.js";
 import { getQuestion, listQuestions, approveAnswer, resolveNeedsYouForJob, setDraft, setOverride } from "../answers/bank.js";
 import { reviseDraft } from "../answers/draft.js";
 import type { Db } from "../db/db.js";
@@ -27,7 +27,7 @@ import { BankPage } from "./pages/bank.js";
 import { PROFILE_FIELDS, ProfilePage } from "./pages/profile.js";
 import { SettingsPage } from "./pages/settings.js";
 import { PreviewFragment, SourcesPage, parseFilterForm, previewCount } from "./pages/sources.js";
-import { CardFragment, InboxPage, OpeningBrowser, OpeningHandFinish, SavedNotice } from "./pages/inbox.js";
+import { ApproveSuggestionsPage, CardFragment, InboxPage, OpeningBrowser, OpeningHandFinish, SavedNotice } from "./pages/inbox.js";
 import { HomeLists, HomePage, NowCard } from "./pages/home.js";
 
 export interface AppContext {
@@ -112,9 +112,30 @@ export function createApp(ctx: AppContext): Hono {
     ctx.runHandFinish(jobId);
     return c.html(OpeningHandFinish());
   });
+  const count = (v: string | undefined) => (v !== undefined && /^\d+$/.test(v) ? Number(v) : undefined);
   app.get("/inbox", c => {
-    const rechecked = c.req.query("rechecked");
-    return c.html(InboxPage({ db, rechecked: rechecked !== undefined && /^\d+$/.test(rechecked) ? Number(rechecked) : undefined }));
+    const approved = count(c.req.query("approved"));
+    return c.html(InboxPage({
+      db, rechecked: count(c.req.query("rechecked")),
+      approved: approved === undefined ? undefined : { questions: approved, requeued: count(c.req.query("requeued")) ?? 0 },
+    }));
+  });
+
+  app.get("/inbox/approve-suggestions", c => c.html(ApproveSuggestionsPage({ db })));
+
+  app.post("/inbox/approve-suggestions", async c => {
+    const form = await c.req.parseBody({ all: true });
+    const raw = form.q;
+    const ids = (Array.isArray(raw) ? raw : raw === undefined ? [] : [raw])
+      .filter((v): v is string => typeof v === "string" && /^\d+$/.test(v)).map(Number);
+    if (!ids.length) return c.html(ApproveSuggestionsPage({ db, error: "Nothing was ticked, so nothing was approved." }));
+    const drafts: Record<number, string> = {};
+    for (const id of ids) {
+      const d = form[`d:${id}`];
+      if (typeof d === "string") drafts[id] = d;
+    }
+    const { approved, requeued } = approveProfileSuggestions(db, ids, drafts);
+    return c.redirect(`/inbox?approved=${approved.length}&requeued=${requeued.length}`, 303);
   });
 
   app.post("/inbox/recheck", c => {

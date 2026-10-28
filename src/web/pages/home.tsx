@@ -1,4 +1,4 @@
-import { canDoItNow, canHandFinish } from "../../answers/inbox.js";
+import { canDoItNow, canHandFinish, profileSuggestions } from "../../answers/inbox.js";
 import type { Db } from "../../db/db.js";
 import { countByStatus, getJob, isUnknownSubmission, recentWithStatus, upNext } from "../../jobs/repo.js";
 import type { Job, JobStatus } from "../../jobs/types.js";
@@ -6,7 +6,7 @@ import { getRunnerCurrent, STEPS, type RunnerCurrent } from "../../runner/curren
 import { getSettings } from "../../settings.js";
 import { Layout, pauseProps } from "../layout.js";
 import { ago, Avatar, Chip, elapsed, Icon, jobLocation, PageHead, shortDate } from "../ui.js";
-import { inboxCount } from "./inbox.js";
+import { ApproveSuggestionsButton, inboxCount } from "./inbox.js";
 
 const UP_NEXT = 15;
 const RECENT = 10;
@@ -114,11 +114,13 @@ function NeedsAction(props: { db: Db; job: Job; running: boolean; requested: boo
   return <a class="btn" href={`/applications/${job.id}`}>{isUnknownSubmission(job) ? "Check" : "Open"}</a>;
 }
 
-function ListCard(props: { title: string; count: number; empty: string; compact?: boolean; footer?: { href: string; label: string }; children?: unknown }) {
+function ListCard(props: {
+  title: string; count: number; empty: string; compact?: boolean; footer?: { href: string; label: string }; action?: unknown; children?: unknown;
+}) {
   const items = props.children as unknown[];
   return (
     <section class={`card list-card${props.compact ? " compact" : ""}`}>
-      <div class="card-head"><h2>{props.title} <span class="count">· {props.count}</span></h2></div>
+      <div class="card-head"><h2>{props.title} <span class="count">· {props.count}</span></h2>{(props.action ?? null) as never}</div>
       {props.count === 0 ? <p class="empty">{props.empty}</p> : <div class="jrows">{items as never}</div>}
       {props.footer && props.count > 0 ? <div class="card-foot"><a href={props.footer.href}>{props.footer.label}</a></div> : null}
     </section>
@@ -145,6 +147,7 @@ export function HomeLists(props: HomeProps) {
       <div class="grid-2">
         <div>
           <ListCard title="Needs your input" count={counts["needs-you"] + (needsRows.length > needs.length ? 1 : 0)}
+            action={<ApproveSuggestionsButton count={profileSuggestions(db).length} />}
             empty="Nothing needs you right now." footer={counts["needs-you"] > LIST_MAX ? { href: "/applications?status=needs-you", label: "View all" } : undefined}>
             {needsRows.map(j => (
               <div class="jrow" id={`needs-row-${j.id}`}>

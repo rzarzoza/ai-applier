@@ -1,7 +1,7 @@
 import { raw } from "hono/html";
 import type { Db } from "../../db/db.js";
 import { listOpenNeedsYou, type Question } from "../../answers/bank.js";
-import { blockerOptions, canDoItNow, canHandFinish, inboxItems, type BlockedJob, type InboxItem } from "../../answers/inbox.js";
+import { blockerOptions, canDoItNow, canHandFinish, inboxItems, profileSuggestions, type BlockedJob, type InboxItem } from "../../answers/inbox.js";
 import type { FieldKind } from "../../forms/types.js";
 import { getJob } from "../../jobs/repo.js";
 import { Alert, Layout, pauseProps } from "../layout.js";
@@ -11,6 +11,13 @@ const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one :
 
 export function inboxCount(db: Db): number {
   return inboxItems(db).length + listOpenNeedsYou(db).length;
+}
+
+/** The primary "Approve all N profile-based suggestions" button (to the confirmation list), or nothing when there are none. */
+export function ApproveSuggestionsButton(props: { count: number }) {
+  if (props.count <= 0) return null;
+  const label = props.count === 1 ? "Approve 1 profile-based suggestion" : `Approve all ${props.count} profile-based suggestions`;
+  return <a class="btn btn-primary" href="/inbox/approve-suggestions">{label}</a>;
 }
 
 export function SavedNotice(props: { requeued: number }) {
@@ -145,19 +152,26 @@ export function QuestionCard(props: { item: InboxItem; error?: string }) {
   );
 }
 
-export function InboxPage(props: { db: Db; rechecked?: number }) {
+export function InboxPage(props: { db: Db; rechecked?: number; approved?: { questions: number; requeued: number } }) {
   const items = inboxItems(props.db);
   const needs = listOpenNeedsYou(props.db);
+  const suggestions = profileSuggestions(props.db).length;
   return (
     <Layout active="inbox" inboxCount={items.length + needs.length} {...pauseProps(props.db)} title="Inbox">
       <PageHead title="Inbox" subtitle="Questions only you can answer, and steps only you can take."
         actions={items.length > 0 ? (
-          <form method="post" action="/inbox/recheck">
-            <button type="submit">Re-check with my profile</button>
-          </form>
+          <>
+            <ApproveSuggestionsButton count={suggestions} />
+            <form method="post" action="/inbox/recheck">
+              <button type="submit">Re-check with my profile</button>
+            </form>
+          </>
         ) : undefined} />
       {props.rechecked !== undefined
         ? <Alert kind="success">Re-checking {plural(props.rechecked, "job", "jobs")} with your profile and resume · queued to run again</Alert>
+        : null}
+      {props.approved
+        ? <Alert kind="success">Approved {plural(props.approved.questions, "suggestion", "suggestions")} · {plural(props.approved.requeued, "job", "jobs")} re-queued</Alert>
         : null}
       {items.length > 0
         ? <p class="meta">Re-check runs the blocked jobs again so answers your profile or resume now gives are suggested for approval.</p>
@@ -205,4 +219,52 @@ export function OpeningBrowser() {
 
 export function OpeningHandFinish() {
   return <span class="working">Opening the application in a browser window…</span>;
+}
+
+/**
+ * The confirmation list for approving profile-based suggestions in bulk: per question its canonical text, the exact
+ * wording of every form it blocks, the suggested answer and what it is based on, each with a box (ticked) to leave it out.
+ */
+export function ApproveSuggestionsPage(props: { db: Db; error?: string }) {
+  const items = profileSuggestions(props.db);
+  return (
+    <Layout active="inbox" inboxCount={inboxCount(props.db)} {...pauseProps(props.db)} title="Approve suggestions">
+      <PageHead title="Approve profile-based suggestions"
+        subtitle="Answers taken from your profile or resume. Untick any you want to review one by one; written answers are never approved here." />
+      {props.error ? <Alert kind="warning">{props.error}</Alert> : null}
+      {items.length === 0 ? (
+        <div class="card">
+          <p class="empty">No profile-based suggestions are waiting.</p>
+          <div class="row"><a class="btn" href="/inbox">Back to Inbox</a></div>
+        </div>
+      ) : (
+        <form method="post" action="/inbox/approve-suggestions">
+          {items.map(({ question: q, jobs }) => (
+            <div class="card" id={`s-${q.id}`}>
+              <label class="check">
+                <input type="checkbox" name="q" value={String(q.id)} checked />
+                <h3>{q.canonical}</h3>
+              </label>
+              <input type="hidden" name={`d:${q.id}`} value={q.draft ?? ""} />
+              <div class="meta">Suggested answer:</div>
+              <div class="draft">{q.draft}</div>
+              <div class="meta">Based on: {q.draftBasis}</div>
+              {jobs.map(j => (
+                <div class="blocked">
+                  <div class="meta"><strong>{j.company}</strong> · {j.title}</div>
+                  {j.label
+                    ? <blockquote class="field-label">{j.label}</blockquote>
+                    : <div class="meta">The form's exact wording wasn't recorded for this job.</div>}
+                </div>
+              ))}
+            </div>
+          ))}
+          <div class="form-foot">
+            <a class="btn btn-tertiary" href="/inbox">Cancel</a>
+            <button class="primary" type="submit">Approve all</button>
+          </div>
+        </form>
+      )}
+    </Layout>
+  );
 }

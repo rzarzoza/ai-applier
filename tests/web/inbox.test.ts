@@ -297,3 +297,98 @@ test("the dashboard's own Re-check form passes the host and origin guard", async
   expect((await app.request(req("http://127.0.0.1:4310"))).status).toBe(303);
   expect(getJob(db, j.id)!.status).toBe("queued");
 });
+
+/** Two fact drafts from the profile/resume and one open-ended LLM draft, each blocking needs-you jobs with their form wording. */
+function suggestions() {
+  const s = setup();
+  const { db, mk } = s;
+  const citizen = createQuestion(db, { canonical: "Are you a U.S. citizen?", kind: "global", isFactual: true, draft: "Yes", draftBasis: "profile.usCitizen = true" });
+  const school = createQuestion(db, { canonical: "School enrolled in", kind: "global", isFactual: true, draft: "Rice University", draftBasis: "resume: Rice University, B.S. Computer Science" });
+  const why = createQuestion(db, { canonical: "Why {company}?", kind: "template", isFactual: false, draft: "Because I love it" });
+  const a = mk(1), b = mk(2), c = mk(3);
+  addBlocker(db, a.id, citizen.id, "approval", { label: "Are you a citizen of the United States?", kind: "radio", options: ["Yes", "No"] });
+  addBlocker(db, b.id, citizen.id, "approval", { label: "U.S. citizenship status", kind: "select", options: ["Yes", "No"] });
+  addBlocker(db, b.id, school.id, "approval", { label: "Which institution do you attend?", kind: "text" });
+  addBlocker(db, c.id, why.id, "approval", { label: "Why do you want to work at Co3?", kind: "textarea" });
+  // A fact draft blocking no needs-you job is not counted.
+  const idle = createQuestion(db, { canonical: "Graduation year", kind: "global", isFactual: true, draft: "2027", draftBasis: "profile.graduationYear = 2027" });
+  const done = upsertPosting(db, p(4)).job;
+  setStatus(db, done.id, "submitted");
+  addBlocker(db, done.id, idle.id, "approval");
+  return { ...s, citizen, school, why, idle, a, b, c };
+}
+
+test("the Inbox and Home offer to approve only the profile-based suggestions blocking jobs", async () => {
+  const { app } = suggestions();
+  const inbox = await (await app.request("/inbox")).text();
+  expect(inbox).toContain("Approve all 2 profile-based suggestions");
+  expect(inbox).toContain('href="/inbox/approve-suggestions"');
+  const home = await (await app.request("/")).text();
+  expect(home).toContain("Approve all 2 profile-based suggestions");
+});
+
+test("no button without profile-based suggestions", async () => {
+  const { db, app, mk } = setup();
+  const why = createQuestion(db, { canonical: "Why us?", kind: "template", isFactual: false, draft: "Because" });
+  addBlocker(db, mk(1).id, why.id, "approval");
+  expect(await (await app.request("/inbox")).text()).not.toContain("profile-based suggestion");
+  expect(await (await app.request("/")).text()).not.toContain("profile-based suggestion");
+});
+
+test("the confirmation list shows each fact draft with the forms' exact wording, answer and basis — never an LLM-written draft", async () => {
+  const { app, citizen, school, why, idle } = suggestions();
+  const html = await (await app.request("/inbox/approve-suggestions")).text();
+  expect(html).toContain("Are you a U.S. citizen?");
+  expect(html).toContain("Are you a citizen of the United States?");
+  expect(html).toContain("U.S. citizenship status");
+  expect(html).toContain("profile.usCitizen = true");
+  expect(html).toContain("Which institution do you attend?");
+  expect(html).toContain("Rice University");
+  expect(html).toContain("resume: Rice University, B.S. Computer Science");
+  expect(html).toContain(`name="q" value="${citizen.id}" checked`);
+  expect(html).toContain(`name="q" value="${school.id}" checked`);
+  expect(html).not.toContain(`value="${why.id}"`);
+  expect(html).not.toContain("Because I love it");
+  expect(html).not.toContain(`value="${idle.id}"`);
+  expect(html).toContain("Approve all");
+});
+
+test("approving all checked suggestions approves only those, requeues their jobs and leaves unchecked rows untouched", async () => {
+  const { db, app, citizen, school, why, a, b, c } = suggestions();
+  const body = new URLSearchParams([["q", String(citizen.id)], [`d:${citizen.id}`, "Yes"]]);
+  const res = await app.request("/inbox/approve-suggestions", { method: "POST", body, headers: { "content-type": "application/x-www-form-urlencoded" } });
+  expect(res.status).toBe(303);
+  expect(res.headers.get("location")).toBe("/inbox?approved=1&requeued=1");
+  expect(getQuestion(db, citizen.id)).toMatchObject({ status: "approved", answer: "Yes" });
+  // Unchecked: still a draft, still blocking its job.
+  expect(getQuestion(db, school.id)).toMatchObject({ status: "draft", answer: null, draft: "Rice University" });
+  expect(blockersForJob(db, b.id)).toEqual([{ questionId: school.id, reason: "approval" }]);
+  expect(getJob(db, a.id)!.status).toBe("queued");
+  expect(getJob(db, b.id)!.status).toBe("needs-you");
+  // The LLM-written draft is never approved, even when posted.
+  await app.request("/inbox/approve-suggestions", form({ q: String(why.id) }));
+  expect(getQuestion(db, why.id)).toMatchObject({ status: "draft", answer: null });
+  expect(getJob(db, c.id)!.status).toBe("needs-you");
+  expect(await (await app.request("/inbox?approved=1&requeued=1")).text()).toContain("Approved 1 suggestion · 1 job re-queued");
+});
+
+test("approving both suggestions requeues every job they blocked; a draft changed since the list was shown is left alone", async () => {
+  const { db, app, citizen, school, a, b } = suggestions();
+  const body = new URLSearchParams([["q", String(citizen.id)], ["q", String(school.id)], [`d:${citizen.id}`, "Yes"], [`d:${school.id}`, "Rice University"]]);
+  const res = await app.request("/inbox/approve-suggestions", { method: "POST", body, headers: { "content-type": "application/x-www-form-urlencoded" } });
+  expect(res.headers.get("location")).toBe("/inbox?approved=2&requeued=2");
+  expect(getJob(db, a.id)!.status).toBe("queued");
+  expect(getJob(db, b.id)!.status).toBe("queued");
+
+  const s = suggestions();
+  const stale = new URLSearchParams([["q", String(s.school.id)], [`d:${s.school.id}`, "Old text"]]);
+  await s.app.request("/inbox/approve-suggestions", { method: "POST", body: stale, headers: { "content-type": "application/x-www-form-urlencoded" } });
+  expect(getQuestion(s.db, s.school.id)!.status).toBe("draft");
+});
+
+test("posting with nothing ticked approves nothing", async () => {
+  const { db, app, citizen } = suggestions();
+  const res = await app.request("/inbox/approve-suggestions", form({}));
+  expect(await res.text()).toContain("Nothing was ticked");
+  expect(getQuestion(db, citizen.id)!.status).toBe("draft");
+});
