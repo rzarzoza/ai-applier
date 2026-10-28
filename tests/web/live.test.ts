@@ -186,3 +186,19 @@ test("Home and the Inbox send needs-you jobs to the live panel and mark the ones
   await s.live.close(j.id);
   expect(await (await app.request("/home/lists")).text()).not.toContain("Open in app");
 });
+
+test("a failed rebuild shows why with a Retry button, and the status endpoint reports it", async () => {
+  const j = s.addJob("https://mini-ats.test/blocked");
+  s.markNeedsYou(j);
+  const res = await app.request(`/live/${j.id}/rebuild`, { method: "POST" });
+  expect(await res.text()).toContain("Rebuilding your application…");
+  expect(await (await app.request(`/live/${j.id}/status`)).json()).toMatchObject({ kind: "rebuilding", elapsedMs: expect.any(Number) });
+  await until(() => !s.live.rebuildState(j.id).rebuilding);
+  expect(await (await app.request(`/live/${j.id}/status`)).json()).toEqual({ kind: "error", error: expect.stringMatching(/Blocked/) });
+  const panel = await (await app.request(`/live/${j.id}/panel`)).text();
+  expect(panel).toContain("open the application here.");
+  expect(panel).toMatch(/Blocked/);
+  expect(panel).toMatch(/hx-post="\/live\/[^"]+\/rebuild"[^>]*>\s*Retry\s*</);
+  expect(panel).not.toContain("hx-trigger=\"every 2s\"");
+  expect((await app.request("/live/nope/status")).status).toBe(404);
+});

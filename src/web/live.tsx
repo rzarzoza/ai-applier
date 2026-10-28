@@ -9,7 +9,7 @@ import type { LiveEvent, LiveInput } from "../runner/live.js";
 export interface LiveControl {
   isParked(jobId: string): boolean;
   parkedIds(): string[];
-  rebuildState(jobId: string): { rebuilding: boolean; error: string | null };
+  rebuildState(jobId: string): { rebuilding: boolean; error: string | null; startedAt?: number | null };
   rebuild(jobId: string): void;
   info(jobId: string): Promise<{ url: string; title: string } | null>;
   subscribe(jobId: string, send: (e: LiveEvent) => void): (() => void) | null;
@@ -68,7 +68,8 @@ export function LivePanel(props: { job: Job; state: PanelState }) {
         {head}
         {waiting ? (
           <div class="live-wait"><span class="spinner" aria-hidden="true"></span><div><strong>Rebuilding your application…</strong>
-            <div class="meta">Opening the form again and filling in everything you've given it. This takes about half a minute.</div></div></div>
+            <div class="meta">Opening the form again in its own tab and filling in everything you've given it. This usually takes under a
+              minute; if it isn't done after 90 seconds it is stopped and you can retry.</div></div></div>
         ) : state.kind === "opening" ? (
           <div class="live-wait"><span class="spinner" aria-hidden="true"></span><div><strong>Opening the application in a browser window…</strong></div></div>
         ) : (
@@ -79,7 +80,7 @@ export function LivePanel(props: { job: Job; state: PanelState }) {
                 : <><strong>The application isn't open.</strong><div class="meta">Open it here to finish it in the app.</div></>}
             </div>
             <button class="primary" hx-post={`/live/${id}/rebuild`} hx-target="#live-panel" hx-swap="outerHTML">
-              {state.kind === "error" ? "Try again" : "Open here"}
+              {state.kind === "error" ? "Retry" : "Open here"}
             </button>
           </div>
         )}
@@ -153,6 +154,16 @@ export function liveRoutes(app: Hono, ctx: { db: Db; live: LiveControl; requeste
       return c.text(...bad);
     }
     return c.html(await panelHtml(db, live, id, { start: false, requested: requested() }));
+  });
+
+  /** The panel's state as JSON: parked, rebuilding (with how long so far), opening, error (with why), start or closed. */
+  app.get("/live/:id/status", async c => {
+    const id = c.req.param("id");
+    const bad = check(id);
+    if (bad) return c.json({ kind: "unavailable", error: bad[0] }, bad[1]);
+    const state = await panelState(live, id, { start: false, requested: requested() });
+    const startedAt = state.kind === "rebuilding" ? live.rebuildState(id).startedAt ?? null : null;
+    return c.json({ ...state, ...(startedAt ? { elapsedMs: Date.now() - startedAt } : {}) });
   });
 
   app.post("/live/:id/rebuild", async c => {

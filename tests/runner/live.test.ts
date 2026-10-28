@@ -7,7 +7,9 @@ import { getJob, setStatus } from "../../src/jobs/repo.js";
 import { saveSettings } from "../../src/settings.js";
 import type { AtsHandler } from "../../src/ats/types.js";
 import { listRecords } from "../../src/runner/records.js";
-import { runJob } from "../../src/runner/runner.js";
+import { JOB_BUSY, runJob } from "../../src/runner/runner.js";
+import { LiveService } from "../../src/runner/live.js";
+import { JobLocks } from "../../src/scheduler.js";
 import { canOpenLive } from "../../src/jobs/repo.js";
 import { center, launchBrowser, liveSetup, until } from "../helpers/live-setup.js";
 import { fixtureSubmitCount, miniAts, miniAtsHandler } from "../helpers/mini-ats-handler.js";
@@ -190,4 +192,55 @@ test("a hand-finish wait that ends without a submission parks the page for the l
   expect(getJob(s.db, j.id)!.statusReason).toBe("Closed before submitting");
   expect(s.manager.isParked(j.id)).toBe(true);
   expect(await parkedPage(j.id).locator("#first").inputValue()).toBe("Luis");
+});
+
+test("a rebuild stuck on the page (an await that never resolves) is stopped after the time limit and reported, never left spinning", async () => {
+  const j = s.addJob();
+  s.markNeedsYou(j);
+  // page.evaluate has no timeout of its own: a page that never answers would hold the run forever.
+  const stuck: AtsHandler = { ...miniAtsHandler, async open(page) { await page.evaluate(() => new Promise(() => {})); return { ok: true }; } };
+  const locks = new JobLocks();
+  const deps = { ...s.deps, handlers: [stuck], locks };
+  const live = new LiveService({ db: s.db, manager: s.manager, rebuildTimeoutMs: 400, runRebuild: (id, signal) => runJob(deps, id, "rebuild", { signal }).then(() => {}) });
+  try {
+    live.rebuild(j.id);
+    expect(live.rebuildState(j.id)).toMatchObject({ rebuilding: true, startedAt: expect.any(Number) });
+    await until(() => !live.rebuildState(j.id).rebuilding, 5_000);
+    expect(live.rebuildState(j.id).error).toMatch(/took over 0 seconds and was stopped/);
+    // The stuck run was stopped too: its tab closed, nothing parked, the job untouched and free for the next run.
+    await until(() => !locks.isHeld(j.id), 5_000);
+    expect(s.pages.at(-1)!.isClosed()).toBe(true);
+    expect(s.manager.isParked(j.id)).toBe(false);
+    expect(getJob(s.db, j.id)!.status).toBe("needs-you");
+    // Retry works once the page answers again.
+    deps.handlers = [miniAtsHandler];
+    live.rebuild(j.id);
+    await until(() => s.manager.isParked(j.id) && !live.rebuildState(j.id).rebuilding);
+    expect(live.rebuildState(j.id).error).toBeNull();
+  } finally {
+    await live.stop();
+  }
+});
+
+test("never two runs on one job: a rebuild of a job another run holds fails at once; other runs wait for a rebuild", async () => {
+  const j = s.addJob();
+  s.markNeedsYou(j);
+  const locks = new JobLocks();
+  const deps = { ...s.deps, locks };
+  const release = locks.tryAcquire(j.id)!;
+  await expect(runJob(deps, j.id, "rebuild")).rejects.toThrow(JOB_BUSY);
+  release();
+  let gate!: () => void;
+  const slow: AtsHandler = { ...miniAtsHandler, async open(page, url) { await new Promise<void>(r => { gate = r; }); return miniAtsHandler.open(page, url); } };
+  const rebuilding = runJob({ ...deps, handlers: [slow] }, j.id, "rebuild");
+  await until(() => !!gate);
+  let handDone = false;
+  const hand = runJob({ ...deps, handFinishWaitMs: 200 }, j.id, "hand-finish").then(st => { handDone = true; return st; });
+  await new Promise(r => setTimeout(r, 200));
+  expect(handDone).toBe(false);
+  expect(s.pages).toHaveLength(1); // the hand-finish has not opened anything yet
+  gate();
+  await rebuilding;
+  expect(await hand).toBe("needs-you");
+  expect(locks.isHeld(j.id)).toBe(false);
 });

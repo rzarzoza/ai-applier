@@ -62,7 +62,7 @@ export function liveSetup(browser: Browser, opts: { cap?: number } = {}) {
   };
   const live = new LiveService({
     db, manager, pollMs: 50, onSubmitted: id => { submitted.push(id); },
-    runRebuild: async id => { await runJob(deps, id, "rebuild"); },
+    runRebuild: async (id, signal) => { await runJob(deps, id, "rebuild", { signal }); },
   });
   let seq = 0;
   const addJob = (url = "https://mini-ats.test/apply"): Job => {

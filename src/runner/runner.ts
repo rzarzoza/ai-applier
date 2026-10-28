@@ -23,6 +23,7 @@ import { getFilters } from "../filters/filters.js";
 import { getProfile } from "../profile/profile.js";
 import { getSettings, haltRunner, type Settings } from "../settings.js";
 import { recheckQueued } from "../sources/poller.js";
+import type { JobLocks } from "../scheduler.js";
 import type { BrowserProvider, BrowserSession, WatchField } from "./browser.js";
 import { clearRunnerCurrent, getRunnerCurrent, setRunnerCurrent, STEPS, type RunnerCurrent, type RunnerStep } from "./current.js";
 import { getSnapshot, saveRecord, saveSnapshot, type Snapshot } from "./records.js";
@@ -45,7 +46,18 @@ export interface RunnerDeps {
   onSubmitted?(jobId: string): void;
   /** Whether an Anthropic API key is available; when it says no, `runNext` pauses instead of taking a job. */
   hasApiKey?(): Promise<boolean>;
+  /** Keeps two runs off the same job (a rebuild runs beside the queue's run). Without it, the caller keeps them apart. */
+  locks?: JobLocks;
 }
+
+/** What a run may be told while it runs. */
+export interface RunOptions {
+  /** Aborting stops the run: its page is closed (so whatever it awaits on the page fails) and nothing is parked. */
+  signal?: AbortSignal;
+}
+
+/** Why a rebuild did not start: another run (Open & finish, Do it now, Submit...) has the job right now. */
+export const JOB_BUSY = "This application is being worked on in another run — try again once it's done";
 
 /** A problem outside the job (the browser can't start) that would fail every job the same way. */
 class SetupError extends Error {}
@@ -120,8 +132,23 @@ const couldNotFill = (f: { field: FieldSpec; reason?: string }) =>
  * that canHandFinish allows, and leaves the submitting to the user (see awaitHandFinish below).
  * While it runs, the job and its current step are kept in kv `runnerCurrent` for the dashboard.
  */
-export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "auto"): Promise<JobStatus> {
+export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "auto", opts: RunOptions = {}): Promise<JobStatus> {
+  const locks = deps.locks;
+  if (!locks) return runLocked(deps, jobId, mode, opts);
+  // A rebuild never waits: the job is someone else's right now. Any other run waits for a rebuild of its job to end.
+  const release = mode === "rebuild" ? locks.tryAcquire(jobId) : await locks.acquire(jobId);
+  if (!release) throw new Error(JOB_BUSY);
+  try {
+    return await runLocked(deps, jobId, mode, opts);
+  } finally {
+    release();
+  }
+}
+
+/** runJob, holding the job's lock. */
+async function runLocked(deps: RunnerDeps, jobId: string, mode: RunMode, opts: RunOptions): Promise<JobStatus> {
   const { db } = deps;
+  const { signal } = opts;
   const job = getJob(db, jobId);
   if (!job) throw new Error(`No job with id ${jobId}`);
   if (FINAL.has(job.status)) return job.status;
@@ -235,14 +262,19 @@ export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "a
     return end("needs-you", reason);
   };
 
+  const onAbort = () => { void session?.page.close().catch(() => {}); };
+
   try {
     step("Opening application");
     const settings = getSettings(db);
+    signal?.throwIfAborted();
     try {
       session = await deps.browser.open({ front });
     } catch (err) {
       throw new SetupError(`The browser could not start: ${errorMessage(err)}`);
     }
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) onAbort();
     const { page } = session;
     let ctx: JobContext | null = null;
     /** "Please specify" boxes held back from the round they were first seen in (see the loop below). */
@@ -686,10 +718,11 @@ export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "a
     if (outcome.kind === "submitted") return await endSubmitted(session.page);
     return await endUnknown(errorMessage(err));
   } finally {
+    signal?.removeEventListener("abort", onAbort);
     // A job left waiting on the user keeps its page open for the dashboard's live view (when the browser can keep it).
     let kept = false;
     const now = getJob(db, job.id);
-    if (session?.park && !session.page.isClosed() && now && canOpenLive(now) && (!rebuild || rebuilt)) {
+    if (session?.park && !signal?.aborted && !session.page.isClosed() && now && canOpenLive(now) && (!rebuild || rebuilt)) {
       try {
         kept = session.park(job.id, { handler, fields: [...fields], resolutions: [...resolutions], watch: watchList(), notes: [...notes] });
       } catch { kept = false; }

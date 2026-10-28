@@ -29,8 +29,13 @@ export interface LiveDeps {
   manager: SessionManager;
   /** Called after a submission made in the live view was recorded (e.g. to sync the tracker). */
   onSubmitted?(jobId: string): void;
-  /** Starts a rebuild of the job's page through the run queue; resolves once the run ended. */
-  runRebuild(jobId: string): Promise<void>;
+  /**
+   * Runs a rebuild of the job's page (on its own tab, beside whatever the run queue is doing); resolves once the run
+   * ended. Aborting `signal` must stop it (see RunOptions).
+   */
+  runRebuild(jobId: string, signal: AbortSignal): Promise<void>;
+  /** How long a rebuild may take before it is stopped and reported as timed out. Default 90 s. */
+  rebuildTimeoutMs?: number;
   /** How often a viewed page's fields are saved and its outcome checked. Default 3s. */
   pollMs?: number;
   /** How long after the last input a page is still watched with nobody viewing it. Default 2 minutes. */
@@ -40,6 +45,7 @@ export interface LiveDeps {
 }
 
 const POLL_MS = 3_000;
+export const REBUILD_TIMEOUT_MS = 90_000;
 const IDLE_MS = 120_000;
 const MAX_WIDTH = 1280;
 const BUTTONS = new Set(["left", "right", "middle"]);
@@ -62,7 +68,7 @@ export class LiveService {
   private readonly watchers = new Map<string, { timer: ReturnType<typeof setTimeout> | null; lastInput: number; busy: Promise<void> | null }>();
   private readonly captured = new Map<string, { values: Captured; saved: Map<string, string> }>();
   private readonly inputs = new Map<string, Promise<void>>();
-  private readonly rebuilding = new Map<string, Promise<void>>();
+  private readonly rebuilding = new Map<string, { run: Promise<void>; startedAt: number; abort: AbortController }>();
   private readonly rebuildErrors = new Map<string, string>();
   private readonly offChange: () => void;
   private stopped = false;
@@ -82,26 +88,44 @@ export class LiveService {
     return this.deps.manager.parkedIds();
   }
 
-  /** Whether a rebuild of the job is queued or running, and why the last one failed (cleared by the next). */
-  rebuildState(jobId: string): { rebuilding: boolean; error: string | null } {
-    return { rebuilding: this.rebuilding.has(jobId), error: this.rebuildErrors.get(jobId) ?? null };
+  /**
+   * Whether a rebuild of the job is running (and since when), and why the last one failed (cleared by the next).
+   */
+  rebuildState(jobId: string): { rebuilding: boolean; error: string | null; startedAt: number | null } {
+    const r = this.rebuilding.get(jobId);
+    return { rebuilding: !!r, error: this.rebuildErrors.get(jobId) ?? null, startedAt: r?.startedAt ?? null };
   }
 
-  /** Opens the job's form again in the background and parks it (no-op while it is parked or already rebuilding). */
+  /**
+   * Opens the job's form again in the background and parks it (no-op while it is parked or already rebuilding). It runs
+   * right away, beside the run queue. One that is not done within rebuildTimeoutMs is stopped and reported as timed out,
+   * so the dashboard never waits on it forever.
+   */
   rebuild(jobId: string): void {
     if (this.stopped || this.isParked(jobId) || this.rebuilding.has(jobId)) return;
     this.rebuildErrors.delete(jobId);
+    const limit = this.deps.rebuildTimeoutMs ?? REBUILD_TIMEOUT_MS;
+    const abort = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timedOut = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        abort.abort();
+        reject(new Error(`Opening the application again took over ${Math.round(limit / 1000)} seconds and was stopped. Try again.`));
+      }, limit);
+    });
     const run = (async () => {
       try {
-        await this.deps.runRebuild(jobId);
+        // The run itself may still be winding down after a timeout; the user hears about it now.
+        await Promise.race([this.deps.runRebuild(jobId, abort.signal), timedOut]);
         if (!this.isParked(jobId)) this.rebuildErrors.set(jobId, "The application could not be opened again.");
       } catch (e) {
         this.rebuildErrors.set(jobId, (e instanceof Error ? e.message : String(e)).split("\n")[0]!.trim() || "Unexpected error");
       } finally {
+        clearTimeout(timer);
         this.rebuilding.delete(jobId);
       }
     })();
-    this.rebuilding.set(jobId, run);
+    this.rebuilding.set(jobId, { run, startedAt: Date.now(), abort });
   }
 
   /** The parked page's address and title. */
@@ -252,6 +276,7 @@ export class LiveService {
   async stop(): Promise<void> {
     this.stopped = true;
     this.offChange();
+    for (const r of this.rebuilding.values()) r.abort.abort();
     for (const w of this.watchers.values()) if (w.timer) clearTimeout(w.timer);
     for (const id of [...this.casts.keys()]) await this.stopCast(id);
     this.watchers.clear();

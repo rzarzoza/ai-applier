@@ -1,6 +1,7 @@
 import { mkdirSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { fileURLToPath } from "node:url";
+import type { BrowserContext } from "playwright";
 import { serve } from "@hono/node-server";
 import { HANDLERS } from "./ats/registry.js";
 import type { AtsHandler } from "./ats/types.js";
@@ -8,7 +9,7 @@ import { openDb } from "./db/db.js";
 import { canOpenLive, getJob } from "./jobs/repo.js";
 import { ClaudeLlm, type Llm } from "./llm/llm.js";
 import { paths, setDataDir } from "./paths.js";
-import { SerialQueue } from "./scheduler.js";
+import { JobLocks, SerialQueue } from "./scheduler.js";
 import { getSecret, setSecret } from "./secrets.js";
 import { getJson, getSettings, saveSettings, setJson } from "./settings.js";
 import { LiveService } from "./runner/live.js";
@@ -38,6 +39,10 @@ export interface StartOptions {
   /** The LLM and the ATS handlers; default to Claude and the real handlers. Tests and local checks inject fakes. */
   llm?: Llm;
   handlers?: AtsHandler[];
+  /** With startLoops, whether the sources are polled too (default true). Tests that only run jobs turn it off. */
+  pollSources?: boolean;
+  /** Starts the app's browser context; defaults to the installed Google Chrome (see SessionManager). Tests inject one. */
+  launchBrowser?: () => Promise<BrowserContext>;
 }
 
 const log = (msg: string) => console.log(`[${new Date().toISOString()}] ${msg}`);
@@ -86,10 +91,12 @@ export async function startApp(opts: StartOptions = {}): Promise<{ url: string; 
   };
 
   const queue = new SerialQueue();
-  // The one browser: every run and the dashboard's live view use its pages.
-  const browser = new SessionManager();
+  // Never two runs on one job: a rebuild runs beside the queue's run, on its own tab.
+  const locks = new JobLocks();
+  // The one browser: every run and the dashboard's live view use its tabs.
+  const browser = new SessionManager({ launch: opts.launchBrowser, warn: msg => log(msg) });
   const runnerDeps = (): RunnerDeps => ({
-    db, llm, browser, notify: macNotify, now: () => new Date(), handlers: opts.handlers ?? HANDLERS,
+    db, llm, browser, locks, notify: macNotify, now: () => new Date(), handlers: opts.handlers ?? HANDLERS,
     onSubmitted: () => { void runSync(); },
     hasApiKey: async () => {
       if (process.env.ANTHROPIC_API_KEY) return true;
@@ -97,7 +104,10 @@ export async function startApp(opts: StartOptions = {}): Promise<{ url: string; 
       try { return !!(await secrets.get(API_KEY_NAME)); } catch { return true; }
     },
   });
-  /** Every job run goes through the one queue: the persistent Chromium profile can only be opened once. */
+  /**
+   * Job runs go through the one queue, one at a time. Only rebuilds for the live view skip it (see below): the user is
+   * waiting on those, and a queued run can take minutes (or, for Open & finish and Do it now, wait on the user for long).
+   */
   const runQueued = (task: () => ReturnType<typeof runNext>, what: string) =>
     queue.run(async () => {
       const status = await task();
@@ -116,13 +126,21 @@ export async function startApp(opts: StartOptions = {}): Promise<{ url: string; 
       .finally(() => requested.delete(jobId));
   };
 
-  /** Opens a job's form again for the live view (through the queue, like every run). Errors are the caller's. */
+  /**
+   * Opens a job's form again for the live view right away, on its own tab beside whatever the queue is running (the job
+   * lock keeps any other run off the same job). Errors are the caller's.
+   */
   const live = new LiveService({
     db, manager: browser, onSubmitted: () => { void runSync(); },
-    runRebuild: jobId => queue.run(async () => {
-      await runJob(runnerDeps(), jobId, "rebuild");
-      log(`rebuild ${getJob(db, jobId)?.company ?? jobId}: ${browser.isParked(jobId) ? "open in the app" : "not opened"}`);
-    }),
+    runRebuild: async (jobId, signal) => {
+      try {
+        await runJob(runnerDeps(), jobId, "rebuild", { signal });
+        log(`rebuild ${getJob(db, jobId)?.company ?? jobId}: ${browser.isParked(jobId) ? "open in the app" : "not opened"}`);
+      } catch (e) {
+        log(`rebuild ${getJob(db, jobId)?.company ?? jobId} failed: ${errText(e)}`);
+        throw e;
+      }
+    },
   });
   // A job that moved on (answered in the Inbox, skipped, submitted elsewhere...) no longer needs its page.
   const sweep = setInterval(() => {
@@ -178,7 +196,7 @@ export async function startApp(opts: StartOptions = {}): Promise<{ url: string; 
   });
 
   const loops: Promise<void>[] = [];
-  if (opts.startLoops) {
+  if (opts.startLoops && opts.pollSources !== false) {
     loops.push((async () => {
       while (!stopped) {
         pollNow();
@@ -186,6 +204,8 @@ export async function startApp(opts: StartOptions = {}): Promise<{ url: string; 
         await sleep(Math.min(Math.max(getSettings(db).pollMinutes, 1), 1440) * 60_000);
       }
     })());
+  }
+  if (opts.startLoops) {
     loops.push((async () => {
       while (!stopped) {
         let ran = false;

@@ -8,6 +8,12 @@ import { openDb } from "../src/db/db.js";
 import { getJob, setStatus, upsertPosting } from "../src/jobs/repo.js";
 import { startApp } from "../src/main.js";
 import { getRunnerCurrent, setRunnerCurrent } from "../src/runner/current.js";
+import { chromium } from "playwright";
+import type { AtsHandler } from "../src/ats/types.js";
+import { saveProfile } from "../src/profile/profile.js";
+import { saveSettings } from "../src/settings.js";
+import { fakeLlm, until } from "./helpers/live-setup.js";
+import { miniAtsHandler } from "./helpers/mini-ats-handler.js";
 
 const secrets = { get: async () => null, set: async () => {} };
 
@@ -97,4 +103,46 @@ test("a stale Applying now pointer from the last session is cleared at startup",
   const db = openDb(path.join(dataDir, "app.db"));
   expect(getRunnerCurrent(db)).toBeNull();
   db.close();
+});
+
+test("a rebuild from the dashboard runs right away while an auto run is still in progress", async () => {
+  const dataDir = mkdtempSync(path.join(tmpdir(), "ai-applier-main-"));
+  const seed = openDb(path.join(dataDir, "app.db"));
+  saveSettings(seed, { paused: false });
+  saveProfile(seed, { firstName: "Luis", lastName: "Hernandez", email: "luis@example.com" });
+  const add = (n: string, url: string) => upsertPosting(seed, { sourceId: "s", listingId: n, company: `Co ${n}`, title: "Software Engineer Intern",
+    locations: ["Austin, TX"], category: "Software", terms: ["Summer 2027"], degrees: [], sponsorship: null, url, datePosted: new Date(), active: true }).job;
+  const slowJob = add("1", "https://slow-ats.test/apply");
+  setStatus(seed, slowJob.id, "queued");
+  const waiting = add("2", "https://mini-ats.test/apply");
+  setStatus(seed, waiting.id, "needs-you", "2 questions need you");
+  seed.close();
+
+  // A slow auto run: its form takes until the end of the test to open.
+  let started = false;
+  let finish!: () => void;
+  const gate = new Promise<void>(r => { finish = r; });
+  const slow: AtsHandler = { ...miniAtsHandler, name: "slow-ats", matches: u => u.includes("slow-ats.test"),
+    async open() { started = true; await gate; return { ok: false, reason: "closed", detail: "test" }; } };
+  const browser = await chromium.launch();
+  const app = await startApp({
+    dataDir, port: 0, startLoops: true, pollSources: false, secrets: { get: async () => "key", set: async () => {} }, llm: fakeLlm(), handlers: [slow, miniAtsHandler],
+    launchBrowser: async () => { const ctx = await browser.newContext(); await ctx.route("**/*", r => r.abort()); return ctx; },
+  });
+  try {
+    await until(() => started);
+    const post = await fetch(`${app.url}/live/${waiting.id}/rebuild`, { method: "POST", headers: { origin: app.url } });
+    expect(await post.text()).toContain("Rebuilding your application…");
+    await until(async () => (await (await fetch(`${app.url}/live/${waiting.id}/status`)).json() as { kind: string }).kind === "parked", 20_000);
+    const panel = await (await fetch(`${app.url}/live/${waiting.id}/panel`)).text();
+    expect(panel).toContain(`data-live="${waiting.id}"`);
+    // The auto run is still going.
+    const db = openDb(path.join(dataDir, "app.db"));
+    expect(getJob(db, slowJob.id)!.status).toBe("filling");
+    db.close();
+  } finally {
+    finish();
+    await app.stop();
+    await browser.close();
+  }
 });
