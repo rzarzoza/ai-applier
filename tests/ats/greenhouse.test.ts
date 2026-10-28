@@ -63,6 +63,29 @@ test("greenhouse outcome: a fresh form is pending", async () => {
   expect(await greenhouse.outcome(page)).toEqual({ kind: "pending" });
 });
 
+test("greenhouse outcome ignores thank-you and security-code wording in the job description", async () => {
+  const describe = (text: string) => page.evaluate(inPage((t: string) => {
+    const p = document.createElement("p");
+    p.textContent = t;
+    document.querySelector(".job__description")!.prepend(p);
+  }), text);
+  await page.setContent(jobBoards);
+  await describe("Thank you for applying! Once your application has been received, we will reach out.");
+  expect(await greenhouse.outcome(page)).toEqual({ kind: "pending" });
+  await describe("You will lead security code reviews and verification code audits.");
+  expect(await greenhouse.outcome(page)).toEqual({ kind: "pending" });
+
+  await page.evaluate(inPage(() => {
+    document.getElementById("first_name")!.insertAdjacentHTML("afterend",
+      '<p id="first_name-error" class="helper-text helper-text--error">This field is required.</p>');
+  }));
+  expect(await greenhouse.outcome(page)).toEqual({ kind: "validation-error", messages: ["First Name: This field is required."] });
+
+  // even with the form hidden, description text is not a confirmation
+  await page.evaluate(inPage(() => { (document.getElementById("application-form") as HTMLElement).style.display = "none"; }));
+  expect(await greenhouse.outcome(page)).toEqual({ kind: "pending" });
+});
+
 test("greenhouse outcome detects confirmation and validation errors", async () => {
   await page.setContent("<main><h1>Thank you for applying.</h1><p>Your application has been received.</p></main>");
   expect(await greenhouse.outcome(page)).toEqual({ kind: "submitted" });
@@ -85,6 +108,9 @@ test("greenhouse outcome detects confirmation and validation errors", async () =
   await serve("https://job-boards.greenhouse.io/acme/jobs/1/confirmation", "<html><body><h1>Done</h1></body></html>");
   await page.goto("https://job-boards.greenhouse.io/acme/jobs/1/confirmation");
   expect(await greenhouse.outcome(page)).toEqual({ kind: "submitted" });
+  await serve("https://job-boards.greenhouse.io/confirmationco/jobs/1", `<form id="application-form"><input id="first_name"></form>`);
+  await page.goto("https://job-boards.greenhouse.io/confirmationco/jobs/1");
+  expect(await greenhouse.outcome(page)).toEqual({ kind: "pending" });
 });
 
 test("greenhouse outcome detects captcha and verification code", async () => {
@@ -163,16 +189,97 @@ test("greenhouse open: form page ok, closed posting, company page with embed, mi
 
   await serve("https://job-boards.greenhouse.io/gone/jobs/4", "<p>Page not found</p>", 404);
   expect(await greenhouse.open(page, "https://job-boards.greenhouse.io/gone/jobs/4")).toMatchObject({ ok: false, reason: "not-found" });
-
-  await serve("https://careers.acme.com/jobs?gh_jid=5", "<h1>Acme</h1><p>Our own form lives elsewhere.</p>");
-  expect(await greenhouse.open(page, "https://careers.acme.com/jobs?gh_jid=5")).toMatchObject({ ok: false, reason: "closed" });
 });
+
+test("greenhouse open: bot walls and company-owned forms are blocked; a redirect off Greenhouse is closed", async () => {
+  await serve("https://careers.acme.com/jobs?gh_jid=5", "<h1>Acme</h1><p>Our own form lives elsewhere.</p>");
+  expect(await greenhouse.open(page, "https://careers.acme.com/jobs?gh_jid=5")).toMatchObject({ ok: false, reason: "blocked" });
+
+  await serve("https://www.epic.example/careers/jobs/6?gh_jid=6",
+    "<title>Just a moment...</title><p>One more step. Please complete a security check to continue</p>", 403);
+  expect(await greenhouse.open(page, "https://www.epic.example/careers/jobs/6?gh_jid=6")).toMatchObject({ ok: false, reason: "blocked" });
+
+  // Greenhouse sends a posting that is gone to the company's own careers page
+  await serve("https://boards.greenhouse.io/acme/jobs/7", `<meta http-equiv="refresh" content="0;url=https://careers.acme.com/open-roles">`);
+  await serve("https://careers.acme.com/open-roles", "<h1>Open roles</h1><a href='/x'>Apply</a>");
+  expect(await greenhouse.open(page, "https://boards.greenhouse.io/acme/jobs/7")).toMatchObject({ ok: false, reason: "closed" });
+}, 60000);
 
 test("greenhouse open reveals a form hidden behind an Apply button", async () => {
   await serve("https://job-boards.greenhouse.io/acme/jobs/6", `<html><body>
     <button type="button" onclick="document.getElementById('application-form').hidden = false">Apply for this job</button>
     <form id="application-form" hidden><input id="first_name"><button type="submit">Submit application</button></form></body></html>`);
   expect(await greenhouse.open(page, "https://job-boards.greenhouse.io/acme/jobs/6")).toEqual({ ok: true });
+});
+
+test("greenhouse open never clicks a submit-type or in-form Apply control", async () => {
+  await serve("https://job-boards.greenhouse.io/acme/jobs/8", `<html><body>
+    <form id="other" onsubmit="event.preventDefault(); document.body.dataset.sent = 'yes'">
+      <button type="submit">Apply</button><button>Apply now</button></form>
+    <a href="#" type="submit" onclick="document.body.dataset.sent = 'link'">Apply</a>
+    <form id="application-form" hidden><input id="first_name"></form></body></html>`);
+  const r = await greenhouse.open(page, "https://job-boards.greenhouse.io/acme/jobs/8");
+  expect(r).toMatchObject({ ok: false });
+  expect(await page.locator("body").getAttribute("data-sent")).toBeNull();
+
+  // and never on a company's own page, even when the Apply button is harmless
+  await serve("https://careers.acme.com/jobs?gh_jid=9", `<button type="button" onclick="document.body.dataset.sent = 'yes'">Apply</button>`);
+  expect(await greenhouse.open(page, "https://careers.acme.com/jobs?gh_jid=9")).toMatchObject({ ok: false, reason: "blocked" });
+  expect(await page.locator("body").getAttribute("data-sent")).toBeNull();
+});
+
+/** A minimal react-select stand-in: typing renders the filtered options in the listbox named by aria-controls. */
+const fakeSelect = (options: string[]) => `
+  <div role="listbox" id="decoy"><div role="option" onclick="document.body.dataset.decoy = 'yes'">${options[0]}</div></div>
+  <form id="application-form"><div class="select"><label id="s-label" for="s">School</label>
+    <div class="select-shell"><div class="select__value-container"><input id="s" role="combobox" aria-labelledby="s-label"></div></div></div></form>
+  <script>(() => {
+    const options = ${JSON.stringify(options)};
+    const input = document.getElementById("s");
+    const shell = input.closest(".select-shell");
+    input.addEventListener("input", () => {
+      shell.querySelector("[role=listbox]")?.remove();
+      const box = document.createElement("div");
+      box.setAttribute("role", "listbox");
+      box.id = "s-listbox";
+      for (const o of options.filter(o => o.toLowerCase().includes(input.value.toLowerCase()))) {
+        const el = document.createElement("div");
+        el.setAttribute("role", "option");
+        el.textContent = o;
+        el.addEventListener("click", () => {
+          box.remove();
+          input.removeAttribute("aria-controls");
+          input.value = "";
+          const v = document.createElement("div");
+          v.className = "select__single-value";
+          v.textContent = o;
+          shell.querySelector(".select__value-container").prepend(v);
+        });
+        box.appendChild(el);
+      }
+      shell.appendChild(box);
+      input.setAttribute("aria-controls", box.id);
+    });
+  })();</script>`;
+
+test("greenhouse fill picks from the field's own listbox: exact, else a unique prefix", async () => {
+  await page.setContent(fakeSelect(["Stanford University", "Stanford Online High School", "University of Michigan"]));
+  const school = (await greenhouse.readFields(page)).find(f => f.label === "School")!;
+  await greenhouse.fill(page, school, { type: "text", text: "Stanford University" });
+  expect(await greenhouse.readBack(page, school)).toBe("Stanford University");
+  expect(await page.locator("body").getAttribute("data-decoy")).toBeNull();
+
+  await page.setContent(fakeSelect(["University of Michigan - Dearborn", "Michigan State University"]));
+  const s2 = (await greenhouse.readFields(page)).find(f => f.label === "School")!;
+  await greenhouse.fill(page, s2, { type: "text", text: "University of Michigan" });
+  expect(await greenhouse.readBack(page, s2)).toBe("University of Michigan - Dearborn");
+});
+
+test("greenhouse fill refuses an ambiguous prefix match", async () => {
+  await page.setContent(fakeSelect(["University of Michigan - Dearborn", "University of Michigan - Flint"]));
+  const school = (await greenhouse.readFields(page)).find(f => f.label === "School")!;
+  await expect(greenhouse.fill(page, school, { type: "text", text: "University of Michigan" })).rejects.toThrow(/Ambiguous/);
+  expect(await greenhouse.readBack(page, school)).toBeNull();
 });
 
 test("greenhouse root is the embedded frame when the form lives in a greenhouse iframe", async () => {

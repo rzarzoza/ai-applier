@@ -27,6 +27,8 @@ const HOSTS = new Set(["job-boards.greenhouse.io", "boards.greenhouse.io", "job-
 const FORM = "#application-form, form#application_form";
 const ASYNC_SELECT = /^((school|degree|discipline)--\d+|candidate-location)$/;
 const DESCRIPTION_MAX = 8000;
+const BOT_WALL = /just a moment|security check to continue|verify (that )?you are (a )?human|access denied|attention required/i;
+const APPLY = /^\s*apply/i;
 
 function parse(url: string): URL | null {
   try { return new URL(url); } catch { return null; }
@@ -54,14 +56,13 @@ export const greenhouse: AtsHandler = {
         await settle(page);
       }
     }
-    if (resp && resp.status() === 404) return { ok: false, reason: "not-found", detail: `HTTP 404 at ${page.url()}` };
+    const status = resp?.status() ?? 0;
+    if (status === 404) return { ok: false, reason: "not-found", detail: `HTTP 404 at ${page.url()}` };
     const root = await greenhouse.root(page);
     const form = root.locator(FORM).first();
-    if (!(await form.isVisible())) {
-      // A name starting with "apply" (never "submit application") reveals a hidden form.
-      const reveal = root.getByRole("link", { name: /^\s*apply/i }).or(root.getByRole("button", { name: /^\s*apply/i }))
-        .filter({ hasNotText: /submit/i }).first();
-      if (await reveal.isVisible().catch(() => false)) {
+    if (!(await form.isVisible()) && isGreenhouseHost(root.url())) {
+      const reveal = await revealControl(root);
+      if (reveal) {
         await reveal.click();
         await form.waitFor({ state: "visible", timeout: 5000 }).catch(() => {});
       }
@@ -69,8 +70,17 @@ export const greenhouse: AtsHandler = {
     if (await form.isVisible()) return { ok: true };
     const text = await page.locator("body").innerText().catch(() => "");
     if (/no longer (open|available|accepting)/i.test(text)) return { ok: false, reason: "closed", detail: "job is no longer open" };
-    if (resp && resp.status() >= 400) return { ok: false, reason: "not-found", detail: `HTTP ${resp.status()} at ${page.url()}` };
-    return { ok: false, reason: "closed", detail: "no application form" };
+    if (status === 403 || status === 429 || BOT_WALL.test(`${await page.title().catch(() => "")}\n${text}`)) {
+      return { ok: false, reason: "blocked", detail: `bot wall (HTTP ${status}) at ${page.url()}` };
+    }
+    if (isGreenhouseHost(url) && !isGreenhouseHost(page.url())) {
+      // Greenhouse sends postings that are gone to the company's own careers page.
+      return { ok: false, reason: "closed", detail: `posting redirected off Greenhouse to ${page.url()}` };
+    }
+    if (!isGreenhouseHost(page.url())) {
+      return { ok: false, reason: "blocked", detail: `company page without a Greenhouse form (its own application form?) at ${page.url()}` };
+    }
+    return { ok: false, reason: "not-found", detail: `${status >= 400 ? `HTTP ${status}, ` : ""}no application form at ${page.url()}` };
   },
 
   async root(page): Promise<Page | Frame> {
@@ -132,8 +142,8 @@ export const greenhouse: AtsHandler = {
 
   async outcome(page): Promise<SubmitOutcome> {
     const root = await greenhouse.root(page);
-    if ([page.url(), root.url()].some(u => u.includes("confirmation"))) return { kind: "submitted" };
-    const s = (await root.evaluate(inPage(pageState))) as PageState;
+    if ([page.url(), root.url()].some(u => /\/confirmation(\/|$)/.test(parse(u)?.pathname ?? ""))) return { kind: "submitted" };
+    const s = (await root.evaluate(inPage(pageState), FORM)) as PageState;
     if (s.thanks) return { kind: "submitted" };
     if (s.captcha) return { kind: "captcha" };
     if (s.code) return { kind: "verification-code" };
@@ -163,33 +173,63 @@ async function embedSrc(page: Page): Promise<string | null> {
 }
 
 /**
- * Picks a react-select option: types `want` (filters static lists, triggers async search), then clicks the first
- * option equal to it, else the first starting with it. Waits for async results instead of trusting the first list.
+ * The control that reveals a hidden form: a link or button named "Apply..." that cannot submit anything —
+ * never a submit-type control and never a control inside a form.
+ */
+async function revealControl(root: Page | Frame): Promise<Locator | null> {
+  const candidates = root.getByRole("link", { name: APPLY }).or(root.getByRole("button", { name: APPLY }));
+  for (const c of await candidates.all()) {
+    if (!(await c.isVisible().catch(() => false))) continue;
+    const safe = (await c.evaluate(inPage((e: Element) =>
+      !e.closest("form") && e.getAttribute("type") !== "submit" && !/submit/i.test(e.textContent ?? "")))) as boolean;
+    if (safe) return c;
+  }
+  return null;
+}
+
+/**
+ * Picks a react-select option: types the answer (filters static lists, triggers async search), then clicks the option
+ * equal to it, else the only option starting with it. Options are read from the listbox the input controls. Several
+ * prefix matches are ambiguous and fail rather than guess ("University of Michigan" vs "... - Dearborn").
  */
 async function pickOption(root: Page | Frame, field: FieldSpec, answer: FieldAnswer): Promise<void> {
   if (answer.type !== "option" && answer.type !== "text") throw new Error(`combobox needs an option or text answer`);
-  const want = norm(answer.type === "option" ? answer.option : answer.text);
+  const typed = answer.type === "option" ? answer.option : answer.text;
+  const want = norm(typed);
   const input = byId(root, field);
-  const shell = root.locator(".select-shell", { has: input });
+  const loading = root.locator(".select-shell", { has: input }).locator('[class*="loading"]');
   await input.click();
-  await input.fill(answer.type === "option" ? answer.option : answer.text).catch(() => {});
-  const scoped = shell.locator("[role=option]");
-  const loading = shell.locator('[class*="loading"]');
+  await input.fill(typed).catch(() => {});
   let seen: string[] = [];
+  let stable = "";
+  let stableSince = Date.now();
   const deadline = Date.now() + 10000;
   while (Date.now() < deadline) {
-    const options: Locator = (await scoped.count()) ? scoped : root.locator("[role=option]:visible");
-    seen = (await options.allInnerTexts()).map(norm);
-    let idx = seen.indexOf(want);
-    if (idx < 0 && !(await loading.count())) idx = seen.findIndex(t => t.startsWith(want));
-    if (idx >= 0) {
-      await options.nth(idx).click();
-      return;
+    const options = await listboxOptions(root, input);
+    seen = options ? (await options.allInnerTexts()).map(norm) : [];
+    const exact = seen.indexOf(want);
+    if (options && exact >= 0) return options.nth(exact).click();
+    const prefixed = seen.flatMap((t, i) => (t.startsWith(want) ? [i] : []));
+    const settled = !(await loading.count());
+    if (options && settled && prefixed.length === 1) return options.nth(prefixed[0]).click();
+    const key = seen.join("\n");
+    if (key !== stable || !settled) { stable = key; stableSince = Date.now(); }
+    if (prefixed.length > 1 && Date.now() - stableSince > 1500) {
+      await input.press("Escape").catch(() => {});
+      throw new Error(`Ambiguous option "${typed}" for "${field.label}": ${prefixed.map(i => seen[i]).join(" | ")}`);
     }
     await new Promise(r => setTimeout(r, 200));
   }
   await input.press("Escape").catch(() => {});
-  throw new Error(`No option matching "${want}" for "${field.label}" (saw: ${seen.slice(0, 10).join(" | ")})`);
+  throw new Error(`No option matching "${typed}" for "${field.label}" (saw: ${seen.slice(0, 10).join(" | ")})`);
+}
+
+/** The options of the listbox named by the input's aria-controls; else of the only open listbox on the page. */
+async function listboxOptions(root: Page | Frame, input: Locator): Promise<Locator | null> {
+  const controls = (await input.getAttribute("aria-controls"))?.split(/\s+/)[0];
+  if (controls) return root.locator(`[id=${JSON.stringify(controls)}] [role=option]`);
+  const open = root.locator("[role=listbox]:visible");
+  return (await open.count()) === 1 ? open.locator("[role=option]") : null;
 }
 
 /** Waits until Greenhouse shows the uploaded file name (or rejects the file) in place of the file input. */
@@ -238,14 +278,26 @@ function selectedValue(input: HTMLElement): string | string[] | null | undefined
 type PageState = { thanks: boolean; captcha: boolean; code: boolean; errors: string[] };
 
 // Runs inside the page: must be self-contained.
-function pageState(): PageState {
+function pageState(formSelector: string): PageState {
   const squash = (s: string | null | undefined) => (s ?? "").replace(/\s+/g, " ").trim();
   const visible = (e: Element) => e.checkVisibility({ visibilityProperty: true }) && e.getClientRects().length > 0;
-  const text = document.body?.innerText ?? "";
-  const thanks = /thank you for applying|application (has been )?(submitted|received)/i.test(text);
+  // A thank-you only counts once the form is gone, and never from the job description (which often says
+  // "thank you for applying") or the form itself.
+  const formVisible = Array.from(document.querySelectorAll(formSelector)).some(visible);
+  let thanks = false;
+  if (!formVisible && document.body) {
+    const parts: string[] = [];
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+    for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+      const parent = n.parentElement;
+      if (!parent || parent.closest(`.job__description, #content, script, style, ${formSelector}`) || !visible(parent)) continue;
+      parts.push(n.textContent ?? "");
+    }
+    thanks = /thank you for applying|application (has been )?(submitted|received)/i.test(squash(parts.join(" ")));
+  }
   const captcha = Array.from(document.querySelectorAll('iframe[src*="recaptcha"][title*="challenge"], iframe[src*="hcaptcha"][title*="challenge"]')).some(visible);
-  const code = /security code|verification code/i.test(text) &&
-    Array.from(document.querySelectorAll("input")).some(i => !["hidden", "submit", "button"].includes(i.type) && visible(i));
+  // Greenhouse's email check: fieldset#email-verification with one input per code character.
+  const code = Array.from(document.querySelectorAll('fieldset#email-verification input, input[id^="security-input-"]')).some(visible);
   const fieldLabel = (errorId: string) => {
     const base = /^(.*)-error$/.exec(errorId)?.[1];
     if (!base) return "";

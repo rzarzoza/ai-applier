@@ -1,7 +1,7 @@
 import type { Frame, Page } from "playwright";
 import type { FieldAnswer, FieldSpec } from "../forms/types.js";
 
-export type OpenResult = { ok: true } | { ok: false; reason: "closed" | "not-found" | "already-applied"; detail?: string };
+export type OpenResult = { ok: true } | { ok: false; reason: "closed" | "not-found" | "already-applied" | "blocked"; detail?: string };
 
 export type SubmitOutcome =
   | { kind: "submitted" }
