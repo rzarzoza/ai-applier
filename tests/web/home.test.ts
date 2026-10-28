@@ -113,16 +113,17 @@ test("each list shows its jobs with the right action", async () => {
 
   const html = await get(app, "/");
   const needs = section(html, "Needs your input");
-  expect(needs).toContain(`<button class="primary" hx-post="/applications/${finish.id}/hand-finish" hx-target="this" hx-swap="outerHTML">Open &amp; finish</button>`);
+  // Open & finish and Do it now open the job page's live view of the form.
+  expect(needs).toContain(`<a class="btn btn-primary" href="/applications/${finish.id}#live-panel">Open &amp; finish</a>`);
   expect(needs).toContain("1 question needs you");
-  expect(needs).toContain(`hx-post="/needs-you/${captcha.id}/do-it-now"`);
+  expect(needs).toContain(`<a class="btn btn-primary" href="/applications/${captcha.id}#live-panel">Do it now</a>`);
   expect(needs).not.toContain(`/applications/${captcha.id}/hand-finish`);
   expect(needs).toContain(`<a class="btn" href="/applications/${unknown.id}">Check</a>`);
   expect(needs).not.toContain(`/applications/${unknown.id}/hand-finish`);
   expect(needs).not.toContain("Co4");
 
   const rev = section(html, "Ready to review");
-  expect(rev).toContain(`<a class="btn" href="/applications/${review.id}">Review</a>`);
+  expect(rev).toContain(`<a class="btn" href="/applications/${review.id}#live-panel">Review</a>`);
 
   const next = section(html, "Up next");
   const order = [...next.matchAll(/href="\/applications\/([^"]+)">Intern/g)].map(m => m[1]);

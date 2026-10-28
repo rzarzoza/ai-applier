@@ -8,7 +8,7 @@ import { reviseDraft } from "../answers/draft.js";
 import type { Db } from "../db/db.js";
 import type { Llm } from "../llm/llm.js";
 import { normalizeLabel } from "../answers/classify.js";
-import { getJob, setStatus, SKIPPED_BY_YOU } from "../jobs/repo.js";
+import { canOpenLive, getJob, setStatus, SKIPPED_BY_YOU } from "../jobs/repo.js";
 import { paths } from "../paths.js";
 import { getProfile, saveProfile, type Profile } from "../profile/profile.js";
 import { importResume } from "../profile/resume.js";
@@ -29,6 +29,7 @@ import { SettingsPage } from "./pages/settings.js";
 import { PreviewFragment, SourcesPage, parseFilterForm, previewCount } from "./pages/sources.js";
 import { ApproveSuggestionsPage, CardFragment, InboxPage, OpeningBrowser, OpeningHandFinish, SavedNotice } from "./pages/inbox.js";
 import { HomeLists, HomePage, NowCard } from "./pages/home.js";
+import { liveRoutes, panelState, type LiveControl } from "./live.js";
 
 export interface AppContext {
   db: Db;
@@ -55,6 +56,8 @@ export interface AppContext {
    * on that port are served, and changes must come from a page of the dashboard itself (Origin).
    */
   localPort?(): number;
+  /** The live view of applications parked in the app's browser; without it, jobs are finished in a browser window. */
+  live?: LiveControl;
 }
 
 const API_KEY_NAME = "anthropic-api-key";
@@ -99,7 +102,9 @@ export function createApp(ctx: AppContext): Hono {
     });
   }
 
-  const home = () => ({ db, requested: ctx.requestedRuns?.() ?? [] });
+  if (ctx.live) liveRoutes(app, { ...ctx, live: ctx.live });
+
+  const home = () => ({ db, requested: ctx.requestedRuns?.() ?? [], parked: ctx.live?.parkedIds() ?? [] });
   app.get("/", c => c.html(HomePage(home())));
   app.get("/home/now", c => c.html(NowCard(home())));
   app.get("/home/lists", c => c.html(HomeLists(home())));
@@ -116,7 +121,7 @@ export function createApp(ctx: AppContext): Hono {
   app.get("/inbox", c => {
     const approved = count(c.req.query("approved"));
     return c.html(InboxPage({
-      db, rechecked: count(c.req.query("rechecked")),
+      db, parked: ctx.live?.parkedIds(), rechecked: count(c.req.query("rechecked")),
       approved: approved === undefined ? undefined : { questions: approved, requeued: count(c.req.query("requeued")) ?? 0 },
     }));
   });
@@ -211,9 +216,11 @@ export function createApp(ctx: AppContext): Hono {
     return c.html(ApplicationsPage({ db, status: isStatus(status) ? status : undefined, page: Number(c.req.query("page")) || 1 }));
   });
 
-  app.get("/applications/:id", c => {
+  app.get("/applications/:id", async c => {
     const job = getJob(db, c.req.param("id"));
-    return job ? c.html(JobDetailPage({ db, job, notice: c.req.query("notice") })) : c.text("Unknown job", 404);
+    if (!job) return c.text("Unknown job", 404);
+    const live = ctx.live && canOpenLive(job) ? await panelState(ctx.live, job.id, { start: true, requested: ctx.requestedRuns?.() }) : undefined;
+    return c.html(JobDetailPage({ db, job, notice: c.req.query("notice"), live }));
   });
 
   app.post("/applications/:id/field", async c => {
@@ -268,6 +275,8 @@ export function createApp(ctx: AppContext): Hono {
         return c.text("Confirm that you checked the application was not sent", 400);
       apply(job);
       resolveNeedsYouForJob(db, job.id);
+      // The job moved on: whatever page the live view kept for it goes.
+      await ctx.live?.close(job.id);
       if (name === "mark-applied") void ctx.syncTracker?.();
       return c.redirect(`/applications/${job.id}`, 303);
     });

@@ -5,7 +5,7 @@ import type { Job, JobStatus } from "../../jobs/types.js";
 import { getRunnerCurrent, STEPS, type RunnerCurrent } from "../../runner/current.js";
 import { getSettings } from "../../settings.js";
 import { Layout, pauseProps } from "../layout.js";
-import { ago, Avatar, Chip, elapsed, Icon, jobLocation, PageHead, shortDate } from "../ui.js";
+import { ago, Avatar, Chip, elapsed, Icon, jobLocation, livePanelHref, OpenInApp, PageHead, shortDate } from "../ui.js";
 import { ApproveSuggestionsButton, inboxCount } from "./inbox.js";
 
 const UP_NEXT = 15;
@@ -13,7 +13,7 @@ const RECENT = 10;
 const LIST_MAX = 20;
 
 /** What the dashboard needs to know beyond the database: jobs the user asked to run that haven't started yet. */
-export interface HomeProps { db: Db; requested?: readonly string[]; now?: Date }
+export interface HomeProps { db: Db; requested?: readonly string[]; now?: Date; parked?: readonly string[] }
 
 const TILES: { status: JobStatus; label: string; warn?: true }[] = [
   { status: "queued", label: "Queued" },
@@ -102,15 +102,16 @@ function JobLine(props: { job: Job; compact?: boolean; children?: unknown }) {
   );
 }
 
-/** What a needs-you row offers: finish it by hand, clear a CAPTCHA/code/login, or check a possibly sent application. */
+/**
+ * What a needs-you row offers: finish it, or clear a CAPTCHA/code/login, in the job page's live view, or check a
+ * possibly sent application.
+ */
 function NeedsAction(props: { db: Db; job: Job; running: boolean; requested: boolean }) {
   const { db, job } = props;
   if (props.running) return <Chip cls="chip-blue"><span class="live-dot"></span>Applying now</Chip>;
   if (props.requested) return <span class="working">Opening the application in a browser window…</span>;
-  if (canHandFinish(db, job.id))
-    return <button class="primary" hx-post={`/applications/${job.id}/hand-finish`} hx-target="this" hx-swap="outerHTML">Open &amp; finish</button>;
-  if (canDoItNow(db, job.id))
-    return <button class="primary" hx-post={`/needs-you/${job.id}/do-it-now`} hx-target="this" hx-swap="outerHTML">Do it now</button>;
+  if (canHandFinish(db, job.id)) return <a class="btn btn-primary" href={livePanelHref(job.id)}>Open &amp; finish</a>;
+  if (canDoItNow(db, job.id)) return <a class="btn btn-primary" href={livePanelHref(job.id)}>Do it now</a>;
   return <a class="btn" href={`/applications/${job.id}`}>{isUnknownSubmission(job) ? "Check" : "Open"}</a>;
 }
 
@@ -134,6 +135,7 @@ export function HomeLists(props: HomeProps) {
   const counts = countByStatus(db);
   const current = getRunnerCurrent(db);
   const requested = new Set(props.requested ?? []);
+  const parked = new Set(props.parked ?? []);
   // A job the user is finishing at the browser is no longer "needs-you" while its window is open: keep it on top of its list.
   const atBrowser = current && (current.mode === "hand-finish" || current.mode === "interactive") ? getJob(db, current.jobId) : null;
   const needs = recentWithStatus(db, "needs-you", LIST_MAX);
@@ -152,7 +154,10 @@ export function HomeLists(props: HomeProps) {
             {needsRows.map(j => (
               <div class="jrow" id={`needs-row-${j.id}`}>
                 <Avatar company={j.company} />
-                <JobLine job={j}>{j.statusReason ? <div class="jrow-reason">{j.statusReason}</div> : null}</JobLine>
+                <JobLine job={j}>
+                  {j.statusReason ? <div class="jrow-reason">{j.statusReason}</div> : null}
+                  {parked.has(j.id) ? <div><OpenInApp /></div> : null}
+                </JobLine>
                 <div class="jrow-action">
                   <NeedsAction db={db} job={j} running={current?.jobId === j.id} requested={requested.has(j.id)} />
                 </div>
@@ -164,8 +169,8 @@ export function HomeLists(props: HomeProps) {
             {review.map(j => (
               <div class="jrow">
                 <Avatar company={j.company} />
-                <JobLine job={j} />
-                <div class="jrow-action"><a class="btn" href={`/applications/${j.id}`}>Review</a></div>
+                <JobLine job={j}>{parked.has(j.id) ? <div><OpenInApp /></div> : null}</JobLine>
+                <div class="jrow-action"><a class="btn" href={livePanelHref(j.id)}>Review</a></div>
               </div>
             ))}
           </ListCard>

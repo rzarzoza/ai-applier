@@ -52,6 +52,14 @@ export function Chip(props: { cls: string; children?: Child }) {
   return <span class={`chip ${props.cls}`}>{props.children}</span>;
 }
 
+/** The job page, scrolled to its Application panel (the live view of its form). */
+export const livePanelHref = (jobId: string) => `/applications/${encodeURIComponent(jobId)}#live-panel`;
+
+/** Marks a job whose form is open in the app right now (parked for the live view). */
+export function OpenInApp() {
+  return <Chip cls="chip-blue-outline">Open in app</Chip>;
+}
+
 export const jobLocation = (j: Job) => j.chosenLocation ?? j.locations.join(" · ");
 
 export const shortDate = (d: Date) =>

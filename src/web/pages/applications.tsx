@@ -8,7 +8,9 @@ import { countByStatus, isUnknownSubmission, listJobs } from "../../jobs/repo.js
 import type { Job, JobStatus } from "../../jobs/types.js";
 import { paths } from "../../paths.js";
 import { getSnapshot } from "../../runner/records.js";
+import { raw } from "hono/html";
 import { Layout, pauseProps } from "../layout.js";
+import { LIVE_CSS, LIVE_SCRIPT, LivePanel, type PanelState } from "../live.js";
 import { Avatar, Chip, jobLocation, PageHead, shortDate, StatusChip, statusLabel } from "../ui.js";
 import { inboxCount } from "./inbox.js";
 
@@ -176,13 +178,17 @@ export const NOTICES: Record<string, string> = {
   "bank-miss": "Saved for this job only — no matching answer-bank question",
 };
 
-export function JobDetailPage(props: { db: Db; job: Job; notice?: string }) {
-  const { db, job } = props;
+/**
+ * The job's page. `live` is the Application panel's state when the job's form can be shown and finished right here (see
+ * LivePanel); then Open & finish and Do it now become the panel's Pop out.
+ */
+export function JobDetailPage(props: { db: Db; job: Job; notice?: string; live?: PanelState }) {
+  const { db, job, live } = props;
   const { views, screenshot } = fieldViews(db, job);
   const editable = job.status === "ready-to-review";
   const href = safeHref(job.url);
-  const handFinish = canHandFinish(db, job.id);
-  const doItNow = canDoItNow(db, job.id);
+  const handFinish = !live && canHandFinish(db, job.id);
+  const doItNow = !live && canDoItNow(db, job.id);
   return (
     <Layout active="applications" inboxCount={inboxCount(db)} {...pauseProps(db)} title={`${job.company} · ${job.title}`}>
       <p class="meta" style="margin:0 0 12px"><a href="/applications">← Applications</a></p>
@@ -234,8 +240,22 @@ export function JobDetailPage(props: { db: Db; job: Job; notice?: string }) {
             highlighted. Complete them and press the site's own submit button; what you type is saved to your answer bank.
           </p>
         ) : null}
+        {live ? (
+          <p class="meta" style="margin-top:10px">
+            Finish the application in the panel below: everything the app knows is filled in and the fields left for you are
+            outlined. What you type is saved as you go, and once you press the site's own submit button it's recorded and your
+            answers are saved to your answer bank. Pop out opens it in a separate browser window instead.
+          </p>
+        ) : null}
       </section>
-      {screenshot ? (
+      {live ? (
+        <>
+          <style>{raw(LIVE_CSS)}</style>
+          <LivePanel job={job} state={live} popOut={canHandFinish(db, job.id) || canDoItNow(db, job.id)} />
+          <script>{raw(LIVE_SCRIPT)}</script>
+        </>
+      ) : null}
+      {screenshot && !live ? (
         <section class="card">
           <div class="card-head"><h2>Last screenshot</h2></div>
           <img class="shot" src={screenshot} alt="Screenshot of the application form" />

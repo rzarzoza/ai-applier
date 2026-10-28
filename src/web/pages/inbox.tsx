@@ -5,7 +5,7 @@ import { blockerOptions, canDoItNow, canHandFinish, inboxItems, profileSuggestio
 import type { FieldKind } from "../../forms/types.js";
 import { getJob } from "../../jobs/repo.js";
 import { Alert, Layout, pauseProps } from "../layout.js";
-import { Avatar, Chip, PageHead } from "../ui.js";
+import { Avatar, Chip, livePanelHref, OpenInApp, PageHead } from "../ui.js";
 
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 
@@ -152,7 +152,7 @@ export function QuestionCard(props: { item: InboxItem; error?: string }) {
   );
 }
 
-export function InboxPage(props: { db: Db; rechecked?: number; approved?: { questions: number; requeued: number } }) {
+export function InboxPage(props: { db: Db; rechecked?: number; approved?: { questions: number; requeued: number }; parked?: readonly string[] }) {
   const items = inboxItems(props.db);
   const needs = listOpenNeedsYou(props.db);
   const suggestions = profileSuggestions(props.db).length;
@@ -189,12 +189,13 @@ export function InboxPage(props: { db: Db; rechecked?: number; approved?: { ques
                 <div class="jrow-body">
                   <strong>{NEEDS_KIND[n.kind] ?? n.kind}</strong>
                   <div class="jrow-meta">{n.message}</div>
+                  {props.parked?.includes(n.jobId) ? <div><OpenInApp /></div> : null}
                 </div>
                 <div class="jrow-action">
                   {canDoItNow(props.db, n.jobId)
-                    ? <button class="primary" hx-post={`/needs-you/${n.jobId}/do-it-now`} hx-target={`#needs-${n.id} .jrow-action`} hx-swap="innerHTML">Do it now</button>
+                    ? <a class="btn btn-primary" href={livePanelHref(n.jobId)}>Do it now</a>
                     : canHandFinish(props.db, n.jobId)
-                      ? <button class="primary" hx-post={`/applications/${n.jobId}/hand-finish`} hx-target={`#needs-${n.id} .jrow-action`} hx-swap="innerHTML">Open &amp; finish</button>
+                      ? <a class="btn btn-primary" href={livePanelHref(n.jobId)}>Open &amp; finish</a>
                       : <a class="btn" href={`/applications/${n.jobId}`}>Open job</a>}
                 </div>
               </div>
