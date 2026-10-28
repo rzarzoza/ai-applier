@@ -229,3 +229,26 @@ test("save-to-bank with no or several matching questions says so and approves no
   expect(getQuestion(db, q1.id)!.status).toBe("none"); expect(getQuestion(db, q2.id)!.status).toBe("none");
   expect(getOverrides(db, j2.id)["Why us?"]).toEqual({ type: "text", text: "B" });
 });
+
+test("checkbox-group options containing a comma are saved intact", async () => {
+  const { db, app, mk } = setup();
+  const j = mk(1, "ready-to-review");
+  const fields: FieldSpec[] = [{ id: "g", label: "Auth", kind: "checkbox-group", required: false, options: ["Yes, I am authorized", "No"] }];
+  saveSnapshot(db, j.id, { fields, resolutions: [{ fieldId: "g", status: "filled", answer: { type: "options", options: ["No"] }, source: "profile" }], screenshot: null });
+  const body = new URLSearchParams({ label: "Auth" }); body.append("value", "Yes, I am authorized");
+  const res = await app.request(`/applications/${j.id}/field`, { method: "POST", body, headers: { "content-type": "application/x-www-form-urlencoded" } });
+  expect(res.status).toBe(303);
+  expect(getOverrides(db, j.id)["Auth"]).toEqual({ type: "options", options: ["Yes, I am authorized"] });
+});
+
+test("save-to-bank is not offered for non-text bank answers, and a posted one gets the notice", async () => {
+  const { db, app, mk } = setup();
+  const j = mk(1, "ready-to-review");
+  const q = createQuestion(db, { canonical: "Sponsor?", kind: "global", isFactual: true });
+  const fields: FieldSpec[] = [{ id: "s", label: "Sponsor?", kind: "select", required: true, options: ["Yes", "No"] }];
+  saveSnapshot(db, j.id, { fields, resolutions: [{ fieldId: "s", status: "filled", answer: { type: "option", option: "No" }, source: "bank" }], screenshot: null });
+  expect(await (await app.request(`/applications/${j.id}`)).text()).not.toContain("saveToBank");
+  const res = await app.request(`/applications/${j.id}/field`, form({ label: "Sponsor?", value: "Yes", saveToBank: "1" }));
+  expect(res.headers.get("location")).toContain("notice=bank-miss");
+  expect(getQuestion(db, q.id)!.status).toBe("none");
+});

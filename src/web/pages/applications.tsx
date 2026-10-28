@@ -100,12 +100,13 @@ export function answerText(a: FieldAnswer | null): string {
 }
 
 /** Turns what the user typed into an answer of the type the field takes. */
-export function parseAnswer(field: FieldSpec, current: FieldAnswer | null, value: string): FieldAnswer {
+export function parseAnswer(field: FieldSpec, current: FieldAnswer | null, input: string | string[]): FieldAnswer {
   const type = current?.type ?? (field.kind === "checkbox" ? "check" : field.kind === "checkbox-group" ? "options"
     : ["select", "combobox", "radio"].includes(field.kind) ? "option" : "text");
+  const value = Array.isArray(input) ? input.join(", ") : input;
   switch (type) {
     case "check": return { type, checked: /^(yes|true|on|1)$/i.test(value.trim()) };
-    case "options": return { type, options: value.split(",").map(s => s.trim()).filter(Boolean) };
+    case "options": return { type, options: Array.isArray(input) ? input : value.split(",").map(s => s.trim()).filter(Boolean) };
     case "option": return { type, option: value.trim() };
     default: return { type: "text", text: value };
   }
@@ -115,7 +116,7 @@ function FieldRow(props: { jobId: string; view: FieldView; editable: boolean }) 
   const { field, answer, source } = props.view;
   const text = answerText(answer);
   const canEdit = props.editable && field.kind !== "file" && answer?.type !== "file";
-  const fromBank = source === "bank";
+  const fromBank = source === "bank" && answer?.type === "text";
   const opts = field.options?.length ? field.options : null;
   const chosen = new Set(answer?.type === "options" ? answer.options : [text]);
   const input = opts && field.kind === "checkbox-group"

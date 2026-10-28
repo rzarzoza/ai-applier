@@ -106,11 +106,14 @@ export function createApp(ctx: AppContext): Hono {
     const form = await c.req.parseBody({ all: true });
     const label = typeof form.label === "string" ? form.label : "";
     const raw = form.value;
-    const value = Array.isArray(raw) ? raw.filter((v): v is string => typeof v === "string").join(", ") : typeof raw === "string" ? raw : "";
+    const value = Array.isArray(raw) ? raw.filter((v): v is string => typeof v === "string") : typeof raw === "string" ? raw : "";
     const view = fieldViews(db, job).views.find(v => v.field.label === label);
     if (!view) return c.text("Unknown field", 400);
+    // A single ticked box arrives as a plain string; keep multi-choice values as an array end to end.
+    const multi = view.field.kind === "checkbox-group" || view.answer?.type === "options";
+    const input = multi ? (Array.isArray(value) ? value : value ? [value] : []) : Array.isArray(value) ? value.join(", ") : value;
     if (view.field.kind === "file" || view.answer?.type === "file") return c.text("File fields can't be edited here", 400);
-    let answer = parseAnswer(view.field, view.answer, value);
+    let answer = parseAnswer(view.field, view.answer, input);
     const known = view.field.options;
     if (known?.length && (answer.type === "option" || answer.type === "options")) {
       const canon = (v: string) => known.find(o => o.trim().toLowerCase() === v.trim().toLowerCase());
@@ -121,10 +124,11 @@ export function createApp(ctx: AppContext): Hono {
     }
     setOverride(db, job.id, label, answer);
     let notice = "";
-    if (form.saveToBank && answer.type === "text" && view.source === "bank") {
+    if (form.saveToBank && view.source === "bank" && answer.type !== "text") notice = "?notice=bank-miss";
+    else if (form.saveToBank && view.source === "bank") {
       const key = normalizeLabel(label, job.company);
       const matches = listQuestions(db).filter(x => [x.canonical, ...x.variants].some(t => normalizeLabel(t, job.company) === key));
-      if (matches.length === 1) approveAnswer(db, matches[0]!.id, answer.text);
+      if (matches.length === 1) approveAnswer(db, matches[0]!.id, (answer as { text: string }).text);
       else notice = "?notice=bank-miss";
     }
     return c.redirect(`/applications/${job.id}${notice}`, 303);
