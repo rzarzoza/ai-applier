@@ -22,6 +22,12 @@ export interface AtsHandler {
   root(page: Page): Promise<Page | Frame>;
   readFields(page: Page): Promise<FieldSpec[]>;
   fill(page: Page, field: FieldSpec, answer: FieldAnswer): Promise<void>;
+  /**
+   * Called once after the runner has filled the form's file fields (the resume first) and before it fills anything else:
+   * waits for the site to finish handling the upload (e.g. a resume parser that autofills or clears fields), so the
+   * runner's answers are typed after it, not overwritten by it. Must not throw on a timeout; omit when the site has none.
+   */
+  afterUpload?(page: Page): Promise<void>;
   readBack(page: Page, field: FieldSpec): Promise<string | string[] | boolean | null>;
   submit(page: Page): Promise<void>;
   outcome(page: Page): Promise<SubmitOutcome>;

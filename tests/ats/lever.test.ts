@@ -108,6 +108,28 @@ test("lever fixture: fill and read back text, radio, select and upload", async (
   expect(await lever.readBack(page, by("Resume/CV"))).toBe("resume-sample.pdf");
 });
 
+test("lever afterUpload waits while 'Analyzing resume...' shows, and returns soon when no parse starts", async () => {
+  await page.setContent(fixture);
+  // As Lever does: the working indicator shows, then the parse result is written and the indicator hides.
+  await page.evaluate(inPage(() => {
+    const working = document.querySelector(".resume-upload-working") as HTMLElement;
+    working.style.display = "inline";
+    setTimeout(() => {
+      (document.querySelector('input[name="location"]') as HTMLInputElement).value = "";
+      working.style.display = "none";
+    }, 800);
+  }), undefined);
+  let t = Date.now();
+  await lever.afterUpload!(page);
+  expect(Date.now() - t).toBeGreaterThanOrEqual(800);
+  expect(await page.locator(".resume-upload-working").isVisible()).toBe(false);
+
+  await page.setContent(fixture);
+  t = Date.now();
+  await lever.afterUpload!(page);
+  expect(Date.now() - t).toBeLessThan(6000);
+});
+
 test("lever outcome: a fresh form is pending", async () => {
   await page.setContent(fixture);
   expect(await lever.outcome(page)).toEqual({ kind: "pending" });

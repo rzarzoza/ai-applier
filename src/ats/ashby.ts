@@ -28,6 +28,9 @@
  *   failure -> `.ashby-application-form-failure-container` / `.ashby-application-form-blocked-application-container`
  *   ("We couldn't submit your application" + message, e.g. flagged as spam). No URL change is relied on.
  * - a closed posting renders a "job not found" page instead of the tabs/form.
+ * - uploads: a spinner (`[role=progressbar]`, aria-label "Loading...") shows while Ashby works on a file; the autofill
+ *   widget's `.ashby-application-form-autofill-input-pending-layer` ("Parsing your resume. Autofilling key fields...")
+ *   leaves `data-state="hidden"` while it parses and autofills. afterUpload waits for both to clear.
  */
 import type { Frame, Locator, Page } from "playwright";
 import { extractFields } from "../forms/extract.js";
@@ -45,6 +48,9 @@ const CONSENT = ".ashby-application-form-texting-consent-description";
 const BOT_WALL = /just a moment|security check to continue|verify (that )?you are (a )?human|access denied|attention required/i;
 const CLOSED = /job (you requested )?(was |is )?not found|no longer (open|available|accepting)|(job|position|posting) (has been )?(closed|filled)/i;
 const DESCRIPTION_MAX = 8000;
+/** Longest wait for Ashby to finish with an upload (and any resume autofill it runs). */
+const UPLOAD_WAIT_MS = 30_000;
+const PENDING = ".ashby-application-form-autofill-input-pending-layer";
 
 function parse(url: string): URL | null {
   try { return new URL(url); } catch { return null; }
@@ -112,6 +118,12 @@ export const ashby: AtsHandler = {
     if (await isYesNo(page, field)) return fillYesNo(page, field, answer);
     if (field.kind === "combobox") return pickOption(page, field, answer);
     await fillField(page, field, answer);
+  },
+
+  async afterUpload(page) {
+    // Give React a beat to render the upload state, then wait while Ashby shows a spinner or its resume-parsing layer.
+    await page.waitForTimeout(300).catch(() => {});
+    await page.waitForFunction(inPage(uploadIdle), { scope: SCOPE, pending: PENDING }, { timeout: UPLOAD_WAIT_MS, polling: 200 }).catch(() => {});
   },
 
   async readBack(page, field) {
@@ -283,6 +295,15 @@ function fieldFacts(arg: { ids: string[]; scope: string; autofill: string; conse
   }
   elements.sort((a, b) => (a.el.compareDocumentPosition(b.el) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1));
   return { labels, yesNo, order: elements.map(e => e.id) };
+}
+
+// Runs inside the page: must be self-contained. True when no upload spinner or resume-parsing layer is showing.
+function uploadIdle(arg: { scope: string; pending: string }): boolean {
+  const root = document.querySelector(arg.scope) ?? document;
+  const visible = (e: Element) => e.checkVisibility({ visibilityProperty: true }) && e.getClientRects().length > 0;
+  const parsing = Array.from(root.querySelectorAll(arg.pending)).some(e => e.getAttribute("data-state") !== "hidden" && visible(e));
+  const spinning = Array.from(root.querySelectorAll("[role=progressbar]")).some(visible);
+  return !parsing && !spinning;
 }
 
 type PageState = { success: boolean; captcha: boolean; errors: string[]; failure: string };

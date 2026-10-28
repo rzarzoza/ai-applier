@@ -77,7 +77,8 @@ const isHuman = (o: SubmitOutcome) => o.kind === "captcha" || o.kind === "verifi
 /**
  * Applies to one job: opens its form through the matching ATS handler, resolves and fills every
  * field (and any questions the answers reveal), verifies the values, then stops for review, for the
- * user's input, or submits. Never submits while a required field, a draft, or a CAPTCHA/code is
+ * user's input, or submits. A job stopped for questions that need the user still has every answered
+ * field filled first (resume upload first), so its screenshot shows what is left. Never submits while a required field, a draft, or a CAPTCHA/code is
  * unresolved. Always leaves the job in a final status with a reason, and closes the browser page.
  * Jobs already done or set aside are left untouched; "submit-reviewed" only runs a job awaiting review,
  * and "interactive" never re-runs a job whose application may already have been sent.
@@ -177,6 +178,41 @@ export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "a
     }
     const { page } = session;
 
+    /**
+     * Fills file fields first (the resume before any other file), lets the site finish handling the upload (its resume
+     * parser may autofill or clear fields), then fills everything else, so a parser never overwrites typed answers.
+     */
+    const fillAll = async (filled: Filled[]) => {
+      const { files, rest } = fillOrder(byId, filled);
+      for (const r of files) await handler.fill(page, byId.get(r.fieldId)!, r.answer);
+      if (files.length) await handler.afterUpload?.(page);
+      for (const r of rest) await handler.fill(page, byId.get(r.fieldId)!, r.answer);
+    };
+
+    /**
+     * Reads back every filled field still on the form (`onForm`). Values a late script (e.g. a resume parser) cleared or
+     * replaced after they were typed are filled once more and read again. Returns the first field that still does not
+     * hold its answer: a blank optional field is allowed; a required one, or a field holding some other value, is not.
+     */
+    const verify = async (onForm: ReadonlySet<string>): Promise<FieldSpec | null> => {
+      const mismatches = async () => {
+        const out: { r: Filled; field: FieldSpec; got: Awaited<ReturnType<AtsHandler["readBack"]>> }[] = [];
+        for (const r of resolutions) {
+          if (r.status !== "filled" || !onForm.has(r.fieldId)) continue;
+          const field = byId.get(r.fieldId)!;
+          const got = await handler.readBack(page, field);
+          if (!holds(field, r.answer, got)) out.push({ r, field, got });
+        }
+        return out;
+      };
+      let wrong = await mismatches();
+      if (wrong.length) {
+        await fillAll(wrong.map(w => w.r));
+        wrong = await mismatches();
+      }
+      return wrong.find(w => w.field.required || !isEmpty(w.got))?.field ?? null;
+    };
+
     const opened = await handler.open(page, job.url);
     if (!opened.ok) return await end(...OPEN_FAILED[opened.reason](opened.detail));
 
@@ -203,13 +239,19 @@ export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "a
       if (blocked.length) {
         for (const b of blocked) addBlocker(db, job.id, b.questionId, b.reason, byId.get(b.fieldId));
         resolveNeedsYouForJob(db, job.id); // this run supersedes any earlier CAPTCHA or code request
+        // Still fill (and check) every field that has an answer, so the form and its screenshot show all but the questions
+        // that need the user. Best effort: those questions are what this run reports, and nothing is submitted.
+        try {
+          await fillAll(res.filter((r): r is Filled => r.status === "filled"));
+          await verify(new Set(present.map(f => f.id)));
+        } catch { /* the needs-you status below still stands */ }
         const n = new Set(blocked.map(b => b.questionId)).size;
         return await end("needs-you", n === 1 ? "1 question needs you" : `${n} questions need you`);
       }
       const unanswered = res.find(r => r.status === "skip" && byId.get(r.fieldId)?.required);
       if (unanswered) return await end("failed", `Required field "${byId.get(unanswered.fieldId)!.label}" has no answer`);
 
-      for (const r of res) if (r.status === "filled") await handler.fill(page, byId.get(r.fieldId)!, r.answer);
+      await fillAll(res.filter((r): r is Filled => r.status === "filled"));
 
       // Answers can reveal follow-up questions; read the form again and handle any new ones.
       present = await handler.readFields(page);
@@ -223,14 +265,8 @@ export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "a
     }
 
     // Verify the fields still on the form (a conditional question may have been removed again).
-    const onForm = new Set(present.map(f => f.id));
-    for (const r of resolutions) {
-      if (r.status !== "filled" || !onForm.has(r.fieldId)) continue;
-      const field = byId.get(r.fieldId)!;
-      const got = await handler.readBack(page, field);
-      // A blank optional field is allowed; a required one, or a field holding some other value, is not.
-      if (!holds(field, r.answer, got) && (field.required || !isEmpty(got))) return await end("failed", `Could not fill "${field.label}"`);
-    }
+    const unfilled = await verify(new Set(present.map(f => f.id)));
+    if (unfilled) return await end("failed", `Could not fill "${unfilled.label}"`);
 
     if (reviewed) {
       const unseen = resolutions.some(r => r.status === "filled" && r.source !== "override" && !reviewed.includes(byId.get(r.fieldId)!, r.answer));
@@ -424,6 +460,19 @@ function holds(field: FieldSpec, answer: FieldAnswer, got: string | string[] | b
     default:
       return !isEmpty(got);
   }
+}
+
+/**
+ * The order to fill answers in: file uploads first (the resume before any other file), then every other field in form
+ * order. A site's resume parser runs on upload and may overwrite fields, so nothing is typed before it has run.
+ */
+export function fillOrder<R extends Filled>(byId: ReadonlyMap<string, FieldSpec>, filled: R[]): { files: R[]; rest: R[] } {
+  const isFile = (r: R) => r.answer.type === "file" || byId.get(r.fieldId)?.kind === "file";
+  const files = filled.filter(isFile);
+  return {
+    files: [...files.filter(r => r.source === "resume"), ...files.filter(r => r.source !== "resume")],
+    rest: filled.filter(r => !isFile(r)),
+  };
 }
 
 /** The resume file the form got, and the cover letter: a file's name, "written answer" for text, or "none". */

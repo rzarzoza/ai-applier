@@ -82,6 +82,25 @@
     fileInput.required = true;
     form.insertBefore(fileLabel, submitBtn);
     form.insertBefore(fileInput, submitBtn);
+
+    // &parse=1: like Lever, choosing a file shows "Analyzing resume…", and ~500ms later the "parser" clears the
+    // first name and overwrites the email with what it read from the resume, then hides the indicator. Submit does
+    // nothing while it is analyzing.
+    if (params.has("parse")) {
+      var analyzing = document.createElement("div");
+      analyzing.id = "analyzing";
+      analyzing.textContent = "Analyzing resume…";
+      analyzing.hidden = true;
+      form.insertBefore(analyzing, submitBtn);
+      fileInput.addEventListener("change", function () {
+        analyzing.hidden = false;
+        setTimeout(function () {
+          document.getElementById("first").value = "";
+          document.getElementById("email").value = "parsed@resume.example";
+          analyzing.hidden = true;
+        }, 500);
+      });
+    }
   }
 
   function send() {
@@ -96,6 +115,8 @@
   document.getElementById("submit").addEventListener("click", function () {
     document.querySelectorAll(".error").forEach(function (e) { e.remove(); });
     if (params.has("silent")) return;
+    var busy = document.getElementById("analyzing");
+    if (busy && !busy.hidden) return;
     if (params.has("oops")) { document.getElementById("oops").hidden = false; return; }
     if (!/^\d+$/.test(phone.value)) {
       var s = document.createElement("span");

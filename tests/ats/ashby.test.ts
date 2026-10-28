@@ -152,6 +152,24 @@ test("ashby fixture: text, native radios (incl. native Yes/No), and upload round
   expect(await ashby.readBack(page, by("Resume"))).toBe("resume-sample.pdf");
 });
 
+test("ashby afterUpload waits while an upload spinner shows in the form, and returns at once when idle", async () => {
+  await page.setContent(fixture);
+  let t = Date.now();
+  await ashby.afterUpload!(page);
+  expect(Date.now() - t).toBeLessThan(3000);
+
+  await page.evaluate(inPage(() => {
+    const spinner = document.createElement("span");
+    spinner.setAttribute("role", "progressbar");
+    spinner.textContent = "Uploading";
+    document.querySelector("#form")!.prepend(spinner);
+    setTimeout(() => spinner.remove(), 800);
+  }), undefined);
+  t = Date.now();
+  await ashby.afterUpload!(page);
+  expect(Date.now() - t).toBeGreaterThanOrEqual(700);
+});
+
 test("ashby location typeahead: exact, unique prefix, ambiguous prefix, no match", async () => {
   await page.setContent(`<div id="form"><div class="ashby-application-form-container"><div class="ashby-application-form-field-entry">
     <label class="ashby-application-form-question-title _required_x" for="loc">Location</label>

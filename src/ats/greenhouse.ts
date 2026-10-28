@@ -8,7 +8,9 @@
  *   An `aria-hidden` mirror `<input required>` follows each one (skipped by extractFields).
  * - async-search selects: education `#school--N`, `#degree--N`, `#discipline--N`, and `#candidate-location`.
  * - uploads: `[role=group][aria-labelledby=upload-label-<id>][aria-required]` > visually hidden `input[type=file]#<id>`
- *   whose own label is just "Attach"; after upload the input is replaced by `.file-upload__filename`.
+ *   whose own label is just "Attach"; after upload the input is replaced by `.file-upload__filename`. fill waits for
+ *   that (uploadSettled). An upload does not parse the resume into the form (autofill is the separate "Autofill with
+ *   MyGreenhouse" button, never used), so there is no afterUpload.
  * - errors: `p#<id>-error.helper-text--error` (field label at `#<id>-label` or `#upload-label-<id>`).
  * - email check after a suspicious submit: `fieldset#email-verification` with `input#security-input-0..7`.
  * - reCAPTCHA Enterprise is invisible (`iframe[src*=recaptcha][size=invisible]` anchor); a challenge is the bframe

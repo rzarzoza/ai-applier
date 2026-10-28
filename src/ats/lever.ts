@@ -9,7 +9,10 @@
  *   `input#location-input[name=location]` (plain text, an autocomplete dropdown is optional).
  * - links: `input[name="urls[LinkedIn|Twitter|GitHub|Portfolio|Other]"]` (type=text, not url).
  * - resume: `input#resume-upload-input[name=resume][type=file]` (class invisible-resume-upload) inside an
- *   `a.visible-resume-upload`; Lever parses the resume after upload (`.resume-upload-working/-success/-failure`).
+ *   `a.visible-resume-upload`; Lever parses the resume after upload: `.resume-upload-working` ("Analyzing resume...")
+ *   shows while it runs, then `.resume-upload-success` / `-failure`, and the hidden `input[name=resumeStorageId]` gets a
+ *   value. The parse result is written into the form (it may clear "Current location" or replace "Current company"), so
+ *   nothing else is filled until it has finished (see afterUpload).
  * - custom question "cards": hidden `cards[<id>][baseTemplate]` JSON + inputs `cards[<id>][fieldN]`:
  *   `input[type=radio]` (multiple-choice), `input.card-field-input`, `textarea.card-field-input`.
  * - select2 pickers (university question): hidden `select.select2-hidden-accessible` + `span.select2-selection[role=combobox]`
@@ -35,6 +38,12 @@ const FORM = "form#application-form";
 const BOT_WALL = /just a moment|security check to continue|verify (that )?you are (a )?human|access denied|attention required/i;
 const CLOSED = /no longer (open|available|accepting)|(job|position|posting) (has been )?(closed|filled)/i;
 const DESCRIPTION_MAX = 8000;
+/** Longest wait for Lever's resume parser after an upload. */
+const PARSE_WAIT_MS = 30_000;
+/** How long the "Analyzing resume" indicator gets to appear after the upload before Lever is taken to have no parser. */
+const PARSE_START_MS = 3_000;
+/** Lets the page apply the parse result (it writes fields right after hiding the indicator). */
+const PARSE_SETTLE_MS = 500;
 
 function parse(url: string): URL | null {
   try { return new URL(url); } catch { return null; }
@@ -98,6 +107,16 @@ export const lever: AtsHandler = {
   async fill(page, field, answer) {
     if (field.kind === "combobox") return pickSelect2(page, field, answer);
     await fillField(page, field, answer);
+  },
+
+  async afterUpload(page) {
+    // Lever shows "Analyzing resume..." while its parser runs, then writes what it parsed into the form. Wait for it to
+    // start (or for a parse result), then for the indicator to go away. A parse that never ends only costs the wait:
+    // the runner verifies (and re-fills) every value afterwards.
+    const deadline = Date.now() + PARSE_WAIT_MS;
+    await page.waitForFunction(inPage(resumeParse), "started", { timeout: PARSE_START_MS, polling: 100 }).catch(() => {});
+    await page.waitForFunction(inPage(resumeParse), "settled", { timeout: Math.max(1, deadline - Date.now()), polling: 200 }).catch(() => {});
+    await page.waitForTimeout(PARSE_SETTLE_MS).catch(() => {});
   },
 
   async readBack(page, field) {
@@ -172,6 +191,17 @@ async function pickSelect2(page: Page, field: FieldSpec, answer: FieldAnswer): P
 }
 
 type FieldFacts = { label: string; required: boolean };
+
+// Runs inside the page: must be self-contained. "started": the parser is running or has produced a result;
+// "settled": the "Analyzing resume" indicator is not showing.
+function resumeParse(phase: "started" | "settled"): boolean {
+  const shown = (sel: string) => Array.from(document.querySelectorAll(sel))
+    .some(e => e.checkVisibility({ visibilityProperty: true }) && e.getClientRects().length > 0);
+  const working = shown(".resume-upload-working");
+  if (phase === "settled") return !working;
+  const stored = (document.querySelector('input[name="resumeStorageId"]') as HTMLInputElement | null)?.value ?? "";
+  return working || stored !== "" || shown(".resume-upload-success, .resume-upload-failure");
+}
 
 // Runs inside the page: must be self-contained.
 function fieldFacts(ids: string[]): Record<string, FieldFacts> {

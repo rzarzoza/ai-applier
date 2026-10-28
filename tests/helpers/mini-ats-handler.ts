@@ -85,6 +85,11 @@ export const miniAtsHandler: AtsHandler = {
     return fillField(page, field, answer);
   },
 
+  async afterUpload(page) {
+    // The fixture's "resume parser" (?parse=1) shows #analyzing while it runs; absent or hidden means done.
+    await page.locator("#analyzing").waitFor({ state: "hidden", timeout: 30_000 });
+  },
+
   readBack(page, field) {
     return readBack(page, field);
   },

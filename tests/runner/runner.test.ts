@@ -15,7 +15,7 @@ import { notificationScript } from "../../src/runner/notify.js";
 import { listRecords } from "../../src/runner/records.js";
 import type { Resolution } from "../../src/answers/resolve.js";
 import type { FieldAnswer, FieldSpec } from "../../src/forms/types.js";
-import { runJob, runNext, usedDocuments, type RunnerDeps } from "../../src/runner/runner.js";
+import { fillOrder, runJob, runNext, usedDocuments, type RunnerDeps } from "../../src/runner/runner.js";
 import Anthropic from "@anthropic-ai/sdk";
 import { inboxItems } from "../../src/answers/inbox.js";
 import { inPage } from "../../src/forms/in-page.js";
@@ -227,9 +227,101 @@ test("a required resume upload with no resume waits for one, without creating a 
   expect(listOpenNeedsYou(db)).toEqual([]);
 });
 
-test("unknown required question → needs-you with blocker, nothing filled or submitted", async () => {
+const withResume = () => {
+  const resume = path.join(paths.dataDir, "resume-test.pdf");
+  writeFileSync(resume, "%PDF-1.4 test");
+  saveProfile(db, { resumePath: resume });
+};
+
+test("a resume parser that rewrites fields after the upload never overwrites the profile's answers", async () => {
+  withResume();
+  const j = addJob("https://mini-ats.test/apply?file=Resume%2FCV&parse=1");
+  expect(await runJob(deps, j.id)).toBe("submitted");
+  expect(miniAts.submissions).toHaveLength(1);
+  expect(miniAts.submissions[0]).toMatchObject({ first: "Luis", email: "luis@example.com", phone: "5551234567", reloc: "y" });
+
+  // Stopping for review leaves the same intact values on the page.
+  saveSettings(db, { reviewMode: "all" });
+  const k = addJob("https://mini-ats.test/apply?file=Resume%2FCV&parse=1");
+  const values: Record<string, string> = {};
+  deps.handlers = [{
+    ...miniAtsHandler,
+    async readBack(page, field) {
+      const got = await miniAtsHandler.readBack(page, field);
+      if (typeof got === "string") values[field.label] = got;
+      return got;
+    },
+  }];
+  expect(await runJob(deps, k.id)).toBe("ready-to-review");
+  expect(values).toMatchObject({ "First Name": "Luis", Email: "luis@example.com" });
+});
+
+test("the runner uploads the resume first, waits for the site, then fills the other fields", async () => {
+  withResume();
+  const order: string[] = [];
+  deps.handlers = [{
+    ...miniAtsHandler,
+    async fill(page, field, answer) { order.push(field.label); return miniAtsHandler.fill(page, field, answer); },
+    async afterUpload(page) { order.push("(after upload)"); return miniAtsHandler.afterUpload!(page); },
+  }];
+  const j = addJob("https://mini-ats.test/apply?file=Resume%2FCV");
+  expect(await runJob(deps, j.id)).toBe("submitted");
+  expect(order).toEqual(["Resume/CV", "(after upload)", "First Name", "Email", "Phone", "Are you willing to relocate?",
+    "I certify that the information above is accurate"]);
+
+  // Without any upload, afterUpload is never called.
+  order.length = 0;
+  const k = addJob("https://mini-ats.test/apply");
+  expect(await runJob(deps, k.id)).toBe("submitted");
+  expect(order).not.toContain("(after upload)");
+});
+
+test("fillOrder puts the resume first, then other files, then every other field in form order", () => {
+  const f = (id: string, kind: FieldSpec["kind"]): FieldSpec => ({ id, label: id, kind, required: false });
+  const byId = new Map([f("name", "text"), f("cover", "file"), f("resume", "file"), f("why", "textarea")].map(x => [x.id, x]));
+  const filled = (fieldId: string, answer: FieldAnswer, source: "resume" | "bank" | "profile") =>
+    ({ fieldId, status: "filled" as const, answer, source });
+  const plan = fillOrder(byId, [
+    filled("name", { type: "text", text: "Luis" }, "profile"),
+    filled("cover", { type: "file", path: "/data/cover.pdf" }, "bank"),
+    filled("resume", { type: "file", path: "/data/resume.pdf" }, "resume"),
+    filled("why", { type: "text", text: "Because" }, "bank"),
+  ]);
+  expect(plan.files.map(r => r.fieldId)).toEqual(["resume", "cover"]);
+  expect(plan.rest.map(r => r.fieldId)).toEqual(["name", "why"]);
+});
+
+test("a value a late script clears after it was typed is filled once more before verifying", async () => {
+  const fills: string[] = [];
+  let cleared = false;
+  deps.handlers = [{
+    ...miniAtsHandler,
+    async fill(page, field, answer) { fills.push(field.label); return miniAtsHandler.fill(page, field, answer); },
+    async readBack(page, field) {
+      // A parser that finishes late: it empties the first name just as the runner checks it.
+      if (field.label === "First Name" && !cleared) { cleared = true; await page.locator("#first").fill(""); }
+      return miniAtsHandler.readBack(page, field);
+    },
+  }];
+  expect(await runJob(deps, job.id)).toBe("submitted");
+  expect(fills.filter(l => l === "First Name")).toHaveLength(2);
+  expect(fills.filter(l => l === "Email")).toHaveLength(1);
+  expect(miniAts.submissions[0]).toMatchObject({ first: "Luis", email: "luis@example.com" });
+});
+
+test("unknown required question → needs-you with blocker; answered fields are filled, submit never clicked", async () => {
   saveProfile(db, { willingToRelocate: null });
+  const fills: string[] = [];
+  const read: Record<string, unknown> = {};
+  let submits = 0;
+  deps.handlers = [{
+    ...miniAtsHandler,
+    async fill(page, field, answer) { fills.push(field.label); return miniAtsHandler.fill(page, field, answer); },
+    async readBack(page, field) { const got = await miniAtsHandler.readBack(page, field); read[field.label] = got; return got; },
+    async submit(page) { submits++; return miniAtsHandler.submit(page); },
+  }];
   expect(await runJob(deps, job.id)).toBe("needs-you");
+  expect(submits).toBe(0);
   expect(blockersForJob(db, job.id)).toHaveLength(1);
   expect(fixtureSubmitCount()).toBe(0);
   expect(getJob(db, job.id)!.statusReason).toBe("1 question needs you");
@@ -239,8 +331,29 @@ test("unknown required question → needs-you with blocker, nothing filled or su
   expect(inboxItems(db)[0]!.jobs).toEqual([{ id: job.id, company: "Mini Co", title: "Software Engineer Intern", url: job.url,
     label: "Are you willing to relocate?", kind: "select", options: expect.arrayContaining(["Yes", "No"]), description: null }]);
   expectScreenshot(job.id);
-  // Nothing was typed into the page before stopping.
   expect(JSON.parse(snapshotRow(job.id)!.resolutions_json).filter((r: { status: string }) => r.status === "blocked")).toHaveLength(1);
+  // Every answered field was typed (and checked), so the screenshot shows only the open question unanswered.
+  expect(fills).toEqual(["First Name", "Email", "Phone", "I certify that the information above is accurate"]);
+  expect(read).toMatchObject({ "First Name": "Luis", Email: "luis@example.com", Phone: "5551234567", "I certify that the information above is accurate": true });
+  expect(read).not.toHaveProperty(["Are you willing to relocate?"]);
+});
+
+test("a blocked job with a resume upload still uploads it first and waits for the site, but never submits", async () => {
+  withResume();
+  saveProfile(db, { willingToRelocate: null });
+  const order: string[] = [];
+  let submits = 0;
+  deps.handlers = [{
+    ...miniAtsHandler,
+    async fill(page, field, answer) { order.push(field.label); return miniAtsHandler.fill(page, field, answer); },
+    async afterUpload(page) { order.push("(after upload)"); return miniAtsHandler.afterUpload!(page); },
+    async submit(page) { submits++; return miniAtsHandler.submit(page); },
+  }];
+  const j = addJob("https://mini-ats.test/apply?file=Resume%2FCV&parse=1");
+  expect(await runJob(deps, j.id)).toBe("needs-you");
+  expect(order.slice(0, 3)).toEqual(["Resume/CV", "(after upload)", "First Name"]);
+  expect(submits).toBe(0);
+  expect(fixtureSubmitCount()).toBe(0);
 });
 
 test("unapproved draft blocks submission", async () => {
