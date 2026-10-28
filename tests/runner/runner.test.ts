@@ -50,6 +50,8 @@ const CLASSES: Record<string, C> = {
   "I certify that the information above is accurate": { category: "consent-required" },
   "Text me about new roles": { category: "optin-optional" },
   "Which cities would you consider?": { category: "derived", derivedKey: "jobLocation", isFactual: true },
+  "Resume/CV": { category: "resume" },
+  Transcript: { category: "question", canonicalQuestion: "Upload your transcript", isFactual: true },
 };
 const classifyBy = (overrides: Record<string, C> = {}) => (req: { content: unknown }) => ({
   fields: (JSON.parse(String(req.content)) as { fields: { id: string; label: string }[] }).fields.map(f => {
@@ -195,6 +197,32 @@ test("submit-reviewed goes back to review when a field left blank at review now 
   expect(await runJob(deps, job.id, "submit-reviewed")).toBe("ready-to-review");
   expect(getJob(db, job.id)!.statusReason).toBe("Form changed since review");
   expect(fixtureSubmitCount()).toBe(0);
+});
+
+test("a required file upload other than the resume fails the job without creating a question", async () => {
+  const j = addJob("https://mini-ats.test/apply?file=Transcript");
+  expect(await runJob(deps, j.id)).toBe("failed");
+  expect(getJob(db, j.id)!.statusReason).toBe('Needs a file upload: "Transcript" — apply manually or skip');
+  expect(listQuestions(db).filter(q => /transcript/i.test(q.canonical))).toEqual([]);
+  expect(blockersForJob(db, j.id)).toEqual([]);
+  expect(fixtureSubmitCount()).toBe(0);
+});
+
+test("a required resume upload with no resume waits for one, without creating a question", async () => {
+  const j = addJob("https://mini-ats.test/apply?file=Resume%2FCV");
+  expect(await runJob(deps, j.id)).toBe("needs-you");
+  expect(getJob(db, j.id)!.statusReason).toBe("Upload your resume in Profile");
+  expect(listQuestions(db).filter(q => /resume/i.test(q.canonical))).toEqual([]);
+  expect(listOpenNeedsYou(db)).toMatchObject([{ jobId: j.id, kind: "other", message: expect.stringContaining("Upload your resume") }]);
+  expect(fixtureSubmitCount()).toBe(0);
+
+  // With a resume on file, the upload is filled from it.
+  const resume = path.join(paths.dataDir, "resume-test.pdf");
+  writeFileSync(resume, "%PDF-1.4 test");
+  saveProfile(db, { resumePath: resume });
+  setStatus(db, j.id, "queued");
+  expect(await runJob(deps, j.id)).toBe("submitted");
+  expect(listOpenNeedsYou(db)).toEqual([]);
 });
 
 test("unknown required question → needs-you with blocker, nothing filled or submitted", async () => {

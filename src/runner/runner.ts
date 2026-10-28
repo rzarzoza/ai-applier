@@ -7,7 +7,10 @@ import { atsNameFromUrl, detectAts, HANDLERS } from "../ats/registry.js";
 import type { AtsHandler, OpenResult, SubmitOutcome } from "../ats/types.js";
 import type { Db } from "../db/db.js";
 import type { FieldAnswer, FieldSpec, JobContext } from "../forms/types.js";
-import { decrementAttempts, getJob, incrementAttempts, isUnknownSubmission, nextQueued, setAts, setStatus, setUsedDocuments, submittedSince, UNKNOWN_SUBMISSION } from "../jobs/repo.js";
+import {
+  decrementAttempts, getJob, incrementAttempts, isUnknownSubmission, nextQueued, RESUME_NEEDED, setAts, setStatus, setUsedDocuments,
+  submittedSince, UNKNOWN_SUBMISSION,
+} from "../jobs/repo.js";
 import type { Job, JobStatus } from "../jobs/types.js";
 import { llmHaltReason, type Llm } from "../llm/llm.js";
 import { getFilters } from "../filters/filters.js";
@@ -186,6 +189,15 @@ export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "a
       for (const f of batch) { fields.push(f); byId.set(f.id, f); }
       const res = await resolveFields({ db, llm: deps.llm }, batch, ctx, reviewed?.preset);
       resolutions.push(...res);
+
+      const files = res.filter(r => r.status === "needs-file");
+      const otherFile = files.find(r => !r.resume);
+      if (otherFile) return await end("failed", `Needs a file upload: "${byId.get(otherFile.fieldId)!.label}" — apply manually or skip`);
+      if (files.length) {
+        resolveNeedsYouForJob(db, job.id);
+        addNeedsYou(db, { jobId: job.id, kind: "other", message: `${job.company} · ${job.title}: ${RESUME_NEEDED}` });
+        return await end("needs-you", RESUME_NEEDED);
+      }
 
       const blocked = res.filter(r => r.status === "blocked");
       if (blocked.length) {

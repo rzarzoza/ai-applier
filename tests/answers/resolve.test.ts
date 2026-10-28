@@ -348,6 +348,27 @@ test("same-label fields with different descriptions are classified separately, i
   expect(llm.calls.filter(c => c.name === "classify")).toHaveLength(1);
 });
 
+test("file uploads: the resume when there is one; otherwise required files need one, optional ones are skipped", async () => {
+  const db = setup();
+  const llm = new FakeLlm().on("classify", classifyAs({
+    cv: { category: "resume" },
+    transcript: { category: "question", canonicalQuestion: "Upload your transcript", isFactual: true },
+    cover: { category: "cover-letter" },
+    extra: { category: "question", canonicalQuestion: "Portfolio", isFactual: true },
+  }));
+  const fields = [f("cv", "Resume/CV", "file"), f("transcript", "Transcript", "file"), f("cover", "Cover Letter", "file"),
+    f("extra", "Portfolio", "file", { required: false })];
+  expect(await resolveFields({ db, llm }, fields, job)).toEqual([
+    { fieldId: "cv", status: "filled", answer: { type: "file", path: "/data/resume.pdf" }, source: "resume" },
+    { fieldId: "transcript", status: "needs-file", resume: false },
+    { fieldId: "cover", status: "needs-file", resume: false },
+    { fieldId: "extra", status: "skip" },
+  ]);
+  saveProfile(db, { resumePath: null });
+  expect((await resolveFields({ db, llm }, fields.slice(0, 1), job))[0]).toEqual({ fieldId: "cv", status: "needs-file", resume: true });
+  expect(listQuestions(db)).toEqual([]);
+});
+
 test("a saved question with exactly the same wording matches without asking the LLM", async () => {
   const db = setup();
   const q = createQuestion(db, { canonical: "Do you hold a security clearance?", kind: "global", isFactual: true });

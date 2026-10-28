@@ -82,7 +82,7 @@ export function fieldViews(db: Db, job: Job): { views: FieldView[]; screenshot: 
     if (override) return { field, answer: override, source: "override" };
     const r = byField.get(field.id);
     if (r?.status === "filled") return { field, answer: r.answer, source: r.source };
-    return { field, answer: null, source: r?.status === "blocked" ? "needs an answer" : "left blank" };
+    return { field, answer: null, source: r?.status === "blocked" ? "needs an answer" : r?.status === "needs-file" ? "needs a file" : "left blank" };
   });
   return { views, screenshot: snap.screenshotPath ? recordUrl(snap.screenshotPath) : null };
 }

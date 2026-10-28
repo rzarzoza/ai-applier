@@ -34,6 +34,9 @@ const touch = () => new Date().toISOString();
 /** The reason of a job the user skipped (filters never bring it back). */
 export const SKIPPED_BY_YOU = "Skipped by you";
 
+/** The needs-you reason for a job whose form needs a resume file and none is uploaded. */
+export const RESUME_NEEDED = "Upload your resume in Profile";
+
 /** The needs-you reason for a job whose application may already have gone out. */
 export const UNKNOWN_SUBMISSION = "Submission state unknown — check before retrying";
 export const UNKNOWN_SUBMISSION_PREFIX = "Submission state unknown";

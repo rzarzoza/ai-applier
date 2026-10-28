@@ -14,7 +14,9 @@ export type FillSource = "override" | "profile" | "derived" | "consent" | "resum
 export type Resolution =
   | { fieldId: string; status: "filled"; answer: FieldAnswer; source: FillSource }
   | { fieldId: string; status: "skip" }
-  | { fieldId: string; status: "blocked"; questionId: number; reason: "missing" | "approval" };
+  | { fieldId: string; status: "blocked"; questionId: number; reason: "missing" | "approval" }
+  /** A required file upload the app has no file for (the resume when none is uploaded, or any other file). */
+  | { fieldId: string; status: "needs-file"; resume: boolean };
 
 interface Ctx { db: Db; llm: Llm; profile: Profile; job: JobContext }
 
@@ -60,6 +62,12 @@ export async function resolveFields(deps: { db: Db; llm: Llm }, fields: FieldSpe
 }
 
 async function byCategory(ctx: Ctx, field: FieldSpec, c: Classification): Promise<Resolution> {
+  // The only file the app holds is the resume; no typed answer can stand in for an upload.
+  if (field.kind === "file") {
+    const resume = c.category === "resume";
+    if (resume && ctx.profile.resumePath) return filled(field, { type: "file", path: ctx.profile.resumePath }, "resume");
+    return field.required ? { fieldId: field.id, status: "needs-file", resume } : skip(field);
+  }
   switch (c.category) {
     case "profile":
       return fromValue(ctx, field, profileValue(ctx.profile, c.profileKey!), "profile");
@@ -72,8 +80,7 @@ async function byCategory(ctx: Ctx, field: FieldSpec, c: Classification): Promis
     case "optin-optional":
       return skip(field);
     case "resume":
-      if (field.kind !== "file") return fromValue(ctx, field, ctx.profile.resumeText, "profile");
-      return ctx.profile.resumePath ? filled(field, { type: "file", path: ctx.profile.resumePath }, "resume") : unresolvedFact(ctx, field);
+      return fromValue(ctx, field, ctx.profile.resumeText, "profile");
     case "cover-letter":
       return field.required ? fromBank(ctx, field, c) : skip(field);
     case "question":
@@ -157,8 +164,7 @@ async function unresolvedFact(ctx: Ctx, field: FieldSpec): Promise<Resolution> {
 async function fromBank(ctx: Ctx, field: FieldSpec, c: Classification): Promise<Resolution> {
   const { db, llm, profile, job } = ctx;
   const canonical = c.canonicalQuestion ?? cleanLabel(field.label);
-  // A file can't be drafted, so treat it like a fact only the user can provide.
-  const isFactual = c.isFactual || field.kind === "file";
+  const isFactual = c.isFactual;
 
   const label = cleanLabel(field.label);
   const matchId = await matchQuestion(llm, canonical, isFactual, listQuestions(db), [label, withCompanyPlaceholder(label, job.company)]);

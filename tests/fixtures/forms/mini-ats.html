@@ -69,6 +69,21 @@
     });
   }
 
+  // ?file=<label>: adds a required file upload with that label (e.g. "Resume/CV" or "Transcript").
+  if (params.has("file")) {
+    var submitBtn = document.getElementById("submit");
+    var fileLabel = document.createElement("label");
+    fileLabel.htmlFor = "upload";
+    fileLabel.textContent = params.get("file");
+    var fileInput = document.createElement("input");
+    fileInput.id = "upload";
+    fileInput.name = "upload";
+    fileInput.type = "file";
+    fileInput.required = true;
+    form.insertBefore(fileLabel, submitBtn);
+    form.insertBefore(fileInput, submitBtn);
+  }
+
   function send() {
     var data = {};
     new FormData(form).forEach(function (v, k) { data[k] = String(v); });

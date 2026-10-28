@@ -1,6 +1,16 @@
 import type { Db } from "../db/db.js";
-import { getJob, isUnknownSubmission, setStatus } from "../jobs/repo.js";
-import { approveAnswer, deleteQuestion, getQuestion, openNeedsYouForJob, type NeedsYou, type Question } from "./bank.js";
+import { getJob, isUnknownSubmission, RESUME_NEEDED, setStatus } from "../jobs/repo.js";
+import { approveAnswer, deleteQuestion, getQuestion, openNeedsYouForJob, resolveNeedsYouForJob, type NeedsYou, type Question } from "./bank.js";
+
+/** After a resume upload: requeues the jobs that were waiting for one. Returns their ids. */
+export function requeueWaitingForResume(db: Db): string[] {
+  const ids = (db.prepare("SELECT id FROM jobs WHERE status = 'needs-you' AND status_reason = ? ORDER BY rowid").all(RESUME_NEEDED) as unknown as { id: string }[]).map(r => r.id);
+  for (const id of ids) {
+    resolveNeedsYouForJob(db, id);
+    setStatus(db, id, "queued");
+  }
+  return ids;
+}
 
 /** Needs-you kinds the user clears at the browser, so "Do it now" may open the form for them. */
 const AT_THE_BROWSER: ReadonlySet<NeedsYou["kind"]> = new Set(["captcha", "code", "login"]);

@@ -3,6 +3,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { expect, test } from "vitest";
 import { z } from "zod";
+import { addNeedsYou, listOpenNeedsYou } from "../../src/answers/bank.js";
+import { getJob, setStatus, upsertPosting } from "../../src/jobs/repo.js";
 import { getProfile } from "../../src/profile/profile.js";
 import { setDataDir } from "../../src/paths.js";
 import { form, setupApp } from "./helpers.js";
@@ -42,6 +44,19 @@ test("resume upload runs importResume and reports the filled count", async () =>
   const html = await (await app.request("/profile/resume", upload(pdf()))).text();
   expect(html).toContain("Filled 2 fields from your resume");
   expect(getProfile(db).firstName).toBe("Ada");
+});
+
+test("a resume upload requeues jobs that were waiting for one", async () => {
+  setDataDir(mkdtempSync(path.join(tmpdir(), "aia-")));
+  const { app, llm, db } = setupApp();
+  llm.on("resume", () => ({ resumeText: "text" }) as z.infer<z.ZodAny>);
+  const { job } = upsertPosting(db, { sourceId: "s", listingId: "1", company: "Acme", title: "Intern", locations: ["NYC"], category: null,
+    terms: [], degrees: [], sponsorship: null, url: "https://acme.test/1", datePosted: new Date(), active: true });
+  setStatus(db, job.id, "needs-you", "Upload your resume in Profile");
+  addNeedsYou(db, { jobId: job.id, kind: "other", message: "Acme · Intern: Upload your resume in Profile" });
+  await app.request("/profile/resume", upload(pdf()));
+  expect(getJob(db, job.id)!.status).toBe("queued");
+  expect(listOpenNeedsYou(db)).toEqual([]);
 });
 
 test("resume upload rejects non-PDF content and wrong types", async () => {

@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSyn
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Hono } from "hono";
-import { answerQuestion, canDoItNow, deleteQuestionAndRequeue } from "../answers/inbox.js";
+import { answerQuestion, canDoItNow, deleteQuestionAndRequeue, requeueWaitingForResume } from "../answers/inbox.js";
 import { getQuestion, listQuestions, approveAnswer, resolveNeedsYouForJob, setDraft, setOverride } from "../answers/bank.js";
 import { reviseDraft } from "../answers/draft.js";
 import type { Db } from "../db/db.js";
@@ -248,6 +248,7 @@ export function createApp(ctx: AppContext): Hono {
       writeFileSync(tmp, bytes);
       const before = getProfile(db);
       const after = await importResume(db, ctx.llm, tmp);
+      requeueWaitingForResume(db);
       const filled = (Object.keys(after) as (keyof Profile)[])
         .filter(k => k !== "resumePath" && k !== "resumeText" && JSON.stringify(before[k]) !== JSON.stringify(after[k])).length;
       return c.html(ProfilePage({ db, notice: `Filled ${filled} ${filled === 1 ? "field" : "fields"} from your resume` }));
