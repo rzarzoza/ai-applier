@@ -26,7 +26,13 @@ export function postingKey(url: string): string | null {
     const j = parts.indexOf("j");
     if (j >= 0 && parts[j + 1]) return `workable:${parts[j + 1].toLowerCase()}`;
   }
-  if (host === "jobs.smartrecruiters.com" && parts[1]) return `sr:${parts[1].split("-")[0]}`;
+  if (host === "jobs.smartrecruiters.com" || host === "www.smartr.me") {
+    // One-click apply: /oneclick-ui/company/<Company>/publication/<uuid>; a posting: /<Company>/<numeric id>[-slug].
+    const pub = parts.indexOf("publication");
+    if (parts[0] === "oneclick-ui") return pub >= 0 && parts[pub + 1] ? `sr-pub:${parts[pub + 1].toLowerCase()}` : null;
+    const id = parts[1]?.split("-")[0];
+    if (id && /^\d+$/.test(id)) return `sr:${id}`;
+  }
   if (host.endsWith("myworkdayjobs.com")) {
     // .../job/<location>/<Title>_<REQ123>[/apply[/...]]
     const j = parts.indexOf("job");
@@ -45,7 +51,15 @@ function basePath(url: string): string | null {
 }
 
 /**
- * The job row for a page the extension is on: the same normalized URL, else the same posting (postingKey), else the
+ * The job row for a page the extension is on, else for the page that led to it (`referrer`): SmartRecruiters' one-click
+ * form has its own URL, reached from the posting the job row names.
+ */
+export function findJobForPage(db: Db, url: string, referrer?: string): Job | null {
+  return findJobByUrl(db, url) ?? (referrer && referrer !== url ? findJobByUrl(db, referrer) : null);
+}
+
+/**
+ * The job row for a URL: the same normalized URL, else the same posting (postingKey), else the
  * same page ignoring its query and form step. The most recently updated row wins.
  */
 export function findJobByUrl(db: Db, url: string): Job | null {

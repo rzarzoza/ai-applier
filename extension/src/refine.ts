@@ -7,18 +7,19 @@
  * - a picker's placeholder ("Select...") is not part of its description.
  */
 import type { FieldSpec } from "../../src/forms/types.js";
+import { byIdNear } from "./dom.js";
 import { membersOf } from "./fill.js";
 
 const squash = (s: string | null | undefined) => (s ?? "").replace(/\s+/g, " ").trim();
 const GENERIC_UPLOAD = /^(attach|upload|browse|choose( a)? file|select( a)? file|add file|drop files? here)?$/i;
 
-function textOfIds(ids: string | null): string {
-  return squash((ids ?? "").split(/\s+/).filter(Boolean).map(i => document.getElementById(i)?.textContent ?? "").join(" "));
+function textOfIds(ids: string | null, ctx: Node): string {
+  return squash((ids ?? "").split(/\s+/).filter(Boolean).map(i => byIdNear(ctx, i)?.textContent ?? "").join(" "));
 }
 
 /** The placeholder a react-select style picker shows (by its id, else the nearest placeholder element around it). */
 function placeholderOf(el: HTMLElement): string {
-  const byId = el.id ? squash(document.getElementById(`react-select-${el.id}-placeholder`)?.textContent) : "";
+  const byId = el.id ? squash(byIdNear(el, `react-select-${el.id}-placeholder`)?.textContent) : "";
   if (byId) return byId;
   for (let a: HTMLElement | null = el.parentElement, d = 0; a && d < 4; a = a.parentElement, d++) {
     if (a.querySelectorAll("[role=combobox]").length > 1) break;
@@ -35,7 +36,7 @@ export function refineFields(fields: FieldSpec[]): FieldSpec[] {
     const out: FieldSpec = { ...f };
     if (f.kind === "file") {
       const group = el.closest("[role=group][aria-labelledby]");
-      const groupLabel = group ? textOfIds(group.getAttribute("aria-labelledby")).replace(/\s*\*+\s*$/, "") : "";
+      const groupLabel = group ? textOfIds(group.getAttribute("aria-labelledby"), group).replace(/\s*\*+\s*$/, "") : "";
       if (groupLabel) {
         out.label = groupLabel;
         out.required = f.required || group!.getAttribute("aria-required") === "true";

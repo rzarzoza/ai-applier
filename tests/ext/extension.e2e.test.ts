@@ -3,7 +3,7 @@
  * locally (the browser maps job-boards.greenhouse.io to 127.0.0.1). The test, never the extension, clicks submit.
  */
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -21,6 +21,37 @@ import { fakeLlm, until } from "../helpers/live-setup.js";
 
 const ROOT = path.resolve(new URL("../..", import.meta.url).pathname);
 const fixture = readFileSync(new URL("../fixtures/forms/mini-ats.html", import.meta.url), "utf8");
+const shadowFixture = readFileSync(new URL("../fixtures/forms/shadow-ats.html", import.meta.url), "utf8");
+
+/** The mini ATS's classifications (helpers/live-setup.ts) plus the SmartRecruiters-like fixture's. */
+const SHADOW_CLASSES: Record<string, Record<string, unknown>> = {
+  "First name": { category: "profile", profileKey: "firstName", isFactual: true },
+  "Last name": { category: "profile", profileKey: "lastName", isFactual: true },
+  "Confirm your email": { category: "profile", profileKey: "email", isFactual: true },
+  City: { category: "profile", profileKey: "location", isFactual: true },
+  "Country code": { category: "profile", profileKey: "country", isFactual: true },
+  LinkedIn: { category: "profile", profileKey: "linkedin", isFactual: true },
+  "How did you hear about us?": { category: "question", canonicalQuestion: "How did you hear about this job?", isFactual: true },
+  Resume: { category: "resume", isFactual: false },
+};
+const llm = () => {
+  const base = fakeLlm();
+  return base.on("classify", (req: { content: unknown }) => ({
+    fields: (JSON.parse(String(req.content)) as { fields: { id: string; label: string }[] }).fields.map(f => ({
+      id: f.id, profileKey: null, derivedKey: null, canonicalQuestion: null, isFactual: false, isCompanySpecific: false, category: "question",
+      ...MINI_CLASSES[f.label], ...SHADOW_CLASSES[f.label],
+    })),
+  }));
+};
+const MINI_CLASSES: Record<string, Record<string, unknown>> = {
+  "First Name": { category: "profile", profileKey: "firstName", isFactual: true },
+  Email: { category: "profile", profileKey: "email", isFactual: true },
+  Phone: { category: "profile", profileKey: "phone", isFactual: true },
+  "Are you willing to relocate?": { category: "profile", profileKey: "willingToRelocate", isFactual: true },
+  "Tell us about a project you are proud of": { category: "question", canonicalQuestion: "Describe a project you are proud of.", isFactual: false },
+  "I certify that the information above is accurate": { category: "consent-required" },
+  "Text me about new roles": { category: "optin-optional" },
+};
 const secrets = { get: async () => null, set: async () => {} };
 
 let site: http.Server;
@@ -43,7 +74,7 @@ beforeAll(async () => {
       return;
     }
     res.setHeader("content-type", "text/html");
-    res.end(req.url?.startsWith("/mini/jobs/") ? fixture : "<html><body>Not an application</body></html>");
+    res.end(req.url?.startsWith("/mini/jobs/") ? fixture : req.url?.startsWith("/oneclick-ui/") ? shadowFixture : "<html><body>Not an application</body></html>");
   });
   await new Promise<void>(r => site.listen(0, "127.0.0.1", r));
   sitePort = (site.address() as AddressInfo).port;
@@ -52,7 +83,12 @@ beforeAll(async () => {
   dataDir = mkdtempSync(path.join(tmpdir(), "ai-applier-ext-app-"));
   const seed = openDb(path.join(dataDir, "app.db"));
   saveSettings(seed, { paused: true });
-  saveProfile(seed, { firstName: "Luis", lastName: "Hernandez", email: "luis@example.com", phone: null, willingToRelocate: true });
+  const resume = path.join(dataDir, "resume.pdf");
+  writeFileSync(resume, "%PDF-1.4 test resume");
+  saveProfile(seed, {
+    firstName: "Luis", lastName: "Hernandez", email: "luis@example.com", phone: null, willingToRelocate: true, city: "Houston", state: "Texas",
+    country: "United States", linkedin: "https://linkedin.com/in/luis", resumePath: resume,
+  });
   const { job } = upsertPosting(seed, {
     sourceId: "test", listingId: "42", company: "Mini Co", title: "Software Engineer Intern", locations: ["Austin, TX"], category: null,
     terms: ["Summer 2027"], degrees: [], sponsorship: null, url: "https://job-boards.greenhouse.io/mini/jobs/42", datePosted: new Date(), active: true,
@@ -61,11 +97,11 @@ beforeAll(async () => {
   jobId = job.id;
   const token = getExtToken(seed);
   seed.close();
-  app = await startApp({ dataDir, port: 0, startLoops: false, secrets, llm: fakeLlm(), handlers: [] });
+  app = await startApp({ dataDir, port: 0, startLoops: false, secrets, llm: llm(), handlers: [] });
 
   ctx = await chromium.launchPersistentContext(mkdtempSync(path.join(tmpdir(), "ai-applier-ext-profile-")), {
     channel: "chromium", headless: true,
-    args: [`--disable-extensions-except=${extDir}`, `--load-extension=${extDir}`, "--host-resolver-rules=MAP job-boards.greenhouse.io 127.0.0.1, MAP example.test 127.0.0.1"],
+    args: [`--disable-extensions-except=${extDir}`, `--load-extension=${extDir}`, "--host-resolver-rules=MAP job-boards.greenhouse.io 127.0.0.1, MAP jobs.smartrecruiters.com 127.0.0.1, MAP example.test 127.0.0.1"],
   });
   const sw = ctx.serviceWorkers()[0] ?? await ctx.waitForEvent("serviceworker", { timeout: 15_000 });
   await sw.evaluate(cfg => chrome.storage.local.set(cfg), { token, apiBase: app.url });
@@ -120,6 +156,49 @@ test("on an application page it fills the form by itself, lists what's left, and
     const project = listQuestions(db).find(q => q.variants.includes("Tell us about a project you are proud of"));
     expect(project).toMatchObject({ status: "approved", answer: "A compiler for a toy language." });
     expect(getOverrides(db, jobId)).toMatchObject({ Phone: { type: "text", text: "5559876543" } });
+  } finally { db.close(); }
+  await page.close();
+}, 90_000);
+
+test("on a SmartRecruiters-style page (no <form>, fields in shadow roots, rendered late) it fills and records the submission", async () => {
+  posted.length = 0;
+  const page = await ctx.newPage();
+  // Opened from the posting the app knows (as "I'm interested" does), so the submission lands on that job's row.
+  const posting = `http://jobs.smartrecruiters.com:${sitePort}/Acme/744000000000001`;
+  const url = `http://jobs.smartrecruiters.com:${sitePort}/oneclick-ui/company/Acme/publication/0b1c-22`;
+  const seed = openDb(path.join(dataDir, "app.db"));
+  const job = upsertPosting(seed, {
+    sourceId: "test", listingId: "sr-1", company: "Acme", title: "Software Engineer Intern", locations: ["Houston, TX"], category: null,
+    terms: ["Summer 2027"], degrees: [], sponsorship: null, url: posting, datePosted: new Date(), active: true,
+  }).job;
+  setStatus(seed, job.id, "queued");
+  seed.close();
+  await page.goto(url, { referer: posting });
+  const host = (name: string) => page.evaluate(n => (window as unknown as { __hostValues: Record<string, string> }).__hostValues[n], name);
+  await until(async () => (await host("first")) === "Luis", 15_000);
+  await until(async () => (await panelText(page)).includes("need"), 15_000);
+  expect(await host("last")).toBe("Hernandez");
+  expect(await host("email")).toBe("luis@example.com");
+  expect(await host("email2")).toBe("luis@example.com");
+  expect(await host("city")).toBe("Houston, Texas, United States");
+  expect(await host("code")).toBe("us");
+  expect(await host("resume")).toBe("Luis_Hernandez_Resume.pdf"); // the stored resume.pdf, named for the employer
+  const text = await panelText(page);
+  expect(text).toContain("How did you hear about us?");
+
+  // The user answers what was left (inside the component's shadow root), and the test clicks the shadow-DOM button.
+  await page.locator('spl-input[name="hear"] input').fill("A friend at Acme");
+  await page.locator("spl-button#submit button").click();
+  await until(() => posted.length === 1, 10_000);
+  expect(posted[0]).toMatchObject({ first: "Luis", city: "Houston, Texas, United States", hear: "A friend at Acme" });
+  await until(async () => (await panelText(page)).includes("Application sent"), 10_000);
+
+  const db = openDb(path.join(dataDir, "app.db"));
+  try {
+    expect(getJob(db, job.id)).toMatchObject({ company: "Acme", status: "submitted" });
+    expect(db.prepare("SELECT COUNT(*) AS n FROM jobs WHERE source_id = 'extension'").get()).toEqual({ n: 0 });
+    const hear = listQuestions(db).find(q => q.variants.includes("How did you hear about us?"));
+    expect(hear).toMatchObject({ status: "approved", answer: "A friend at Acme" });
   } finally { db.close(); }
   await page.close();
 }, 90_000);

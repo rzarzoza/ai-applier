@@ -23,7 +23,7 @@ export type ExtResolution =
   /** Left alone (an optional opt-in, an optional field with no known answer...). */
   | { fieldId: string; status: "skip" };
 
-export interface ResolveRequest { url: string; title: string; company?: string; fields: FieldSpec[] }
+export interface ResolveRequest { url: string; referrer?: string; title: string; company?: string; fields: FieldSpec[] }
 export interface ResolveResponse {
   resolutions: ExtResolution[];
   /** The job row the page was matched to, if any (its company and title were used). */
@@ -38,11 +38,14 @@ export interface LearnAnswer {
   /** The bank question the app named for this field (needs-you or suggestion), when it named one. */
   questionId?: number;
 }
-export interface LearnRequest { url: string; title?: string; company?: string; answers: LearnAnswer[] }
+export interface LearnRequest { url: string; referrer?: string; title?: string; company?: string; answers: LearnAnswer[] }
 export interface LearnResponse { ok: true; learned: number; overrides: number }
 
 export interface SubmittedRequest {
-  url: string; title: string; company: string; resumeUsed?: string; coverLetterUsed?: string;
+  url: string;
+  /** The page that led to this one (a one-click form's posting), to find the job row by. */
+  referrer?: string;
+  title: string; company: string; resumeUsed?: string; coverLetterUsed?: string;
   /** Every value sent, for the application's record. */
   answers?: { label: string; value: LearnValue }[];
 }

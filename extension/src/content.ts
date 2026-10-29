@@ -10,8 +10,9 @@ import type { FieldSpec } from "../../src/forms/types.js";
 import { fillField, isEmpty, isForbidden, membersOf, readValue, sameValue, type FieldValue } from "./fill.js";
 import { send, type ApiResult, type ResumeFile, type TabRequest, type TabState } from "./messages.js";
 import { Panel, PANEL_HOST_ID, type LeftItem } from "./panel.js";
+import { composedContains, deepQueryAll, shadowRoots } from "./dom.js";
 import { refineFields } from "./refine.js";
-import { findFormScope, isApplicationPage, markScope, pageJob } from "./scope.js";
+import { findFormScope, inPageChrome, isApplicationPage, markScope, pageJob } from "./scope.js";
 
 const MIN_FIELDS = 3;
 /** "Fill this page" takes a smaller form, but not a lone search box. */
@@ -51,6 +52,9 @@ let session: Session | null = null;
 let busy = false;
 let filling = false;
 let resumeFile: Promise<File | null> | null = null;
+
+/** The page that led here (a one-click form's job posting), so the app can find the job by it. */
+const referrer = (): { referrer?: string } => (/^https?:/.test(document.referrer) ? { referrer: document.referrer } : {});
 
 const outlined = new Map<HTMLElement, SavedOutline>();
 const visible = (e: Element) => e.checkVisibility({ visibilityProperty: true }) && e.getClientRects().length > 0;
@@ -179,7 +183,7 @@ function renderSoon(): void {
 function scan(selector: string): FieldSpec[] {
   return refineFields(collectFields(selector)).filter(f => {
     const m = membersOf(f.id);
-    return m.length && !m.some(isForbidden) && !m.some(e => e.closest(`#${PANEL_HOST_ID}`));
+    return m.length && !m.some(isForbidden) && !m.some(e => e.closest(`#${PANEL_HOST_ID}`) || inPageChrome(e));
   });
 }
 
@@ -188,7 +192,7 @@ async function resolveAndFill(s: Session, specs: FieldSpec[]): Promise<void> {
   const job = pageJob();
   const r = await bg<ApiResult<ResolveResponse>>({
     type: "api", method: "POST", path: "/ext/resolve",
-    body: { url: location.href, title: job.title, ...(job.company ? { company: job.company } : {}), fields: specs },
+    body: { url: location.href, ...referrer(), title: job.title, ...(job.company ? { company: job.company } : {}), fields: specs },
   });
   if (session !== s) return;
   if (!r || !r.ok) {
@@ -314,19 +318,19 @@ function submission(s: Session): SubmittedRequest {
     if (st.spec.kind === "file" && st.res?.status === "filled" && typeof v === "string") resumeUsed = v;
     answers.push({ label: st.spec.label, value: v as string | string[] | boolean });
   }
-  return { url: s.url, title: job.title, company: job.company ?? "", ...(resumeUsed ? { resumeUsed } : {}), answers };
+  return { url: s.url, ...referrer(), title: job.title, company: job.company ?? "", ...(resumeUsed ? { resumeUsed } : {}), answers };
 }
 
 /** Error messages the form shows (a submit it refused adds some). */
 function errorCount(scope: Element): number {
-  return Array.from(scope.querySelectorAll('[role=alert], .error, [class*="error" i], [class*="invalid" i]'))
+  return deepQueryAll(scope, '[role=alert], .error, [class*="error" i], [class*="invalid" i]')
     .filter(e => visible(e) && !!e.textContent?.trim()).length;
 }
 
 /** Whether the form refused the submit: a control marked invalid, or more error messages than before the click. */
 function refused(scope: Element, errorsBefore: number): boolean {
   if (!visible(scope)) return false;
-  if (Array.from(scope.querySelectorAll('[aria-invalid="true"], input:invalid, select:invalid, textarea:invalid')).some(visible)) return true;
+  if (deepQueryAll(scope, '[aria-invalid="true"], input:invalid, select:invalid, textarea:invalid').some(visible)) return true;
   return errorCount(scope) > errorsBefore;
 }
 
@@ -339,7 +343,7 @@ async function onSubmit(): Promise<void> {
   const errorsBefore = errorCount(s.scope);
   const learn = learnAnswers(s);
   // Sent first, so the background keeps it even if the page navigates away right now.
-  await bg({ type: "submit", id, learn: learn.length ? { url: s.url, ...pageJob(), answers: learn } : null, submitted: submission(s), delayMs: SUBMIT_DELAY_MS });
+  await bg({ type: "submit", id, learn: learn.length ? { url: s.url, ...referrer(), ...pageJob(), answers: learn } : null, submitted: submission(s), delayMs: SUBMIT_DELAY_MS });
   setTimeout(() => {
     if (session !== s) return;
     if (s.scope.isConnected && refused(s.scope, errorsBefore)) {
@@ -357,23 +361,35 @@ async function onSubmit(): Promise<void> {
   }, SUBMIT_CHECK_MS);
 }
 
+/** A button's words: its own text or label, else (a <button> inside a web component) its host's. */
+function buttonText(el: Element): string {
+  const own = squashed(el instanceof HTMLInputElement ? el.value : el.textContent || el.getAttribute("aria-label"));
+  if (own) return own;
+  const root = el.getRootNode();
+  return root instanceof ShadowRoot ? squashed(root.host.textContent || root.host.getAttribute("aria-label")) : "";
+}
+const squashed = (s: string | null | undefined) => (s ?? "").replace(/\s+/g, " ").trim();
+
 function isSubmitControl(el: Element): boolean {
   const s = session;
   if (!s) return false;
-  const text = (el instanceof HTMLInputElement ? el.value : el.textContent || el.getAttribute("aria-label") || "").replace(/\s+/g, " ").trim();
+  const text = buttonText(el);
   if (!text || text.length > 60 || !SUBMIT_TEXT.test(text) || NOT_SUBMIT.test(text)) return false;
-  // Inside the form, or next to it (a form-less page may keep its button beside the fields' block).
+  // Inside the form (through shadow roots), or next to it (a form-less page may keep its button beside the fields).
   const near = s.scope.parentElement?.parentElement ?? s.scope;
-  return s.scope.contains(el) || (near.contains(el) && !el.closest("header, nav, footer"));
+  return composedContains(s.scope, el) || (composedContains(near, el) && !inPageChrome(el));
 }
 
+const BUTTON = "button, input[type=submit], input[type=button], [role=button], a";
+
 document.addEventListener("click", e => {
-  const t = e.target instanceof Element ? e.target : null;
-  if (t && session && !t.closest(`#${PANEL_HOST_ID}`)) {
-    const b = t.closest("button, input[type=submit], input[type=button], [role=button], a");
-    if (b && isSubmitControl(b)) void onSubmit();
-    else renderSoon();
-  }
+  if (!session) return;
+  // A click inside a shadow root reaches the document retargeted to its host: the real target is in the path.
+  const path = e.composedPath().filter((n): n is Element => n instanceof Element);
+  if (!path.length || path.some(n => n.id === PANEL_HOST_ID)) return;
+  const b = path.find(n => n.matches(BUTTON) || /-button$/i.test(n.tagName));
+  if (b && isSubmitControl(b)) void onSubmit();
+  else renderSoon();
 }, true);
 document.addEventListener("submit", e => {
   const f = e.target instanceof Element ? e.target : null;
@@ -398,16 +414,18 @@ let pausedHere = false;
 /** After the page changes: start once a form shows, follow a single-page app to its next page, fill fields that appear. */
 async function onPageChange(): Promise<void> {
   if (pausedHere) return;
+  observeAll();
   // The page changed while filling: look again once that's done.
   if (busy || filling) { recheck = true; return; }
   const s = session;
-  // A single-page app moved on, or the page re-rendered the form (a framework hydrating the page replaces it).
-  if (s && ((s.url !== location.href && !s.submitId) || !s.scope.isConnected)) teardown();
+  // A single-page app moved on, or the page re-rendered the form (a framework hydrating the page replaces it). A form
+  // replaced by its thank-you page right after a submit is not that: the session stays to record it and say so.
+  if (s && ((!s.submitId && (s.url !== location.href || !s.scope.isConnected)) || (s.phase === "submitted" && s.url !== location.href))) teardown();
   if (!session) {
     if (autoPage()) await activate(false);
     return;
   }
-  if (session.phase !== "done") return;
+  if (session.phase !== "done" || session.submitId) return;
   const fresh = scan(session.selector).filter(f => !session!.fields.has(f.id));
   if (fresh.length) {
     busy = true;
@@ -433,14 +451,37 @@ function scheduleScan(ms: number): void {
 }
 
 let watching = false;
+let observer: MutationObserver | null = null;
+const observed = new WeakSet<Node>();
+const OBSERVE: MutationObserverInit = { childList: true, subtree: true, attributes: true, attributeFilter: ["hidden", "style", "class", "aria-hidden"] };
+
+/** Watches the page and every open shadow root in it (changes inside a shadow root don't reach the page's observer). */
+function observeAll(): void {
+  if (!observer) return;
+  for (const root of [document.documentElement as Node, ...shadowRoots()]) {
+    if (observed.has(root)) continue;
+    observed.add(root);
+    observer.observe(root, OBSERVE);
+  }
+}
+
+/** How often the page is looked at anyway: web components can render late without a change the observers see. */
+const RESCAN_MS = 2000;
+
 function watch(): void {
   if (watching) return;
   watching = true;
-  const observer = new MutationObserver(records => {
+  observer = new MutationObserver(records => {
     if (records.every(r => r.target instanceof Element && r.target.closest(`#${PANEL_HOST_ID}`))) return;
     scheduleScan(QUIET_MS);
   });
-  observer.observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ["hidden", "style", "class", "aria-hidden"] });
+  observeAll();
+  setInterval(() => {
+    if (document.visibilityState !== "visible" || busy || filling || pausedHere) return;
+    if (!session && !autoPage()) return;
+    observeAll();
+    if (!scanTimer) scheduleScan(0);
+  }, RESCAN_MS);
 }
 
 chrome.runtime.onMessage.addListener((msg: TabRequest, _sender, sendResponse) => {

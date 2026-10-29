@@ -20,7 +20,7 @@ import { getProfile, type Profile } from "../profile/profile.js";
 import { saveRecord } from "../runner/records.js";
 import { getJson, getSettings, setJson } from "../settings.js";
 import { normalizeUrl } from "../sources/normalize.js";
-import { findJobByUrl } from "./match.js";
+import { findJobForPage } from "./match.js";
 import {
   TOKEN_HEADER, type ExtAnswer, type ExtResolution, type LearnResponse, type LearnValue, type ResolveResponse, type StatusResponse,
   type SubmittedResponse,
@@ -66,17 +66,17 @@ const FieldSpecSchema = z.object({
   id: str(64), label: str(2000), kind: z.enum(["text", "textarea", "email", "tel", "url", "number", "date", "select", "combobox", "radio", "checkbox", "checkbox-group", "file"]),
   required: z.boolean(), options: z.array(str(2000)).max(1000).optional(), maxLength: z.number().optional(), description: str(4000).optional(),
 });
-const ResolveSchema = z.object({ url: str(4000), title: str(1000).default(""), company: str(500).optional(), fields: z.array(FieldSpecSchema).max(MAX_FIELDS) });
+const ResolveSchema = z.object({ url: str(4000), referrer: str(4000).optional(), title: str(1000).default(""), company: str(500).optional(), fields: z.array(FieldSpecSchema).max(MAX_FIELDS) });
 const Value = z.union([str(20000), z.array(str(2000)).max(200), z.boolean()]);
 const LearnSchema = z.object({
-  url: str(4000), title: str(1000).optional(), company: str(500).optional(),
+  url: str(4000), referrer: str(4000).optional(), title: str(1000).optional(), company: str(500).optional(),
   answers: z.array(z.object({
     label: str(2000), kind: FieldSpecSchema.shape.kind, options: z.array(str(2000)).max(1000).optional(), value: Value,
     source: str(40).optional(), questionId: z.number().int().optional(),
   })).max(MAX_FIELDS),
 });
 const SubmittedSchema = z.object({
-  url: str(4000), title: str(1000).default(""), company: str(500).default(""), resumeUsed: str(500).optional(), coverLetterUsed: str(500).optional(),
+  url: str(4000), referrer: str(4000).optional(), title: str(1000).default(""), company: str(500).default(""), resumeUsed: str(500).optional(), coverLetterUsed: str(500).optional(),
   answers: z.array(z.object({ label: str(2000), value: Value })).max(MAX_FIELDS).optional(),
 });
 
@@ -85,8 +85,10 @@ export function companyFromUrl(url: string): string {
   try {
     const u = new URL(url);
     const host = u.hostname.toLowerCase();
-    const first = u.pathname.split("/").filter(Boolean)[0] ?? "";
-    const pathCompany = /greenhouse\.io$|^jobs\.lever\.co$|^jobs\.ashbyhq\.com$|^apply\.workable\.com$|^jobs\.smartrecruiters\.com$/.test(host)
+    const parts = u.pathname.split("/").filter(Boolean);
+    // SmartRecruiters' one-click form: /oneclick-ui/company/<Company>/publication/<uuid>.
+    const first = parts[0] === "oneclick-ui" && parts[1] === "company" ? parts[2] ?? "" : parts[0] ?? "";
+    const pathCompany = /greenhouse\.io$|^jobs\.lever\.co$|^jobs\.ashbyhq\.com$|^apply\.workable\.com$|^jobs\.smartrecruiters\.com$|^www\.smartr\.me$/.test(host)
       && first && first !== "embed" ? first : u.searchParams.get("for") ?? "";
     const raw = pathCompany || host.replace(/^(www|jobs|careers|boards|apply)\./, "").split(".")[0] || host;
     return raw.replace(/[-_]+/g, " ").replace(/\b\w/g, ch => ch.toUpperCase()).trim();
@@ -165,7 +167,7 @@ const cleanLabel = (label: string) => label.trim().replace(/\s*\*+$/, "").trim()
  */
 export async function learn(deps: ExtDeps, body: z.infer<typeof LearnSchema>): Promise<LearnResponse> {
   const { db, llm } = deps;
-  const job = findJobByUrl(db, body.url);
+  const job = findJobForPage(db, body.url, body.referrer);
   const ctx = jobContext(job, body.url, body.title ?? "", body.company);
   let learned = 0;
   let overrides = 0;
@@ -222,7 +224,7 @@ export async function learn(deps: ExtDeps, body: z.infer<typeof LearnSchema>): P
 export function submitted(deps: ExtDeps, body: z.infer<typeof SubmittedSchema>): SubmittedResponse {
   const { db } = deps;
   const now = new Date().toISOString();
-  let job = findJobByUrl(db, body.url);
+  let job = findJobForPage(db, body.url, body.referrer);
   let created = false;
   if (job && (job.status === "submitted" || job.status === "applied-manually")) return { ok: true, jobId: job.id, created: false, already: true };
   if (!job) {
@@ -304,7 +306,7 @@ export function extRoutes(app: Hono, deps: ExtDeps): void {
   app.post("/ext/resolve", async c => {
     const body = await parse(ResolveSchema, c.req.raw);
     if (!body) return c.json({ ok: false, error: "Bad request" }, 400);
-    const job = findJobByUrl(db, body.url);
+    const job = findJobForPage(db, body.url, body.referrer);
     const ctx = jobContext(job, body.url, body.title, body.company);
     const fields = body.fields as FieldSpec[];
     try {

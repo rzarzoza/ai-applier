@@ -3,8 +3,10 @@
  * values go through the element prototype's native setter followed by input/change/blur events (a framework that tracks
  * the value it last rendered then sees a real change); choices are clicked like a person would.
  */
+import { isLocationAnswer, locationQueries, pickLocation } from "../../src/answers/location.js";
 import type { ExtAnswer } from "../../src/ext/protocol.js";
 import type { FieldSpec } from "../../src/forms/types.js";
+import { byIdNear, deepQueryAll } from "./dom.js";
 
 export type FillOutcome = { ok: true; value: FieldValue } | { ok: false; error: string };
 export type FieldValue = string | string[] | boolean | null;
@@ -18,8 +20,8 @@ export interface FillDeps {
 const norm = (s: string | null | undefined) => (s ?? "").replace(/\s+/g, " ").trim().toLowerCase();
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
-export const membersOf = (id: string): HTMLElement[] =>
-  Array.from(document.querySelectorAll<HTMLElement>(`[data-aa-id="${CSS.escape(id)}"]`));
+/** The controls tagged with this field id, anywhere on the page (open shadow roots included). */
+export const membersOf = (id: string): HTMLElement[] => deepQueryAll(document, `[data-aa-id="${CSS.escape(id)}"]`);
 
 function isVisible(e: Element): boolean {
   return e.checkVisibility({ visibilityProperty: true }) && e.getClientRects().length > 0;
@@ -39,26 +41,27 @@ export function setNativeValue(el: HTMLInputElement | HTMLTextAreaElement | HTML
   else el.value = value;
 }
 
-const fire = (el: Element, type: string) => el.dispatchEvent(new Event(type, { bubbles: true }));
+// Every event is composed, so a web component listening on its host (outside the shadow root) hears it too.
+const fire = (el: Element, type: string) => el.dispatchEvent(new Event(type, { bubbles: true, composed: true }));
 
 function inputEvent(el: Element, data: string | null): void {
-  el.dispatchEvent(new InputEvent("input", { bubbles: true, cancelable: false, inputType: "insertText", data }));
+  el.dispatchEvent(new InputEvent("input", { bubbles: true, composed: true, cancelable: false, inputType: "insertText", data }));
 }
 
 function focus(el: HTMLElement): void {
   try { el.focus({ preventScroll: true }); } catch { /* not focusable */ }
-  el.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+  el.dispatchEvent(new FocusEvent("focusin", { bubbles: true, composed: true }));
 }
 
 function blur(el: HTMLElement): void {
-  el.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
-  el.dispatchEvent(new FocusEvent("blur"));
-  if (document.activeElement === el) el.blur();
+  el.dispatchEvent(new FocusEvent("focusout", { bubbles: true, composed: true }));
+  el.dispatchEvent(new FocusEvent("blur", { composed: true }));
+  if (el.matches(":focus")) el.blur();
 }
 
 /** A real-looking click: pointer and mouse down/up, then click (react-select opens on mousedown). */
 export function press(el: HTMLElement): void {
-  const opts = { bubbles: true, cancelable: true, view: window, button: 0 };
+  const opts = { bubbles: true, composed: true, cancelable: true, view: window, button: 0 };
   el.dispatchEvent(new PointerEvent("pointerdown", opts));
   el.dispatchEvent(new MouseEvent("mousedown", opts));
   el.dispatchEvent(new PointerEvent("pointerup", opts));
@@ -151,13 +154,23 @@ export async function fillField(field: FieldSpec, answer: ExtAnswer, deps: FillD
       case "combobox": {
         const want = answerText(answer);
         if (want === null) return { ok: false, error: "A list needs one of its options" };
-        const picked = await pickCombobox(el, want, deps.optionWaitMs ?? 2500);
+        const picked = await pickCombobox(field, el, want, deps.optionWaitMs ?? 2500);
         if (!picked) return { ok: false, error: `No option matching "${want}"` };
         break;
       }
       default: {
         const text = answerText(answer);
         if (text === null || !(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement)) return { ok: false, error: "A text box needs text" };
+        if (el instanceof HTMLInputElement && isLocationAnswer(field, text)) {
+          // A city search that doesn't call itself a combobox: when typing shows suggestions, pick the right place.
+          search(el, text);
+          const picked = await pickFrom(el, el, Math.min(deps.optionWaitMs ?? 2500, 1500), texts => {
+            const p = pickLocation(text, texts);
+            return p === null ? -1 : texts.indexOf(p);
+          });
+          if (!picked) { fire(el, "change"); blur(el); }
+          break;
+        }
         typeInto(el, el instanceof HTMLTextAreaElement ? text : text.replace(/\s*[\r\n]+\s*/g, " "));
       }
     }
@@ -167,56 +180,88 @@ export async function fillField(field: FieldSpec, answer: ExtAnswer, deps: FillD
   return { ok: true, value: readValue(field) };
 }
 
-/** The visible options a combobox shows (from the listbox it names, else anywhere on the page). */
+/** The visible options a combobox shows (from the listbox it names, else its own shadow root, else anywhere). */
 function visibleOptions(box: HTMLElement): HTMLElement[] {
   const ids = [box, box.querySelector("input")].flatMap(e => (e?.getAttribute("aria-controls") ?? e?.getAttribute("aria-owns") ?? "").split(/\s+/)).filter(Boolean);
   for (const id of ids) {
-    const list = document.getElementById(id);
-    const opts = list ? Array.from(list.querySelectorAll<HTMLElement>("[role=option]")).filter(isVisible) : [];
+    const list = byIdNear(box, id);
+    const opts = list ? deepQueryAll(list, "[role=option]").filter(isVisible) : [];
     if (opts.length) return opts;
   }
-  return Array.from(document.querySelectorAll<HTMLElement>("[role=option]")).filter(isVisible);
+  const own = box.getRootNode();
+  if (own instanceof ShadowRoot) {
+    const opts = deepQueryAll(own, "[role=option]").filter(isVisible);
+    if (opts.length) return opts;
+  }
+  return deepQueryAll(document, "[role=option]").filter(isVisible);
 }
 
-/**
- * Opens the combobox, types `want` (when it has a text box) and clicks the option equal to it, else the only option
- * starting with it. Nothing matching: the typed text is cleared and the list closed; returns false.
- */
-async function pickCombobox(box: HTMLElement, want: string, waitMs: number): Promise<boolean> {
-  const input = box instanceof HTMLInputElement || box instanceof HTMLTextAreaElement ? box : box.querySelector<HTMLInputElement>("input");
-  press(box);
+const optionText = (o: Element) => (o.textContent ?? "").replace(/\s+/g, " ").trim();
+
+/** Types `text` into the combobox's box (when it has one), as a search. */
+function search(input: HTMLInputElement | HTMLTextAreaElement | null, text: string): void {
+  if (!input) return;
+  focus(input);
+  setNativeValue(input, text);
+  inputEvent(input, text);
+}
+
+/** Clears what was typed and closes the list (nothing matched). */
+function giveUp(box: HTMLElement, input: HTMLInputElement | HTMLTextAreaElement | null): void {
   if (input) {
-    focus(input);
-    setNativeValue(input, want);
-    inputEvent(input, want);
+    setNativeValue(input, "");
+    inputEvent(input, null);
   }
-  const target = norm(want);
+  (input ?? box).dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, composed: true }));
+  if (input) blur(input);
+}
+
+/** Polls the open list until `choose` names an option (or the wait ends); clicks it. */
+async function pickFrom(box: HTMLElement, input: HTMLInputElement | HTMLTextAreaElement | null, waitMs: number,
+  choose: (texts: string[]) => number): Promise<boolean> {
   const end = Date.now() + waitMs;
   for (;;) {
     const opts = visibleOptions(box);
-    const texts = opts.map(o => norm(o.textContent));
-    let i = texts.indexOf(target);
-    if (i < 0) {
-      const starts = texts.flatMap((t, k) => (t.startsWith(target) ? [k] : []));
-      if (starts.length === 1) i = starts[0]!;
-    }
+    const i = choose(opts.map(optionText));
     if (i >= 0) {
       press(opts[i]!);
       await sleep(50);
       if (input) blur(input);
       return true;
     }
-    if (Date.now() > end) break;
+    if (Date.now() > end) return false;
     await sleep(100);
   }
-  if (input) {
-    setNativeValue(input, "");
-    inputEvent(input, null);
+}
+
+/**
+ * Opens the combobox, types `want` (when it has a text box) and clicks the option equal to it, else the only option
+ * starting with it. A place ("Houston, Texas") in a location search is looked up as the runner does it: the value, the
+ * city alone, then "City, ST", taking only an option naming that city and state (pickLocation). Nothing matching: the
+ * typed text is cleared and the list closed; returns false.
+ */
+async function pickCombobox(field: FieldSpec, box: HTMLElement, want: string, waitMs: number): Promise<boolean> {
+  const input = box instanceof HTMLInputElement || box instanceof HTMLTextAreaElement ? box : box.querySelector<HTMLInputElement>("input");
+  press(box);
+  if (isLocationAnswer(field, want)) {
+    for (const q of input ? locationQueries(want) : [want]) {
+      search(input, q);
+      if (await pickFrom(box, input, waitMs, texts => { const p = pickLocation(want, texts); return p === null ? -1 : texts.indexOf(p); })) return true;
+    }
+    giveUp(box, input);
+    return false;
   }
-  const esc = { key: "Escape", code: "Escape", bubbles: true };
-  (input ?? box).dispatchEvent(new KeyboardEvent("keydown", esc));
-  if (input) blur(input);
-  return false;
+  search(input, want);
+  const target = norm(want);
+  const picked = await pickFrom(box, input, waitMs, texts => {
+    const t = texts.map(norm);
+    const i = t.indexOf(target);
+    if (i >= 0) return i;
+    const starts = t.flatMap((x, k) => (x.startsWith(target) ? [k] : []));
+    return starts.length === 1 ? starts[0]! : -1;
+  });
+  if (!picked) giveUp(box, input);
+  return picked;
 }
 
 /** What the field holds now (as the user would submit it). */

@@ -4,8 +4,8 @@ import path from "node:path";
 import { expect, test, vi } from "vitest";
 import { approveAnswer, createQuestion, getOverrides, getQuestion, listQuestions, setDraft } from "../../src/answers/bank.js";
 import { openDb } from "../../src/db/db.js";
-import { getExtToken } from "../../src/ext/api.js";
-import { findJobByUrl, postingKey } from "../../src/ext/match.js";
+import { companyFromUrl, getExtToken } from "../../src/ext/api.js";
+import { findJobByUrl, findJobForPage, postingKey } from "../../src/ext/match.js";
 import type { ResolveResponse } from "../../src/ext/protocol.js";
 import type { FieldSpec } from "../../src/forms/types.js";
 import { getJob, setStatus, upsertPosting } from "../../src/jobs/repo.js";
@@ -271,4 +271,26 @@ test("a draft for a choice field is offered as one of its options", async () => 
   const r = (await res.json() as ResolveResponse).resolutions[0]!;
   expect(r).toMatchObject({ status: "suggestion", text: "yes", questionId: q.id });
   expect((r as { suggestion: { type: string } }).suggestion.type).toBe("option");
+});
+
+test("SmartRecruiters: a one-click form is its own posting, named after its company, and found through the posting it came from", async () => {
+  const oneclick = "https://jobs.smartrecruiters.com/oneclick-ui/company/LinkedIn3/publication/a65e1dba-0eed-486f-adf4-9e343a896901?dcr_ci=LinkedIn3";
+  expect(postingKey(oneclick)).toBe("sr-pub:a65e1dba-0eed-486f-adf4-9e343a896901");
+  expect(postingKey("https://jobs.smartrecruiters.com/oneclick-ui/company/LinkedIn3/publication/other-uuid")).toBe("sr-pub:other-uuid");
+  expect(postingKey("https://jobs.smartrecruiters.com/LinkedIn3/744000158394370-software-engineer-intern")).toBe("sr:744000158394370");
+  expect(companyFromUrl(oneclick)).toBe("LinkedIn3");
+  expect(companyFromUrl("https://jobs.smartrecruiters.com/Intuitive/744000158313919")).toBe("Intuitive");
+
+  const { db, call } = setup();
+  const job = addJob(db, "https://jobs.smartrecruiters.com/LinkedIn3/744000158394370", "LinkedIn");
+  expect(findJobByUrl(db, oneclick)).toBeNull();
+  expect(findJobForPage(db, oneclick, "https://jobs.smartrecruiters.com/LinkedIn3/744000158394370")?.id).toBe(job.id);
+  const res = await call("/ext/submitted", { body: { url: oneclick, referrer: "https://jobs.smartrecruiters.com/LinkedIn3/744000158394370", title: "Intern", company: "" } });
+  expect(await res.json()).toMatchObject({ jobId: job.id, created: false });
+  // Two one-click forms of different postings are two applications.
+  const a = await (await call("/ext/submitted", { body: { url: "https://jobs.smartrecruiters.com/oneclick-ui/company/Acme/publication/p-1", title: "A", company: "" } })).json() as { jobId: string; created: boolean };
+  const b = await (await call("/ext/submitted", { body: { url: "https://jobs.smartrecruiters.com/oneclick-ui/company/Acme/publication/p-2", title: "B", company: "" } })).json() as { jobId: string; created: boolean };
+  expect([a.created, b.created]).toEqual([true, true]);
+  expect(a.jobId).not.toBe(b.jobId);
+  expect(getJob(db, a.jobId)?.company).toBe("Acme");
 });

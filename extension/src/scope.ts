@@ -1,4 +1,5 @@
 /** Where the extension wakes up by itself, and which part of a page is the application form. */
+import { deepQueryAll, lightHost } from "./dom.js";
 
 /**
  * Pages of the application systems the extension fills on its own (any other page only on "Fill this page"):
@@ -25,11 +26,14 @@ const CONTROL = "input:not([type=hidden]):not([type=submit]):not([type=button]):
 
 const visible = (e: Element) => e.checkVisibility({ visibilityProperty: true }) && e.getClientRects().length > 0;
 
-/** How many visible controls the element holds (a hidden file input counts: uploads hide theirs behind a button). */
+/**
+ * How many visible controls the element holds, open shadow roots included (a hidden file input counts: uploads hide
+ * theirs behind a button).
+ */
 export function controlCount(root: Element): number {
   let n = 0;
-  root.querySelectorAll(CONTROL).forEach(e => {
-    if (e.closest("#ai-applier-panel-host, [aria-hidden=true]")) return;
+  deepQueryAll(root, CONTROL).forEach(e => {
+    if (e.closest("#ai-applier-panel-host, [aria-hidden=true]") || inPageChrome(e)) return;
     if (visible(e) || (e instanceof HTMLInputElement && e.type === "file")) n++;
   });
   return n;
@@ -38,17 +42,23 @@ export function controlCount(root: Element): number {
 /** Regions of a page that are never the application (site search, navigation, cookie banners, footers). */
 const NOT_THE_FORM = "header, nav, footer, [role=search], [role=navigation], [role=banner], [id*=cookie i], [class*=cookie i]";
 
+/** Whether a control sits in the page's header, navigation, footer, search or cookie banner (inside a shadow root too). */
+export function inPageChrome(e: Element): boolean {
+  return !!e.closest(NOT_THE_FORM) || !!lightHost(e).closest(NOT_THE_FORM);
+}
+
 /**
- * The application form: the visible <form> with the most controls (at least `min`). A page with no such form (some
- * single-page apps use none) falls back to the smallest block holding most of the page's controls, when `allowBody`.
+ * The application form: the visible <form> with the most controls (at least `min`). A page with no such form (single-
+ * page apps often have none, and web-component forms keep their fields in shadow roots) falls back, when `allowBody`,
+ * to the smallest block holding all of the page's controls. A form inside a shadow root stands as its light-DOM host.
  */
 export function findFormScope(min: number, allowBody: boolean): Element | null {
-  const forms = Array.from(document.querySelectorAll("form"))
+  const forms = deepQueryAll<HTMLFormElement>(document, "form")
     .filter(f => !f.closest(NOT_THE_FORM) && !f.closest("#ai-applier-panel-host") && visible(f) && !f.matches("[role=search]"))
     .map(f => ({ f, n: controlCount(f) }))
     .filter(x => x.n >= min && !hasPassword(x.f))
     .sort((a, b) => b.n - a.n);
-  if (forms.length) return forms[0]!.f;
+  if (forms.length) return lightHost(forms[0]!.f);
   if (!allowBody) return null;
   const main = document.querySelector("main, [role=main]") ?? document.body;
   const total = controlCount(main);
@@ -65,7 +75,7 @@ export function findFormScope(min: number, allowBody: boolean): Element | null {
 
 /** A form asking for a password is a sign-in or sign-up form, not an application: it's left alone. */
 function hasPassword(root: Element): boolean {
-  return !!root.querySelector("input[type=password]");
+  return deepQueryAll(root, "input[type=password]").length > 0;
 }
 
 /** Marks the scope so collectFields can find it by selector. */

@@ -201,3 +201,40 @@ test("uploads take their group's label and pickers drop their placeholder, as th
     { label: "Gender", kind: "combobox", required: false },
   ]);
 });
+
+test("a form with no <form> whose fields live in shadow roots (SmartRecruiters) is found, read and filled", async () => {
+  await page.setContent(fixture("shadow-ats.html"));
+  await page.addScriptTag({ content: bundle });
+  // Nothing yet: the components render a moment after load.
+  expect(await page.evaluate(() => (window as unknown as { __aa: AaTestApi }).__aa.scope(3, true))).toBeNull();
+  await page.waitForFunction(() => !!document.querySelector("spl-dropzone")?.shadowRoot);
+  const fields = await page.evaluate(() => {
+    const aa = (window as unknown as { __aa: AaTestApi }).__aa;
+    return aa.collect(aa.scope(3, true)!);
+  });
+  expect(fields.map(f => [f.label, f.kind, f.required])).toEqual([
+    ["First name", "text", true], ["Last name", "text", true], ["Email", "email", true], ["Confirm your email", "email", true],
+    ["City", "combobox", true], ["Country code", "select", false], ["Phone", "tel", false], ["LinkedIn", "url", false],
+    ["How did you hear about us?", "text", true], ["Resume", "file", false],
+  ]);
+  // The site's search box (in the header) is not part of it.
+  expect(fields.some(f => /search/i.test(f.label))).toBe(false);
+
+  const answers: [string, ExtAnswer][] = [
+    ["First name", { type: "text", text: "Luis" }], ["Email", { type: "text", text: "luis@example.com" }],
+    ["Confirm your email", { type: "text", text: "luis@example.com" }], ["Country code", { type: "option", option: "+1 United States" }],
+    ["Phone", { type: "text", text: "7134377454" }], ["City", { type: "text", text: "Houston, Texas" }],
+    ["Resume", { type: "file", resume: true }],
+  ];
+  for (const [label, answer] of answers) expect(await fill(byLabel(fields, label), answer), label).toMatchObject({ ok: true });
+  // Every value reached the components' hosts (the events crossed the shadow boundary).
+  expect(await page.evaluate(() => (window as unknown as { __hostValues: Record<string, string> }).__hostValues)).toEqual({
+    first: "Luis", email: "luis@example.com", email2: "luis@example.com", code: "us", phone: "7134377454",
+    // The city search took Houston in Texas, not the first Houston it showed.
+    city: "Houston, Texas, United States", resume: "Luis_Hernandez_Resume.pdf",
+  });
+  expect(await page.evaluate(() => {
+    const aa = (window as unknown as { __aa: AaTestApi }).__aa;
+    return aa.collect("[data-aa-scope]").filter(f => f.label === "City").map(f => aa.read(f));
+  })).toEqual(["Houston, Texas, United States"]);
+});
