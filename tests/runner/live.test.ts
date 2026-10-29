@@ -202,7 +202,8 @@ test("a rebuild stuck on the page (an await that never resolves) is stopped afte
   const stuck: AtsHandler = { ...miniAtsHandler, async open(page) { await page.evaluate(() => new Promise(() => {})); return { ok: true }; } };
   const locks = new JobLocks();
   const deps = { ...s.deps, handlers: [stuck], locks };
-  const live = new LiveService({ db: s.db, manager: s.manager, rebuildTimeoutMs: 400, runRebuild: (id, signal) => runJob(deps, id, "rebuild", { signal }).then(() => {}) });
+  const liveDeps = { db: s.db, manager: s.manager, rebuildTimeoutMs: 400, runRebuild: (id: string, signal: AbortSignal) => runJob(deps, id, "rebuild", { signal }).then(() => {}) };
+  const live = new LiveService(liveDeps);
   try {
     live.rebuild(j.id);
     expect(live.rebuildState(j.id)).toMatchObject({ rebuilding: true, startedAt: expect.any(Number) });
@@ -213,8 +214,10 @@ test("a rebuild stuck on the page (an await that never resolves) is stopped afte
     expect(s.pages.at(-1)!.isClosed()).toBe(true);
     expect(s.manager.isParked(j.id)).toBe(false);
     expect(getJob(s.db, j.id)!.status).toBe("needs-you");
-    // Retry works once the page answers again.
+    // Retry works once the page answers again (given a limit a real rebuild meets even on a busy machine: 400ms is
+    // only for the stuck one).
     deps.handlers = [miniAtsHandler];
+    liveDeps.rebuildTimeoutMs = 30_000;
     live.rebuild(j.id);
     await until(() => s.manager.isParked(j.id) && !live.rebuildState(j.id).rebuilding);
     expect(live.rebuildState(j.id).error).toBeNull();
