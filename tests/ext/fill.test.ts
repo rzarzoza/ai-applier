@@ -84,8 +84,11 @@ test("fills every kind of control on the basic form", async () => {
 test("a combobox with no matching option is left empty and reported", async () => {
   const fields = await load(fixture("basic.html"));
   const out = await fill(byLabel(fields, "School"), { type: "option", option: "University of Texas" });
-  // Two options start with it: not unique, so nothing is picked.
-  expect(out).toEqual({ ok: false, error: 'No option matching "University of Texas"' });
+  // Two options start with it: not unique, so nothing is picked; the closest options are offered to pick from.
+  expect(out).toEqual({
+    ok: false, error: 'No option for "University of Texas" — options: University of Texas at Austin, University of Texas at Dallas, Stanford University, MIT',
+    choices: ["University of Texas at Austin", "University of Texas at Dallas", "Stanford University", "MIT"],
+  });
   expect(await page.inputValue("#school")).toBe("");
   expect(await fill(byLabel(fields, "Degree"), { type: "option", option: "PhD" })).toMatchObject({ ok: false });
 });

@@ -1,0 +1,121 @@
+<!doctype html>
+<html>
+<head><title>Apply - Software Engineer Intern - Mini Careers</title></head>
+<body>
+<!--
+  A Workday-like apply flow (myworkdayjobs.com): one page whose step content is replaced when the user clicks
+  "Save and Continue" (the URL stays the same). Controls carry data-automation-id; each sits in a
+  [data-automation-id^=formField] block with a label[for]. Dropdowns are button[aria-haspopup=listbox] showing
+  "Select One" and opening a [role=listbox] popup of [role=option]s at the end of <body>; "How Did You Hear About Us?"
+  is a multiselect prompt (input[data-uxi-widget-type=selectinput]) that searches on Enter and shows picks as
+  [data-automation-id=selectedItem] pills. Step 2 has an "Add" button for work experience. Nothing here submits.
+-->
+<header><nav><input type="search" aria-label="Search for jobs" name="q"></nav></header>
+<main>
+  <div data-automation-id="applyFlowPage">
+    <h2 data-automation-id="progressBarActiveStep">My Information</h2>
+    <div id="step"></div>
+    <div data-automation-id="pageFooter">
+      <button type="button" data-automation-id="bottom-navigation-next-button" id="next">Save and Continue</button>
+    </div>
+  </div>
+</main>
+<script>
+(function () {
+  window.__values = {};
+  window.__nextClicks = 0;
+  var step = 1;
+  var STEP1 =
+    '<div data-automation-id="formField-legalNameSection_firstName"><label for="input-1">First Name<abbr title="required">*</abbr></label>' +
+    '<input id="input-1" type="text" data-automation-id="legalNameSection_firstName" aria-required="true"></div>' +
+    '<div data-automation-id="formField-countryDropdown"><label for="input-2">Country<abbr title="required">*</abbr></label>' +
+    '<button id="input-2" type="button" aria-haspopup="listbox" data-automation-id="countryDropdown" aria-required="true" value="">Select One</button></div>' +
+    '<div data-automation-id="formField-sourceDropdown"><label for="input-3">How Did You Hear About Us?<abbr title="required">*</abbr></label>' +
+    '<div data-automation-id="multiselectInputContainer"><div class="pills"></div><input id="input-3" type="text" data-uxi-widget-type="selectinput" placeholder="Search" aria-required="true" autocomplete="off"></div></div>' +
+    '<fieldset data-automation-id="formField-candidateIsPreviousWorker"><legend>Have you previously worked for Mini?<abbr title="required">*</abbr></legend>' +
+    '<label><input type="radio" name="previousWorker" value="true" data-automation-id="previousWorker-yes"> Yes</label>' +
+    '<label><input type="radio" name="previousWorker" value="false" data-automation-id="previousWorker-no"> No</label></fieldset>' +
+    '<div data-automation-id="formField-phone-number"><label for="input-5">Phone Number</label><input id="input-5" type="text" data-automation-id="phone-number"></div>';
+  var STEP2 =
+    '<div data-automation-id="formField-workAuth"><label for="input-11">Are you legally authorized to work in the United States?<abbr title="required">*</abbr></label>' +
+    '<button id="input-11" type="button" aria-haspopup="listbox" data-automation-id="workAuth" aria-required="true">Select One</button></div>' +
+    '<div data-automation-id="formField-sponsorship"><label for="input-12">Will you now or in the future require sponsorship?<abbr title="required">*</abbr></label>' +
+    '<button id="input-12" type="button" aria-haspopup="listbox" data-automation-id="sponsorship" aria-required="true">Select One</button></div>' +
+    '<div data-automation-id="workExperienceSection" role="group" aria-labelledby="we-h"><h3 id="we-h">Work Experience</h3>' +
+    '<button type="button" data-automation-id="Add" id="add-exp">Add</button></div>';
+  var LISTS = {
+    countryDropdown: ["Canada", "Mexico", "United Kingdom", "United States of America"],
+    workAuth: ["Yes", "No"], sponsorship: ["Yes", "No"],
+  };
+  var SOURCES = ["LinkedIn", "Indeed", "Company Website", "Referral"];
+  var popup = null;
+  function closePopup() { if (popup) { popup.remove(); popup = null; } }
+  function showPopup(anchor, items, onPick) {
+    closePopup();
+    popup = document.createElement("div");
+    popup.setAttribute("data-automation-id", "activeListContainer");
+    var r = anchor.getBoundingClientRect();
+    popup.style.cssText = "position:absolute;background:#fff;border:1px solid #999;left:" + (r.left + scrollX) + "px;top:" + (r.bottom + scrollY) + "px";
+    var ul = document.createElement("ul");
+    ul.setAttribute("role", "listbox");
+    items.forEach(function (t, i) {
+      var li = document.createElement("li");
+      li.setAttribute("role", "option");
+      li.id = "opt-" + i;
+      li.innerHTML = '<div data-automation-id="promptOption"></div>';
+      li.firstChild.textContent = t;
+      li.addEventListener("click", function () { onPick(t); closePopup(); });
+      ul.appendChild(li);
+    });
+    popup.appendChild(ul);
+    document.body.appendChild(popup);
+  }
+  function wire() {
+    document.querySelectorAll('#step button[aria-haspopup="listbox"]').forEach(function (b) {
+      var key = b.getAttribute("data-automation-id");
+      b.addEventListener("click", function () {
+        if (popup) { closePopup(); return; }
+        showPopup(b, LISTS[key], function (t) { b.textContent = t; b.setAttribute("aria-label", t); window.__values[key] = t; });
+      });
+    });
+    var prompt = document.querySelector('#step [data-uxi-widget-type="selectinput"]');
+    if (prompt) {
+      var pills = prompt.previousElementSibling;
+      var search = function () {
+        var q = prompt.value.trim().toLowerCase();
+        showPopup(prompt, SOURCES.filter(function (s) { return !q || s.toLowerCase().indexOf(q) >= 0; }), function (t) {
+          var p = document.createElement("div");
+          p.setAttribute("data-automation-id", "selectedItem");
+          p.textContent = t;
+          pills.appendChild(p);
+          (window.__values.source = window.__values.source || []).push(t);
+          Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call(prompt, "");
+        });
+      };
+      prompt.addEventListener("click", search);
+      prompt.addEventListener("keydown", function (e) { if (e.key === "Enter") search(); if (e.key === "Escape") closePopup(); });
+    }
+    document.querySelectorAll("#step input").forEach(function (i) {
+      i.addEventListener("change", function () { window.__values[i.type === "radio" ? i.name : i.getAttribute("data-automation-id") || i.name] = i.value; });
+    });
+    var add = document.getElementById("add-exp");
+    if (add) add.addEventListener("click", function () { window.__values.addClicked = true; });
+  }
+  function render() {
+    closePopup();
+    var host = document.getElementById("step");
+    host.innerHTML = step === 1 ? STEP1 : step === 2 ? STEP2 : '<p>Review</p><button type="button" id="submit">Submit</button>';
+    document.querySelector('[data-automation-id="progressBarActiveStep"]').textContent = step === 1 ? "My Information" : step === 2 ? "Application Questions" : "Review";
+    wire();
+  }
+  document.getElementById("next").addEventListener("click", function () {
+    window.__nextClicks++;
+    step = Math.min(step + 1, 3);
+    // Workday swaps the step a moment later.
+    setTimeout(render, 200);
+  });
+  setTimeout(render, 300);
+})();
+</script>
+</body>
+</html>

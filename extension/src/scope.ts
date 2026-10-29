@@ -22,7 +22,7 @@ export function isApplicationPage(url: URL): boolean {
 }
 
 /** Controls that count toward "a form worth filling". */
-const CONTROL = "input:not([type=hidden]):not([type=submit]):not([type=button]):not([type=reset]):not([type=image]):not([type=password]), select, textarea, [role=combobox]";
+const CONTROL = "input:not([type=hidden]):not([type=submit]):not([type=button]):not([type=reset]):not([type=image]):not([type=password]), select, textarea, [role=combobox], button[aria-haspopup=listbox]";
 
 const visible = (e: Element) => e.checkVisibility({ visibilityProperty: true }) && e.getClientRects().length > 0;
 

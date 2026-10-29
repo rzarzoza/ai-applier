@@ -1,0 +1,116 @@
+<!doctype html>
+<html>
+<head><title>Software Engineer Intern @ Mini</title></head>
+<body>
+<!--
+  Ashby's application page as the runner's handler documents it (ats/ashby.ts): no <form>; div#form >
+  .ashby-application-form-container > .ashby-application-form-field-entry[data-field-path] with a
+  label.ashby-application-form-question-title (a hashed `_required_` class when required). Yes/No questions are two
+  buttons (aria-pressed; pressing the pressed one unselects it) beside a visually hidden checkbox. Location is a
+  typeahead (aria-controls only while open). Uploading the resume runs Ashby's parser: the
+  .ashby-application-form-autofill-input-pending-layer leaves data-state="hidden" for a while, then the parse result
+  overwrites the name and clears the location. The "Autofill from resume" widget has its own file input (never used).
+-->
+<div id="form">
+  <div class="ashby-application-form-autofill-pane">
+    <p>Autofill from resume</p><input type="file" id="autofill-file">
+    <div class="ashby-application-form-autofill-input-pending-layer" data-state="hidden">Parsing your resume. Autofilling key fields...</div>
+  </div>
+  <div class="ashby-application-form-container">
+    <div class="ashby-application-form-field-entry" data-field-path="_systemfield_name">
+      <label class="ashby-application-form-question-title _required_x1" for="_systemfield_name">Name</label>
+      <input id="_systemfield_name" class="ashby-application-form-input-text" type="text" required></div>
+    <div class="ashby-application-form-field-entry" data-field-path="_systemfield_email">
+      <label class="ashby-application-form-question-title _required_x1" for="_systemfield_email">Email</label>
+      <input id="_systemfield_email" class="ashby-application-form-input-text" type="email" required></div>
+    <div class="ashby-application-form-field-entry" data-field-path="_systemfield_resume">
+      <label class="ashby-application-form-question-title _required_x1" for="_systemfield_resume">Resume</label>
+      <div class="ashby-application-form-input-file"><button type="button" onclick="document.getElementById('_systemfield_resume').click()">Upload File</button>
+        <input id="_systemfield_resume" type="file" style="display:none"></div></div>
+    <div class="ashby-application-form-field-entry" data-field-path="_systemfield_location">
+      <label class="ashby-application-form-question-title _required_x1" for="loc">Location</label>
+      <div style="position:relative"><input id="loc" class="ashby-application-form-input-autocomplete" role="combobox" aria-autocomplete="list" aria-expanded="false" autocomplete="off" placeholder="Start typing...">
+        <div class="popup"></div></div></div>
+    <div class="ashby-application-form-field-entry" data-field-path="q_auth">
+      <label class="ashby-application-form-question-title _required_x1">Are you legally authorized to work in the United States?</label>
+      <div class="ashby-application-form-input-yesno"><button type="button" class="ashby-application-form-input-yesno-option" data-option="yes" aria-pressed="false">Yes</button><button type="button" class="ashby-application-form-input-yesno-option" data-option="no" aria-pressed="false">No</button>
+        <input type="checkbox" tabindex="-1" style="position:absolute;opacity:0;width:1px;height:1px;margin:0"></div></div>
+    <div class="ashby-application-form-field-entry" data-field-path="q_sponsor">
+      <label class="ashby-application-form-question-title">Will you now or in the future require visa sponsorship?</label>
+      <div class="ashby-application-form-input-yesno"><button type="button" class="ashby-application-form-input-yesno-option" data-option="yes" aria-pressed="false">Yes</button><button type="button" class="ashby-application-form-input-yesno-option" data-option="no" aria-pressed="true">No</button>
+        <input type="checkbox" tabindex="-1" style="position:absolute;opacity:0;width:1px;height:1px;margin:0"></div></div>
+    <button type="button" class="ashby-application-form-submit-button">Submit Application</button>
+  </div>
+</div>
+<script>
+(function () {
+  window.__values = {};
+  window.__presses = 0;
+  var PLACES = ["Houston, Texas, United States", "Houston, Missouri, United States", "South Houston, Texas, United States", "Houston, British Columbia, Canada"];
+  // Yes/No pairs: a press toggles (pressing the pressed one clears the answer).
+  document.querySelectorAll(".ashby-application-form-input-yesno").forEach(function (pair) {
+    var key = pair.parentElement.getAttribute("data-field-path");
+    pair.querySelectorAll("button").forEach(function (b) {
+      b.addEventListener("click", function () {
+        window.__presses++;
+        var was = b.getAttribute("aria-pressed") === "true";
+        pair.querySelectorAll("button").forEach(function (x) { x.setAttribute("aria-pressed", "false"); });
+        if (!was) b.setAttribute("aria-pressed", "true");
+        window.__values[key] = was ? null : b.textContent;
+      });
+    });
+    var on = pair.querySelector('[aria-pressed="true"]');
+    window.__values[key] = on ? on.textContent : null;
+  });
+  // The location typeahead.
+  var loc = document.getElementById("loc"), popup = loc.nextElementSibling, timer = null;
+  function closeList() { popup.innerHTML = ""; loc.setAttribute("aria-expanded", "false"); loc.removeAttribute("aria-controls"); }
+  loc.addEventListener("input", function () {
+    clearTimeout(timer);
+    var q = loc.value.toLowerCase().split(",")[0].trim();
+    timer = setTimeout(function () {
+      closeList();
+      var hits = PLACES.filter(function (p) { return q && p.toLowerCase().indexOf(q) >= 0; });
+      if (!hits.length) return;
+      var list = document.createElement("div");
+      list.id = "loc-list"; list.setAttribute("role", "listbox");
+      hits.forEach(function (p) {
+        var o = document.createElement("div");
+        o.setAttribute("role", "option");
+        o.className = "ashby-application-form-input-autocomplete-popup-result";
+        o.textContent = p;
+        o.addEventListener("mousedown", function (e) { e.preventDefault(); });
+        o.addEventListener("click", function () {
+          Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call(loc, p);
+          window.__values.location = p;
+          closeList();
+        });
+        list.appendChild(o);
+      });
+      popup.appendChild(list);
+      loc.setAttribute("aria-expanded", "true");
+      loc.setAttribute("aria-controls", "loc-list");
+    }, 250);
+  });
+  loc.addEventListener("keydown", function (e) { if (e.key === "Escape") closeList(); });
+  // Uploading the resume runs the parser, which then overwrites what it parsed.
+  var layer = document.querySelector(".ashby-application-form-autofill-input-pending-layer");
+  document.getElementById("_systemfield_resume").addEventListener("change", function () {
+    window.__values.resume = this.files[0] && this.files[0].name;
+    setTimeout(function () {
+      layer.setAttribute("data-state", "visible");
+      setTimeout(function () {
+        var set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set;
+        set.call(document.getElementById("_systemfield_name"), "Parsed From Resume");
+        set.call(loc, "");
+        window.__values.location = "";
+        layer.setAttribute("data-state", "hidden");
+        window.__parsedAt = Date.now();
+      }, 1500);
+    }, 400);
+  });
+  document.getElementById("autofill-file").addEventListener("change", function () { window.__values.autofillUsed = true; });
+})();
+</script>
+</body>
+</html>

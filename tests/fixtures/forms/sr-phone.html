@@ -1,0 +1,56 @@
+<!doctype html>
+<html>
+<head><title>Software Engineer Intern - Acme</title></head>
+<body>
+<!--
+  SmartRecruiters' one-click form, second look: the phone's country picker is a custom element whose combobox (a div,
+  no text box) and option list live in its shadow root ("United States (+1)"...), and the Experience / Education
+  sections are only an "Add" button each until the applicant adds an entry. Hosts record what reached them in
+  window.__hostValues.
+-->
+<main><div id="app"></div></main>
+<script>
+(function () {
+  window.__hostValues = {};
+  customElements.define("spl-input", class extends HTMLElement {
+    connectedCallback() {
+      var root = this.attachShadow({ mode: "open" }), name = this.getAttribute("name"), host = this;
+      root.innerHTML = '<label for="i">' + this.getAttribute("label") + '</label><input id="i" type="text">';
+      this.addEventListener("input", function (e) { window.__hostValues[name] = e.composedPath()[0].value; });
+    }
+  });
+  customElements.define("spl-country-picker", class extends HTMLElement {
+    connectedCallback() {
+      var root = this.attachShadow({ mode: "open" }), host = this;
+      root.innerHTML = '<span id="cl">Country code</span>' +
+        '<div id="cc" role="combobox" tabindex="0" aria-haspopup="listbox" aria-expanded="false" aria-labelledby="cl" aria-controls="cc-list">Select</div>' +
+        '<ul id="cc-list" role="listbox" hidden>' +
+        ["Canada (+1)", "Mexico (+52)", "United Kingdom (+44)", "United States (+1)"].map(function (c) { return '<li role="option">' + c + "</li>"; }).join("") +
+        "</ul>";
+      var box = root.getElementById("cc"), list = root.getElementById("cc-list");
+      box.addEventListener("click", function () { list.hidden = !list.hidden; box.setAttribute("aria-expanded", String(!list.hidden)); });
+      list.querySelectorAll("li").forEach(function (li) {
+        li.addEventListener("click", function () {
+          box.textContent = li.textContent; list.hidden = true; box.setAttribute("aria-expanded", "false");
+          window.__hostValues.code = li.textContent;
+          host.dispatchEvent(new Event("change", { bubbles: true }));
+        });
+      });
+    }
+  });
+  customElements.define("spl-button", class extends HTMLElement {
+    connectedCallback() { this.attachShadow({ mode: "open" }).innerHTML = '<button type="button"><slot></slot></button>'; }
+  });
+  setTimeout(function () {
+    document.getElementById("app").innerHTML =
+      '<section><spl-input label="First name" name="first"></spl-input><spl-input label="Last name" name="last"></spl-input>' +
+      '<spl-input label="Email" name="email"></spl-input><spl-country-picker></spl-country-picker><spl-input label="Phone" name="phone"></spl-input></section>' +
+      '<section class="experience"><h3>Experience</h3><spl-button id="add-exp">Add</spl-button></section>' +
+      '<section class="education"><h3>Education</h3><button type="button" id="add-edu">+ Add education</button></section>';
+    document.getElementById("add-exp").addEventListener("click", function () { window.__hostValues.addClicked = true; });
+    document.getElementById("add-edu").addEventListener("click", function () { window.__hostValues.addClicked = true; });
+  }, 300);
+})();
+</script>
+</body>
+</html>
