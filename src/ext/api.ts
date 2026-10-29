@@ -28,6 +28,10 @@ import {
 } from "./protocol.js";
 
 const TOKEN_KEY = "extToken";
+/** Options the user picked in the extension for a question, by the app's answer they replaced (see LearnAnswer.replaced). */
+const PICKS_KEY = "extPicks";
+type Picks = Record<string, Record<string, string>>;
+const pickKey = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();
 
 /** The pairing token the extension sends with every request; made on first use. */
 export function getExtToken(db: Db): string {
@@ -73,7 +77,7 @@ const LearnSchema = z.object({
   url: str(4000), referrer: str(4000).optional(), title: str(1000).optional(), company: str(500).optional(),
   answers: z.array(z.object({
     label: str(2000), kind: FieldSpecSchema.shape.kind, options: z.array(str(2000)).max(1000).optional(), value: Value,
-    source: str(40).optional(), questionId: z.number().int().optional(),
+    source: str(40).optional(), questionId: z.number().int().optional(), replaced: str(2000).optional(),
   })).max(MAX_FIELDS),
 });
 const AdaptSchema = z.object({
@@ -107,6 +111,16 @@ function jobContext(job: Job | null, url: string, title: string, company: string
 }
 
 const toExt = (a: FieldAnswer): ExtAnswer => (a.type === "file" ? { type: "file", resume: true } : a);
+const CHOICE_KINDS = new Set<FieldSpec["kind"]>(["select", "combobox", "radio"]);
+
+/** The option the user picked before for this question in place of this answer, if they did. */
+function remembered(db: Db, field: FieldSpec, answer: ExtAnswer): ExtAnswer {
+  if (!CHOICE_KINDS.has(field.kind) || (answer.type !== "text" && answer.type !== "option")) return answer;
+  const value = answer.type === "text" ? answer.text : answer.option;
+  const option = getJson<Picks>(db, PICKS_KEY, {})[normalizeLabel(field.label, "")]?.[pickKey(value)];
+  if (!option || (field.options?.length && !field.options.includes(option))) return answer;
+  return field.kind === "combobox" && !field.options?.length ? { type: "text", text: option } : { type: "option", option };
+}
 const TEXT_KINDS = new Set<FieldSpec["kind"]>(["text", "textarea", "email", "tel", "url", "number", "date"]);
 
 /** Turns the resolver's answers into what the extension applies; unapproved drafts become suggestions, never fills. */
@@ -117,7 +131,7 @@ async function forExtension(deps: ExtDeps, fields: FieldSpec[], resolutions: Res
     switch (r.status) {
       case "filled":
         out.push({
-          fieldId: r.fieldId, status: "filled", answer: toExt(r.answer), source: r.source,
+          fieldId: r.fieldId, status: "filled", answer: byId.has(r.fieldId) ? remembered(deps.db, byId.get(r.fieldId)!, toExt(r.answer)) : toExt(r.answer), source: r.source,
           ...(r.other ? { other: r.other } : {}), ...(r.entity ? { entity: true as const } : {}),
         });
         break;
@@ -176,6 +190,15 @@ const cleanLabel = (label: string) => label.trim().replace(/\s*\*+$/, "").trim()
  */
 export async function learn(deps: ExtDeps, body: z.infer<typeof LearnSchema>): Promise<LearnResponse> {
   const { db, llm } = deps;
+  const picked = body.answers.filter(a => a.replaced && typeof a.value === "string" && a.value.trim() && CHOICE_KINDS.has(a.kind));
+  if (picked.length) {
+    const picks = getJson<Picks>(db, PICKS_KEY, {});
+    for (const a of picked) {
+      const label = normalizeLabel(a.label, "");
+      picks[label] = { ...picks[label], [pickKey(a.replaced!)]: (a.value as string).trim() };
+    }
+    setJson(db, PICKS_KEY, picks);
+  }
   const job = findJobForPage(db, body.url, body.referrer);
   const ctx = jobContext(job, body.url, body.title ?? "", body.company);
   let learned = 0;

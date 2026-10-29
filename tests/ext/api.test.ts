@@ -331,3 +331,21 @@ test("adapt: a school the list lacks is searched under other names first, then t
   expect(await (await call("/ext/adapt", { body: { ...body, field: field("l", "Location (City)", "combobox"), value: "Houston, Texas", final: true } })).json())
     .toEqual({ answer: null, otherAllowed: false });
 });
+
+test("an option the user picked in place of the app's answer is remembered for that question", async () => {
+  const { db, call } = setup();
+  saveProfile(db, { major: "Computer Sci & Eng" });
+  const discipline = field("d", "Discipline", "combobox");
+  const CLS = { category: "profile", profileKey: "major", isFactual: true };
+  db.prepare("INSERT INTO field_cache (key, classification_json, created_at) VALUES (?, ?, ?)")
+    .run((await import("../../src/answers/classify.js")).fieldCacheKey(discipline, "Acme"), JSON.stringify(CLS), new Date().toISOString());
+  const first = await (await call("/ext/resolve", { body: { url: "https://acme.test/apply", title: "Intern", company: "Acme", fields: [discipline] } })).json() as ResolveResponse;
+  expect(first.resolutions[0]).toMatchObject({ status: "filled", answer: { type: "text", text: "Computer Sci & Eng" }, source: "profile", entity: true });
+  const learned = await (await call("/ext/learn", { body: { url: "https://acme.test/apply", company: "Acme", answers: [
+    { label: "Discipline", kind: "combobox", value: "Computer Science", source: "profile", replaced: "Computer Sci & Eng" },
+  ] } })).json();
+  // A profile fact stays the profile's (no bank answer), but the pick is kept for the question.
+  expect(learned).toEqual({ ok: true, learned: 0, overrides: 0 });
+  const again = await (await call("/ext/resolve", { body: { url: "https://other.test/apply", title: "Intern", company: "Acme", fields: [discipline] } })).json() as ResolveResponse;
+  expect(again.resolutions[0]).toMatchObject({ status: "filled", answer: { type: "text", text: "Computer Science" }, source: "profile" });
+});

@@ -72,6 +72,11 @@ export interface LearnAnswer {
   source?: string;
   /** The bank question the app named for this field (needs-you or suggestion), when it named one. */
   questionId?: number;
+  /**
+   * The value the app's answer was when the user replaced it by picking one of the options the extension offered: this
+   * question then takes the picked option whenever the app's answer is that value again.
+   */
+  replaced?: string;
 }
 export interface LearnRequest { url: string; referrer?: string; title?: string; company?: string; answers: LearnAnswer[] }
 export interface LearnResponse { ok: true; learned: number; overrides: number }
