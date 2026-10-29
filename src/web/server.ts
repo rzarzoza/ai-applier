@@ -31,6 +31,7 @@ import { PreviewFragment, SourcesPage, parseFilterForm, previewCount } from "./p
 import { ApproveSuggestionsPage, BroughtToFront, CardFragment, InboxPage, OpeningBrowser, OpeningHandFinish, SavedNotice } from "./pages/inbox.js";
 import { HomeLists, HomePage, NowCard } from "./pages/home.js";
 import { liveRoutes, panelState, type LiveControl } from "./live.js";
+import { extRoutes, getExtToken, regenerateExtToken } from "../ext/api.js";
 
 export interface AppContext {
   db: Db;
@@ -98,12 +99,15 @@ export function createApp(ctx: AppContext): Hono {
       const hosts = [`127.0.0.1:${localPort()}`, `localhost:${localPort()}`];
       if (!hosts.includes(c.req.header("host")?.toLowerCase() ?? "")) return c.text("Forbidden: unknown host", 403);
       const safe = c.req.method === "GET" || c.req.method === "HEAD";
-      if (!safe && !hosts.some(h => `http://${h}` === c.req.header("origin")?.toLowerCase())) return c.text("Forbidden: cross-site request", 403);
+      // The browser extension's API checks its own origin (chrome-extension://) and pairing token (see ext/api.ts).
+      const ext = c.req.path === "/ext" || c.req.path.startsWith("/ext/");
+      if (!safe && !ext && !hosts.some(h => `http://${h}` === c.req.header("origin")?.toLowerCase())) return c.text("Forbidden: cross-site request", 403);
       await next();
     });
   }
 
   if (ctx.live) liveRoutes(app, { ...ctx, live: ctx.live });
+  extRoutes(app, { db, llm: ctx.llm, syncTracker: ctx.syncTracker, closeLive: ctx.live ? id => ctx.live!.close(id) : undefined });
 
   /** Back to the dashboard page the request came from (same host only), else Home. */
   const back = (referer: string | undefined, host: string | undefined) => {
@@ -404,7 +408,7 @@ export function createApp(ctx: AppContext): Hono {
     } catch { return undefined; }
   };
   const settingsPage = async (extra: { notice?: string; error?: string; trackerError?: string; urlDraft?: string } = {}) =>
-    SettingsPage({ db, keySet: await keyState(), serviceEmail: await serviceEmail(), ...extra });
+    SettingsPage({ db, keySet: await keyState(), serviceEmail: await serviceEmail(), extToken: getExtToken(db), ...extra });
 
   app.get("/settings", async c => c.html(await settingsPage()));
 
@@ -433,6 +437,11 @@ export function createApp(ctx: AppContext): Hono {
       return fail("Couldn't save the key to the Keychain.", 200);
     }
     return c.redirect("/settings", 303);
+  });
+
+  app.post("/settings/extension-token", c => {
+    regenerateExtToken(db);
+    return c.redirect("/settings#extension", 303);
   });
 
   app.post("/tracker/sync", async c => {

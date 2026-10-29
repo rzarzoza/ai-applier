@@ -1,3 +1,4 @@
+import { raw } from "hono/html";
 import type { Db } from "../../db/db.js";
 import { getJson, getSettings } from "../../settings.js";
 import { SHEET_URL_KEY, SYNC_KEY, type TrackerSyncState } from "../../tracker/sync.js";
@@ -9,6 +10,8 @@ export function SettingsPage(props: {
   db: Db; keySet: boolean | null; notice?: string; error?: string;
   /** Service-account email: null when no key is stored, undefined when the Keychain could not be read. */
   serviceEmail?: string | null; trackerError?: string; urlDraft?: string;
+  /** The browser extension's pairing token (see ext/api.ts). */
+  extToken?: string;
 }) {
   const s = getSettings(props.db);
   const sheetUrl = props.urlDraft ?? getJson<string>(props.db, SHEET_URL_KEY, "");
@@ -84,6 +87,44 @@ export function SettingsPage(props: {
           <form method="post" action="/tracker/sync"><button class="primary" type="submit">Sync now</button></form>
         </div>
       </section>
+      {props.extToken ? <ExtensionCard token={props.extToken} /> : null}
     </Layout>
+  );
+}
+
+// Static script (no user text): copies the token next to the button.
+const COPY_JS = `document.addEventListener("click", e => {
+  const b = e.target.closest("[data-copy-input]");
+  if (!b) return;
+  const input = document.getElementById(b.getAttribute("data-copy-input"));
+  input.select();
+  (navigator.clipboard ? navigator.clipboard.writeText(input.value) : Promise.reject()).catch(() => document.execCommand("copy"));
+  b.textContent = "Copied";
+  setTimeout(() => { b.textContent = "Copy"; }, 1500);
+});`;
+
+/** Pairing the browser extension: its token, a copy button, and how to install it. */
+function ExtensionCard(props: { token: string }) {
+  return (
+    <section class="card" id="extension">
+      <div class="card-head"><h2>Browser extension</h2></div>
+      <p class="meta">The AI Applier extension fills applications you open in your own Chrome, using this app's profile and answer bank. It never submits: you review and click Submit, and what you typed is saved to the bank.</p>
+      <label class="field">
+        <span>Pairing token</span>
+        <div class="row" style="margin-top:0;flex-wrap:nowrap">
+          <input type="text" id="ext-token" value={props.token} readonly style="flex:1;font-family:ui-monospace,monospace" />
+          <button type="button" data-copy-input="ext-token">Copy</button>
+        </div>
+      </label>
+      <ol class="meta">
+        <li>Build it once: <code>pnpm build:ext</code></li>
+        <li>In Chrome open <code>chrome://extensions</code>, turn on Developer mode, click <strong>Load unpacked</strong> and pick the <code>extension/dist</code> folder.</li>
+        <li>Click the extension's icon, paste this token and click Save.</li>
+      </ol>
+      <form method="post" action="/settings/extension-token" class="form-foot">
+        <button type="submit">New token</button>
+      </form>
+      <script>{raw(COPY_JS)}</script>
+    </section>
   );
 }
