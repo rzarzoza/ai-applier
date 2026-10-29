@@ -1,0 +1,57 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>AI Applier</title>
+<style>
+:root {
+  color-scheme: light dark;
+  --bg: #ffffff; --text: #191919; --muted: #666666; --border: #e0dfdc; --primary: #0a66c2; --primary-hover: #004182;
+  --success: #057642; --danger: #cc1016; --field: #ffffff; --input-border: #a3a3a0;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #1b1f23; --text: #e9e5df; --muted: #a8b0b8; --border: #38434f; --primary: #70b5f9; --primary-hover: #a8d4ff;
+    --success: #6ccf96; --danger: #f6837a; --field: #12161a; --input-border: #6b7580; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; width: 320px; background: var(--bg); color: var(--text); font: 14px/1.4 -apple-system, system-ui, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+body.page { width: auto; max-width: 480px; margin: 32px auto; padding: 0 16px; }
+header { display: flex; align-items: center; gap: 8px; padding: 12px 14px; border-bottom: 1px solid var(--border); }
+.logo { width: 22px; height: 22px; border-radius: 5px; background: var(--primary); color: #fff; font-weight: 700; font-size: 12px; display: grid; place-items: center; }
+h1 { font-size: 15px; margin: 0; flex: 1; }
+main { padding: 12px 14px; display: grid; gap: 12px; }
+.status { font-size: 13px; color: var(--muted); }
+.status.ok { color: var(--success); }
+.status.err { color: var(--danger); }
+label { display: grid; gap: 4px; font-size: 12px; font-weight: 600; color: var(--muted); }
+input { font: inherit; color: var(--text); background: var(--field); border: 1px solid var(--input-border); border-radius: 4px; padding: 6px 8px; width: 100%; }
+button { font: inherit; font-weight: 600; font-size: 13px; border-radius: 16px; padding: 6px 14px; cursor: pointer; border: 1px solid var(--primary); color: var(--primary); background: transparent; }
+button.primary { background: var(--primary); color: #fff; }
+button.primary:hover { background: var(--primary-hover); border-color: var(--primary-hover); }
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+details summary { cursor: pointer; font-size: 13px; color: var(--muted); }
+details[open] summary { margin-bottom: 8px; }
+.hint { font-size: 12px; color: var(--muted); margin: 0; }
+</style>
+</head>
+<body>
+<header><span class="logo">AI</span><h1>AI Applier</h1></header>
+<main>
+  <div id="status" class="status">Checking the app…</div>
+  <div class="row">
+    <button id="fill" class="primary">Fill this page</button>
+    <button id="site" hidden></button>
+  </div>
+  <p id="page" class="hint"></p>
+  <details id="pairing">
+    <summary>Pairing</summary>
+    <div style="display:grid;gap:10px">
+      <label>Token (from the app's Settings → Browser extension)<input id="token" type="password" autocomplete="off"></label>
+      <label>App address<input id="api" type="text" placeholder="http://127.0.0.1:4310"></label>
+      <div class="row"><button id="save" class="primary">Save</button></div>
+    </div>
+  </details>
+</main>
+<script src="popup.js"></script>
+</body>
+</html>

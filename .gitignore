@@ -4,3 +4,4 @@ node_modules/
 data/
 test-results/
 data-smoke/
+extension/dist/

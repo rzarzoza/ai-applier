@@ -7,7 +7,8 @@
     "start": "tsx src/main.ts",
     "test": "vitest run",
     "test:live": "LIVE=1 vitest run tests/live",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "build:ext": "node scripts/build-ext.mjs"
   },
   "keywords": [],
   "author": "",
@@ -29,7 +30,9 @@
     "zod": "^4.6.7"
   },
   "devDependencies": {
+    "@types/chrome": "^0.3.7",
     "@types/node": "^26.6.5",
+    "esbuild": "^0.28.2",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2",
     "vitest": "^5.0.5"

@@ -1,0 +1,63 @@
+<!doctype html>
+<html>
+<head><title>Controlled inputs</title></head>
+<body>
+<!--
+  Mimics React's controlled inputs: each box's value lives in `state`, the page re-renders it after every event, and an
+  instance-level value tracker (like React's inputValueTracking) records the last value set through `el.value = ...`.
+  An input event whose value equals the tracked one is ignored, so a script that only assigns `el.value` is reverted on
+  the next render; a value set through the prototype's native setter followed by an input event is kept.
+-->
+<form id="app">
+  <label for="name">Full name</label>
+  <input id="name" name="name" type="text" required>
+  <label for="mail">Email</label>
+  <input id="mail" name="mail" type="email" required>
+  <label for="about">About you</label>
+  <textarea id="about" name="about"></textarea>
+  <label for="country">Country</label>
+  <select id="country" name="country" required>
+    <option value="">Select...</option>
+    <option value="us">United States</option>
+    <option value="mx">Mexico</option>
+  </select>
+  <button type="button" id="submit">Submit application</button>
+</form>
+<pre id="state"></pre>
+<script>
+(function () {
+  var state = { name: "", mail: "", about: "", country: "" };
+  window.__state = state;
+  window.__changes = [];
+  var protoFor = function (el) { return el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : el instanceof HTMLSelectElement ? HTMLSelectElement.prototype : HTMLInputElement.prototype; };
+  var els = Array.prototype.slice.call(document.querySelectorAll("#app input, #app textarea, #app select"));
+  els.forEach(function (el) {
+    var desc = Object.getOwnPropertyDescriptor(protoFor(el), "value");
+    var tracked = "";
+    Object.defineProperty(el, "value", {
+      configurable: true,
+      get: function () { return desc.get.call(this); },
+      set: function (v) { tracked = String(v); desc.set.call(this, v); },
+    });
+    var onChange = function () {
+      var now = desc.get.call(el);
+      if (now === tracked) return; // React: no change seen
+      tracked = now;
+      state[el.name] = now;
+      window.__changes.push(el.name);
+      render();
+    };
+    el.addEventListener(el instanceof HTMLSelectElement ? "change" : "input", onChange);
+    // Any other event re-renders from state (as a parent re-render would).
+    el.addEventListener("blur", function () { setTimeout(render, 0); });
+    el.__render = function () { desc.set.call(el, state[el.name]); tracked = state[el.name]; };
+  });
+  function render() {
+    els.forEach(function (el) { el.__render(); });
+    document.getElementById("state").textContent = JSON.stringify(state);
+  }
+  render();
+})();
+</script>
+</body>
+</html>
