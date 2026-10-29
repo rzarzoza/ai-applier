@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { chromium, type BrowserContext, type Page } from "playwright";
 import { afterAll, beforeAll, expect, test } from "vitest";
-import { getOverrides, listQuestions } from "../../src/answers/bank.js";
+import { getOverrides, listQuestions, setOverride } from "../../src/answers/bank.js";
 import { openDb } from "../../src/db/db.js";
 import { getExtToken } from "../../src/ext/api.js";
 import { getJob, setStatus, upsertPosting } from "../../src/jobs/repo.js";
@@ -22,6 +22,9 @@ import { fakeLlm, until } from "../helpers/live-setup.js";
 const ROOT = path.resolve(new URL("../..", import.meta.url).pathname);
 const fixture = readFileSync(new URL("../fixtures/forms/mini-ats.html", import.meta.url), "utf8");
 const shadowFixture = readFileSync(new URL("../fixtures/forms/shadow-ats.html", import.meta.url), "utf8");
+const form = (name: string) => readFileSync(new URL(`../fixtures/forms/${name}`, import.meta.url), "utf8");
+/** Pages by path prefix: Greenhouse react-select pickers, Ashby (Yes/No + resume parser), a Workday-like multi-step flow. */
+const PAGES: [string, string][] = [["/rs/jobs/", form("react-select.html")], ["/mini/", form("ashby-like.html")], ["/en-US/External/", form("workday-like.html")]];
 
 /** The mini ATS's classifications (helpers/live-setup.ts) plus the SmartRecruiters-like fixture's. */
 const SHADOW_CLASSES: Record<string, Record<string, unknown>> = {
@@ -34,14 +37,34 @@ const SHADOW_CLASSES: Record<string, Record<string, unknown>> = {
   "How did you hear about us?": { category: "question", canonicalQuestion: "How did you hear about this job?", isFactual: true },
   Resume: { category: "resume", isFactual: false },
 };
+/** The custom-widget fixtures' fields (Greenhouse react-select, Ashby, Workday). */
+const WIDGET_CLASSES: Record<string, Record<string, unknown>> = {
+  Country: { category: "profile", profileKey: "country", isFactual: true },
+  "Location (City)": { category: "profile", profileKey: "city", isFactual: true },
+  "Will you now or in the future require sponsorship?": { category: "profile", profileKey: "requiresSponsorship", isFactual: true },
+  "Will you now or in the future require visa sponsorship?": { category: "profile", profileKey: "requiresSponsorship", isFactual: true },
+  "Are you legally authorized to work in the United States?": { category: "profile", profileKey: "workAuthorizedUS", isFactual: true },
+  School: { category: "profile", profileKey: "school", isFactual: true },
+  Degree: { category: "profile", profileKey: "degree", isFactual: true },
+  Discipline: { category: "profile", profileKey: "major", isFactual: true },
+  Gender: { category: "profile", profileKey: "gender", isFactual: true },
+  Name: { category: "profile", profileKey: "fullName", isFactual: true },
+  Location: { category: "profile", profileKey: "location", isFactual: true },
+  "Have you previously worked for Mini?": { category: "derived", derivedKey: "workedAtCompany", isFactual: true },
+  "How Did You Hear About Us?": { category: "question", canonicalQuestion: "How did you hear about this job?", isFactual: true },
+  "Phone Number": { category: "profile", profileKey: "phone", isFactual: true },
+};
 const llm = () => {
   const base = fakeLlm();
   return base.on("classify", (req: { content: unknown }) => ({
     fields: (JSON.parse(String(req.content)) as { fields: { id: string; label: string }[] }).fields.map(f => ({
       id: f.id, profileKey: null, derivedKey: null, canonicalQuestion: null, isFactual: false, isCompanySpecific: false, category: "question",
-      ...MINI_CLASSES[f.label], ...SHADOW_CLASSES[f.label],
+      ...MINI_CLASSES[f.label], ...SHADOW_CLASSES[f.label], ...WIDGET_CLASSES[f.label],
     })),
-  }));
+  }))
+    // No LLM mapping in these tests: a value the extension can't match stays unmatched.
+    .on("adapt", () => ({ option: null, options: null }))
+    .on("variants", () => ({ variants: [] }));
 };
 const MINI_CLASSES: Record<string, Record<string, unknown>> = {
   "First Name": { category: "profile", profileKey: "firstName", isFactual: true },
@@ -74,7 +97,8 @@ beforeAll(async () => {
       return;
     }
     res.setHeader("content-type", "text/html");
-    res.end(req.url?.startsWith("/mini/jobs/") ? fixture : req.url?.startsWith("/oneclick-ui/") ? shadowFixture : "<html><body>Not an application</body></html>");
+    const page = PAGES.find(([prefix]) => req.url?.startsWith(prefix) && !req.url.startsWith("/mini/jobs/"))?.[1];
+    res.end(req.url?.startsWith("/mini/jobs/") ? fixture : req.url?.startsWith("/oneclick-ui/") ? shadowFixture : page ?? "<html><body>Not an application</body></html>");
   });
   await new Promise<void>(r => site.listen(0, "127.0.0.1", r));
   sitePort = (site.address() as AddressInfo).port;
@@ -87,7 +111,9 @@ beforeAll(async () => {
   writeFileSync(resume, "%PDF-1.4 test resume");
   saveProfile(seed, {
     firstName: "Luis", lastName: "Hernandez", email: "luis@example.com", phone: null, willingToRelocate: true, city: "Houston", state: "Texas",
-    country: "United States", linkedin: "https://linkedin.com/in/luis", resumePath: resume,
+    country: "USA", linkedin: "https://linkedin.com/in/luis", resumePath: resume,
+    school: "Rice University", degree: "B.S.", major: "Computer Sci & Eng", graduationMonth: "2999-05", gender: "Male",
+    workAuthorizedUS: true, requiresSponsorship: false, employers: ["Onshape"],
   });
   const { job } = upsertPosting(seed, {
     sourceId: "test", listingId: "42", company: "Mini Co", title: "Software Engineer Intern", locations: ["Austin, TX"], category: null,
@@ -101,7 +127,7 @@ beforeAll(async () => {
 
   ctx = await chromium.launchPersistentContext(mkdtempSync(path.join(tmpdir(), "ai-applier-ext-profile-")), {
     channel: "chromium", headless: true,
-    args: [`--disable-extensions-except=${extDir}`, `--load-extension=${extDir}`, "--host-resolver-rules=MAP job-boards.greenhouse.io 127.0.0.1, MAP jobs.smartrecruiters.com 127.0.0.1, MAP example.test 127.0.0.1"],
+    args: [`--disable-extensions-except=${extDir}`, `--load-extension=${extDir}`, "--host-resolver-rules=MAP job-boards.greenhouse.io 127.0.0.1, MAP jobs.smartrecruiters.com 127.0.0.1, MAP example.test 127.0.0.1, MAP jobs.ashbyhq.com 127.0.0.1, MAP mini.wd1.myworkdayjobs.com 127.0.0.1"],
   });
   const sw = ctx.serviceWorkers()[0] ?? await ctx.waitForEvent("serviceworker", { timeout: 15_000 });
   await sw.evaluate(cfg => chrome.storage.local.set(cfg), { token, apiBase: app.url });
@@ -216,3 +242,97 @@ function getJobStatus(): string | undefined {
   const db = openDb(path.join(dataDir, "app.db"));
   try { return getJob(db, jobId)?.status; } finally { db.close(); }
 }
+
+/** The panel's rows: each left item's label and note, and its quick-pick options. */
+const panelItems = (page: Page) => page.locator("#ai-applier-panel-host").evaluate(e => Array.from(e.shadowRoot!.querySelectorAll(".item")).map(i => ({
+  label: i.querySelector(".label")?.textContent ?? "", note: i.querySelector(".note")?.textContent ?? "",
+  choices: Array.from(i.querySelectorAll(".chip")).map(c => c.textContent ?? ""),
+}))).catch(() => []);
+const values = (page: Page) => page.evaluate(() => (window as unknown as { __values: Record<string, unknown> }).__values);
+
+test("Greenhouse react-select pickers: USA in the phone-country picker, Houston in Texas, education searches; a failed pick offers options", async () => {
+  const page = await ctx.newPage();
+  await page.goto(`http://job-boards.greenhouse.io:${sitePort}/rs/jobs/77`);
+  await until(async () => /Filled \d+ of \d+/.test(await panelText(page)), 60_000);
+  expect(await values(page)).toEqual({
+    country: "United States +1", "candidate-location": "Houston, Texas, United States", question_1: "No",
+    "school--0": "Rice University", "degree--0": "Bachelor's Degree", gender: "Male",
+  });
+  expect(await page.inputValue("#first_name")).toBe("Luis");
+  // "Computer Sci & Eng" is not a listed discipline: the panel says why, with the closest options to pick.
+  const items = await panelItems(page);
+  const discipline = items.find(i => i.label.startsWith("Discipline"));
+  expect(discipline?.note).toMatch(/^Couldn't fill it: No option for "Computer Sci & Eng" — options: Computer Engineering, Computer Science/);
+  expect(discipline?.choices).toEqual(["Computer Engineering", "Computer Science"]);
+  // (The phone comes from the bank: the first test taught it.)
+  expect(await panelText(page)).toMatch(/Filled 9 of 10 · 1 needs you/);
+
+  // One click picks it, and the app keeps it for this question.
+  await page.locator("#ai-applier-panel-host").evaluate(e => {
+    const chip = Array.from(e.shadowRoot!.querySelectorAll<HTMLButtonElement>(".chip")).find(c => c.textContent === "Computer Science")!;
+    chip.click();
+  });
+  await until(async () => (await values(page))["discipline--0"] === "Computer Science", 15_000);
+  await until(async () => (await panelText(page)).includes("Filled 10 of 10 · all set"), 10_000);
+  const db = openDb(path.join(dataDir, "app.db"));
+  try {
+    const picks = db.prepare("SELECT value FROM kv WHERE key = 'extPicks'").get() as { value: string } | undefined;
+    expect(JSON.parse(picks?.value ?? "{}")).toEqual({ discipline: { "computer sci & eng": "Computer Science" } });
+  } finally { db.close(); }
+
+  // The next form with the same question takes the picked option by itself.
+  const again = await ctx.newPage();
+  await again.goto(`http://job-boards.greenhouse.io:${sitePort}/rs/jobs/78`);
+  await until(async () => (await values(again))["discipline--0"] === "Computer Science", 60_000);
+  await page.close();
+  await again.close();
+}, 150_000);
+
+test("Ashby: the resume goes first and the extension waits for Ashby's parser before filling; Yes/No pairs are pressed once", async () => {
+  // jobs.ashbyhq.com is HSTS-preloaded (https only): the page is served by the browser context itself.
+  await ctx.route("https://jobs.ashbyhq.com/**", route => route.fulfill({ contentType: "text/html", body: form("ashby-like.html") }));
+  const page = await ctx.newPage();
+  await page.goto("https://jobs.ashbyhq.com/mini/0f0e-11aa/application");
+  await until(async () => /Filled \d+ of \d+/.test(await panelText(page)), 60_000);
+  // The parser overwrote the name and cleared the location before anything else was filled: the values stand.
+  expect(await page.evaluate(() => (window as unknown as { __parsedAt?: number }).__parsedAt)).toBeGreaterThan(0);
+  expect(await page.inputValue("#_systemfield_name")).toBe("Luis Hernandez");
+  expect(await page.inputValue("#_systemfield_email")).toBe("luis@example.com");
+  expect(await values(page)).toMatchObject({ resume: "Luis_Hernandez_Resume.pdf", location: "Houston, Texas, United States", q_auth: "Yes", q_sponsor: "No" });
+  expect(await page.inputValue("#loc")).toBe("Houston, Texas, United States");
+  // "No" was already pressed: only "Yes" (authorized) was pressed, once; the autofill widget was never used.
+  expect(await page.evaluate(() => (window as unknown as { __presses: number }).__presses)).toBe(1);
+  expect(await values(page)).not.toHaveProperty("autofillUsed");
+  expect(await panelText(page)).toContain("Filled 6 of 6 · all set");
+  await page.close();
+}, 90_000);
+
+test("Workday: fills each step as it appears; the user clicks Save and Continue; Add sections are left to the user", async () => {
+  const url = `http://mini.wd1.myworkdayjobs.com:${sitePort}/en-US/External/job/Houston-TX/Software-Engineer-Intern_R123/apply/applyManually`;
+  const seed = openDb(path.join(dataDir, "app.db"));
+  const job = upsertPosting(seed, {
+    sourceId: "test", listingId: "wd-1", company: "Mini", title: "Software Engineer Intern", locations: ["Houston, TX"], category: null,
+    terms: ["Summer 2027"], degrees: [], sponsorship: null, url: url.replace(/\/apply\/applyManually$/, ""), datePosted: new Date(), active: true,
+  }).job;
+  setOverride(seed, job.id, "How Did You Hear About Us?", { type: "text", text: "LinkedIn" });
+  seed.close();
+  const page = await ctx.newPage();
+  await page.goto(url);
+  await until(async () => (await panelText(page)).includes("Filled 4 of 4"), 60_000).catch(async e => {
+    throw new Error(`${e}: ${(await panelText(page)).slice(-600)} ${JSON.stringify(await values(page))}`);
+  });
+  expect(await values(page)).toEqual({ legalNameSection_firstName: "Luis", countryDropdown: "United States of America", source: ["LinkedIn"], previousWorker: "false" });
+  expect(await page.textContent("#input-2")).toBe("United States of America");
+
+  // The user (here: the test) moves on; the extension fills the new step by itself and never clicks Next or Add.
+  await page.click("#next");
+  await until(async () => (await values(page)).sponsorship === "No", 60_000).catch(async e => {
+    throw new Error(`${e}: ${(await panelText(page)).slice(-600)} ${JSON.stringify(await values(page))} ${await page.evaluate(() => document.getElementById("step")!.outerHTML)}`);
+  });
+  expect(await values(page)).toMatchObject({ workAuth: "Yes", sponsorship: "No" });
+  await until(async () => (await panelText(page)).includes("Filled 2 of 2 · 1 needs you"), 15_000);
+  expect((await panelItems(page)).map(i => i.label)).toEqual(["Work Experience"]);
+  expect(await page.evaluate(() => (window as unknown as { __nextClicks: number }).__nextClicks)).toBe(1);
+  expect(await values(page)).not.toHaveProperty("addClicked");
+  await page.close();
+}, 120_000);

@@ -4,15 +4,19 @@
  * sent back to the app (learn) with the submission. It never clicks submit, never fills a password, and never touches
  * a control outside the application form.
  */
-import type { ExtResolution, LearnAnswer, ResolveResponse, SubmittedRequest } from "../../src/ext/protocol.js";
+import { followUpBox } from "../../src/answers/other.js";
+import type { AdaptResponse, ExtAnswer, ExtHints, ExtResolution, LearnAnswer, ResolveResponse, SubmittedRequest } from "../../src/ext/protocol.js";
 import { collectFields } from "../../src/forms/collect.js";
 import type { FieldSpec } from "../../src/forms/types.js";
-import { fillField, isEmpty, isForbidden, membersOf, readValue, sameValue, type FieldValue } from "./fill.js";
+import { fillField, isEmpty, isForbidden, membersOf, readValue, sameValue, type FieldValue, type FillDeps } from "./fill.js";
 import { send, type ApiResult, type ResumeFile, type TabRequest, type TabState } from "./messages.js";
-import { Panel, PANEL_HOST_ID, type LeftItem } from "./panel.js";
+import { Panel, PANEL_HOST_ID, type DoneItem, type LeftItem } from "./panel.js";
 import { composedContains, deepQueryAll, shadowRoots } from "./dom.js";
+import { parsing, waitForParse } from "./parse.js";
 import { refineFields } from "./refine.js";
 import { findFormScope, inPageChrome, isApplicationPage, markScope, pageJob } from "./scope.js";
+import { manualSections, type ManualSection } from "./sections.js";
+import { PLACEHOLDER, sleep } from "./widgets.js";
 
 const MIN_FIELDS = 3;
 /** "Fill this page" takes a smaller form, but not a lone search box. */
@@ -25,8 +29,6 @@ const SUBMIT_DELAY_MS = 4000;
 /** How long the page must stay unchanged before the extension starts (or looks for new fields). */
 const QUIET_MS = 700;
 const MAX_WAIT_MS = 3000;
-/** A combobox showing one of these shows no value. */
-const PLACEHOLDER = /^(select|choose|pick|start typing|search)\b.*|^-+$/i;
 
 interface FieldState {
   spec: FieldSpec;
@@ -35,6 +37,14 @@ interface FieldState {
   /** What the extension put there (a fill that worked). */
   filledValue?: FieldValue;
   failed?: string;
+  /** The real value was typed into the box "Other" revealed. */
+  otherTyped?: boolean;
+  /** Options to offer the user when the fill found none matching. */
+  choices?: string[];
+  /** The last value seen while the field was on the page (a multi-step form drops earlier steps' fields). */
+  lastValue?: FieldValue;
+  /** The user picked a quick-pick option (already sent to the app). */
+  picked?: boolean;
 }
 
 interface Session {
@@ -46,6 +56,8 @@ interface Session {
   phase: "working" | "done" | "error" | "submitted";
   message?: string;
   submitId: string | null;
+  hints: ExtHints | null;
+  manual: ManualSection[];
 }
 
 let session: Session | null = null;
@@ -141,36 +153,53 @@ const NOTE: Record<string, string> = {
   file: "Attach this file yourself",
 };
 
-/** What's left for the user (still empty), and how many fields the extension filled. */
-function tally(s: Session): { filled: number; left: LeftItem[] } {
+const shownValue = (v: FieldValue): string => (Array.isArray(v) ? v.join(", ") : typeof v === "boolean" ? (v ? "Yes" : "No") : v ?? "");
+
+/**
+ * Every field's status, for the fields on the page now (a multi-step form's earlier steps are gone): what the extension
+ * filled, and what's left for the user (still empty: a question only they can answer, a draft, or a fill that failed and
+ * why, with options to pick).
+ */
+function tally(s: Session): { filled: number; left: LeftItem[]; done: DoneItem[] } {
   let filled = 0;
   const left: LeftItem[] = [];
+  const done: DoneItem[] = [];
   for (const st of s.fields.values()) {
     const { spec, res } = st;
+    const present = membersOf(spec.id).length > 0;
+    // An upload Greenhouse replaced with the file's name still counts once it was attached.
+    if (!present && !(spec.kind === "file" && st.filledValue !== undefined)) continue;
     if (!res || res.status === "skip") continue;
-    const now = valueOf(spec);
-    if (res.status === "filled" && st.filledValue !== undefined && !st.failed) {
+    const now = present ? valueOf(spec) : st.filledValue ?? null;
+    if (present && !isEmpty(now)) st.lastValue = now;
+    if ((res.status === "filled" || st.picked) && st.filledValue !== undefined && !st.failed) {
       filled++;
       outline(spec, isEmpty(now) ? "#c37d16" : "#057642");
-      if (res.other) left.push({ fieldId: spec.id, label: spec.label, required: spec.required, note: `Picked "Other": type "${res.other}" in its box` });
+      done.push({ fieldId: spec.id, label: spec.label, value: shownValue(isEmpty(now) ? st.filledValue : now) });
+      if (res.status === "filled" && res.other && !st.otherTyped) left.push({ fieldId: spec.id, label: spec.label, required: spec.required, note: `Picked "Other": type "${res.other}" in its box` });
       continue;
     }
     if (!isEmpty(now) && !(spec.kind === "checkbox" && now === false)) { outline(spec, null); continue; }
     outline(spec, "#e07a00");
     const note = st.failed ? `Couldn't fill it: ${st.failed}` : res.status === "needs-you" ? NOTE[res.reason] ?? "Needs you" : "A draft is ready — check it";
     left.push({
-      fieldId: spec.id, label: spec.label, required: spec.required, note,
+      fieldId: spec.id, label: spec.label, required: spec.required, note, ...(st.failed ? { failed: true } : {}),
+      ...(st.failed && st.choices?.length ? { choices: st.choices } : {}),
       ...(res.status === "suggestion" ? { suggestion: res.text } : {}),
     });
   }
-  return { filled, left };
+  return { filled, left, done };
 }
 
 function render(): void {
   const s = session;
   if (!s) return;
-  const { filled, left } = tally(s);
-  s.panel.update({ phase: s.phase, message: s.message, filled, total: filled + left.length, left });
+  const { filled, left, done } = tally(s);
+  s.manual = s.manual.filter(m => m.button.isConnected);
+  s.panel.update({
+    phase: s.phase, message: s.message, filled, total: filled + left.length, left, done,
+    manual: s.manual.map((m, i) => ({ id: String(i), label: m.label })),
+  });
 }
 
 let renderTimer: ReturnType<typeof setTimeout> | null = null;
@@ -181,10 +210,68 @@ function renderSoon(): void {
 
 /** The application's fields inside the scope, never a password box or the panel's own controls. */
 function scan(selector: string): FieldSpec[] {
-  return refineFields(collectFields(selector)).filter(f => {
+  return refineFields(collectFields(selector), document.querySelector(selector)).filter(f => {
     const m = membersOf(f.id);
     return m.length && !m.some(isForbidden) && !m.some(e => e.closest(`#${PANEL_HOST_ID}`) || inPageChrome(e));
   });
+}
+
+/** How the extension fills a field: the resume, the profile's hints, and the app's mapping for unmatched options. */
+function depsFor(s: Session, st: FieldState): FillDeps {
+  const res = st.res?.status === "filled" ? st.res : null;
+  return {
+    resume,
+    hints: s.hints,
+    adapt: async ({ field, value, options, final }) => {
+      const job = pageJob();
+      const r = await bg<ApiResult<AdaptResponse>>({
+        type: "api", method: "POST", path: "/ext/adapt",
+        body: {
+          url: location.href, ...referrer(), title: job.title, ...(job.company ? { company: job.company } : {}),
+          field, value, options, final, ...(res ? { source: res.source, ...(res.entity ? { entity: true } : {}) } : {}),
+        },
+      });
+      return r?.ok ? r.data : null;
+    },
+  };
+}
+
+/** Fills one field and records how it went; a picked "Other" gets its real value typed into the box it reveals. */
+async function fillOne(s: Session, st: FieldState, answer: ExtAnswer): Promise<boolean> {
+  const out = await fillField(st.spec, answer, depsFor(s, st));
+  if (session !== s) return false;
+  if (!out.ok) {
+    st.failed = out.error;
+    st.choices = out.choices;
+    return false;
+  }
+  st.failed = undefined;
+  st.choices = undefined;
+  st.filledValue = out.value;
+  const other = out.other ?? (st.res?.status === "filled" ? st.res.other : undefined);
+  if (other) {
+    if (out.other && st.res?.status === "filled") st.res = { ...st.res, other: out.other };
+    await fillOtherBox(s, st, other);
+  }
+  return true;
+}
+
+/**
+ * Types the real value into the box that "Other" revealed (or the "please specify" box after the control), as the runner
+ * does (answers/other.ts followUpBox): it is filled from the same source, never asked about as a new question.
+ */
+async function fillOtherBox(s: Session, control: FieldState, value: string): Promise<void> {
+  await sleep(300); // let the form show the box
+  const present = scan(s.selector);
+  const box = followUpBox(present, control.spec.id, id => s.fields.get(id)?.filledValue !== undefined);
+  if (!box) return;
+  const spec: FieldSpec = { ...box };
+  const res: ExtResolution = { fieldId: spec.id, status: "filled", answer: { type: "text", text: value }, source: control.res?.status === "filled" ? control.res.source : "bank" };
+  const st: FieldState = s.fields.get(spec.id) ?? { spec, initial: valueOf(spec) };
+  st.res = res;
+  s.fields.set(spec.id, st);
+  const out = await fillField(spec, res.answer, depsFor(s, st));
+  if (out.ok) { st.filledValue = out.value; control.otherTyped = true; } else st.failed = out.error;
 }
 
 async function resolveAndFill(s: Session, specs: FieldSpec[]): Promise<void> {
@@ -202,22 +289,41 @@ async function resolveAndFill(s: Session, specs: FieldSpec[]): Promise<void> {
     render();
     return;
   }
+  s.hints = r.data.hints ?? s.hints;
   filling = true;
   try {
+    const todo: FieldState[] = [];
     for (const res of r.data.resolutions) {
       const st = s.fields.get(res.fieldId);
       if (!st) continue;
       st.res = res;
       st.failed = undefined;
-      if (res.status !== "filled") continue;
-      const out = await fillField(st.spec, res.answer, { resume });
+      if (res.status === "filled") todo.push(st);
+    }
+    // A resume parser (Lever, Ashby) rewrites fields after an upload, or may still be running from the user's own
+    // upload: the files go first, then everything else once it's done.
+    const files = todo.filter(st => st.spec.kind === "file");
+    if (parsing(s.scope)) { s.message = "Waiting for the site to read the resume…"; render(); await waitForParse(s.scope, false); }
+    for (const st of files) {
       if (session !== s) return;
-      if (out.ok) st.filledValue = out.value;
-      else st.failed = out.error;
+      await fillOne(s, st, (st.res as { answer: ExtAnswer }).answer);
+    }
+    if (files.length) {
+      s.message = "Waiting for the site to read the resume…";
+      render();
+      await waitForParse(s.scope, true);
+    }
+    s.message = "Filling…";
+    for (const st of todo) {
+      if (session !== s) return;
+      if (st.spec.kind === "file") continue;
+      render();
+      await fillOne(s, st, (st.res as { answer: ExtAnswer }).answer);
     }
   } finally {
     filling = false;
   }
+  s.manual = manualSections(s.scope);
   s.phase = "done";
   s.message = undefined;
   render();
@@ -229,7 +335,8 @@ async function resolveAndFill(s: Session, specs: FieldSpec[]): Promise<void> {
 async function activate(force: boolean): Promise<boolean> {
   if (busy) return false;
   if (session && !force) return true;
-  const min = force ? FORCED_MIN_FIELDS : MIN_FIELDS;
+  // Workday splits the application into steps, some with one or two questions (its sign-in has a password: never taken).
+  const min = force ? FORCED_MIN_FIELDS : location.hostname.endsWith(".myworkdayjobs.com") ? 1 : MIN_FIELDS;
   const scope = findFormScope(min, force || autoPage());
   if (!scope) return false;
   const selector = markScope(scope);
@@ -240,8 +347,9 @@ async function activate(force: boolean): Promise<boolean> {
   try {
     teardown();
     const s: Session = {
-      url: location.href, scope, selector, fields: new Map(), panel: new Panel({ focus: focusField, useSuggestion, refill: () => void activate(true), pauseSite }),
-      phase: "working", message: "Working out your answers…", submitId: null,
+      url: location.href, scope, selector, fields: new Map(),
+      panel: new Panel({ focus: focusField, useSuggestion, pick: (id, option) => void quickPick(id, option), focusManual, refill: () => void activate(true), pauseSite }),
+      phase: "working", message: "Working out your answers…", submitId: null, hints: null, manual: [],
     };
     session = s;
     render();
@@ -268,14 +376,58 @@ function focusField(id: string): void {
   try { (el && visible(el) ? el : t)?.focus({ preventScroll: true }); } catch { /* not focusable */ }
 }
 
+function focusManual(id: string): void {
+  const m = session?.manual[Number(id)];
+  m?.button.scrollIntoView({ block: "center", behavior: "smooth" });
+}
+
+/**
+ * The user picked one of the options offered for a field the extension couldn't fill: it is filled with that option and
+ * sent to the app at once (/ext/learn), so this question takes that answer next time (and this job keeps it).
+ */
+async function quickPick(id: string, option: string): Promise<void> {
+  const s = session;
+  const st = s?.fields.get(id);
+  if (!s || !st) return;
+  const before = st.res?.status === "filled" ? st.res : null;
+  const replaced = before && (before.answer.type === "text" || before.answer.type === "option") ? (before.answer.type === "text" ? before.answer.text : before.answer.option) : undefined;
+  filling = true;
+  let ok = false;
+  try {
+    ok = await fillOne(s, st, { type: "option", option });
+  } finally {
+    filling = false;
+  }
+  if (ok) {
+    st.picked = true;
+    const res = st.res;
+    const job = pageJob();
+    const value = valueOf(st.spec);
+    void bg({
+      type: "api", method: "POST", path: "/ext/learn",
+      body: {
+        url: location.href, ...referrer(), ...job,
+        answers: [{
+          label: st.spec.label, kind: st.spec.kind, ...(st.spec.options?.length ? { options: st.spec.options } : {}),
+          value: isEmpty(value) ? option : value as string | string[] | boolean,
+          // The app's own value (a profile fact) stays the profile's: the pick is remembered for this question only.
+          source: before?.source ?? "pick", ...(replaced ? { replaced } : {}),
+          ...(res && "questionId" in res && res.questionId !== undefined ? { questionId: res.questionId } : {}),
+        }],
+      },
+    });
+  }
+  render();
+}
+
 async function useSuggestion(id: string): Promise<void> {
   const s = session;
   const st = s?.fields.get(id);
   if (!s || !st || st.res?.status !== "suggestion") return;
   filling = true;
   try {
-    const out = await fillField(st.spec, st.res.suggestion, { resume });
-    if (!out.ok && st.res.suggestion.type !== "text") await fillField(st.spec, { type: "text", text: st.res.text }, { resume });
+    const out = await fillField(st.spec, st.res.suggestion, depsFor(s, st));
+    if (!out.ok && st.res.suggestion.type !== "text") await fillField(st.spec, { type: "text", text: st.res.text }, depsFor(s, st));
   } finally {
     filling = false;
   }
@@ -294,8 +446,8 @@ function learnAnswers(s: Session): LearnAnswer[] {
   const out: LearnAnswer[] = [];
   for (const st of s.fields.values()) {
     const { spec, res } = st;
-    if (spec.kind === "file") continue;
-    const v = valueOf(spec);
+    if (spec.kind === "file" || st.picked) continue;
+    const v = membersOf(spec.id).length ? valueOf(spec) : st.lastValue ?? null;
     if (isEmpty(v) || sameValue(v, st.initial)) continue;
     const appFilled = res?.status === "filled" && st.filledValue !== undefined;
     if (appFilled && sameValue(v, st.filledValue!)) continue;
@@ -313,7 +465,7 @@ function submission(s: Session): SubmittedRequest {
   let resumeUsed: string | undefined;
   const answers: { label: string; value: string | string[] | boolean }[] = [];
   for (const st of s.fields.values()) {
-    const v = valueOf(st.spec);
+    const v = membersOf(st.spec.id).length ? valueOf(st.spec) : st.lastValue ?? (st.spec.kind === "file" ? st.filledValue ?? null : null);
     if (isEmpty(v)) continue;
     if (st.spec.kind === "file" && st.res?.status === "filled" && typeof v === "string") resumeUsed = v;
     answers.push({ label: st.spec.label, value: v as string | string[] | boolean });
