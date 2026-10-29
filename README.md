@@ -29,7 +29,18 @@ Your data (database, resume, browser profile, submission records) lives in `./da
 
 When unsure, start with Paused on or review mode `Always`.
 
+## Browser extension
+
+The extension fills applications you open in your own Chrome, using the app's profile and answer bank (the app must be running). On Greenhouse, Lever, Ashby, Workday, Oracle Cloud, SmartRecruiters, iCIMS, BambooHR and Workable pages it starts by itself once the form shows; on any other site click its icon, then **Fill this page**. A panel in the corner shows what was filled and lists what's left (click one to jump to it; drafts the app wrote wait for **Use suggestion**). It never submits and never fills passwords: when you click Submit, what you typed is saved to the answer bank (so the next form fills it, even when worded differently) and the application is recorded as submitted in the dashboard and the tracker.
+
+1. **Build** - `pnpm build:ext` (writes `extension/dist/`; build again after pulling changes, then click the reload icon on the extension's card).
+2. **Load it** - open `chrome://extensions`, turn on **Developer mode**, click **Load unpacked** and choose the `extension/dist` folder.
+3. **Pair it** - in the app open Settings → **Browser extension**, copy the token, click the extension's icon, open **Pairing**, paste it and click Save. (The app's address can be changed there too, e.g. when it runs with `AI_APPLIER_PORT`.)
+
+Use **Pause on this site** in the panel (or the icon's menu) to keep it off a site.
+
 ## Commands
 
 - `pnpm start` - run the app (polls on startup, then every *Poll every* minutes)
+- `pnpm build:ext` - build the browser extension into `extension/dist/`
 - `pnpm test` / `pnpm typecheck`
