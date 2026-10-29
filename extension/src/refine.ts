@@ -81,13 +81,18 @@ function questionOf(el: HTMLElement): { label: string; required: boolean } {
   return out("", req);
 }
 
+/** New field ids, continuing collectFields' numbering (never one a control had before: see collect.ts). */
 function nextId(): () => string {
-  let counter = 0;
+  const MARK = "data-aa-last-id";
+  let counter = Number(document.documentElement.getAttribute(MARK)) || 0;
   deepQueryAll(document, "[data-aa-id]").forEach(e => {
     const n = Number(/^f(\d+)$/.exec(e.getAttribute("data-aa-id") ?? "")?.[1]);
     if (n > counter) counter = n;
   });
-  return () => `f${++counter}`;
+  return () => {
+    document.documentElement.setAttribute(MARK, String(++counter));
+    return `f${counter}`;
+  };
 }
 
 /** Fields collectFields doesn't see: Yes/No button pairs and listbox buttons inside the scope. */

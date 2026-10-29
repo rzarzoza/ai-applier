@@ -101,7 +101,10 @@ export function collectFields(scope: string): FieldSpec[] {
     return false;
   };
 
-  let counter = 0;
+  // Ids never repeat on a page, even once the controls that had them are gone (a multi-step form replaces its step):
+  // the highest id handed out is kept on the document element.
+  const ROOT_MARK = "data-aa-last-id";
+  let counter = Number(document.documentElement.getAttribute(ROOT_MARK)) || 0;
   deepAll(document, "[data-aa-id]").forEach(e => {
     const n = Number(/^f(\d+)$/.exec(e.getAttribute("data-aa-id") ?? "")?.[1]);
     if (n > counter) counter = n;
@@ -129,6 +132,7 @@ export function collectFields(scope: string): FieldSpec[] {
     const existing = els.map(e => e.getAttribute("data-aa-id")).find(Boolean);
     const id = existing ?? `f${++counter}`;
     els.forEach(e => e.setAttribute("data-aa-id", id));
+    document.documentElement.setAttribute(ROOT_MARK, String(counter));
     return id;
   };
   const star = /\s*\*+\s*$/;
