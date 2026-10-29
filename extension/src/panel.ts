@@ -83,6 +83,8 @@ export class Panel {
 
   update(view: PanelView): void {
     this.view = view;
+    // The page may have re-rendered and dropped the panel.
+    if (!this.host.isConnected) document.documentElement.appendChild(this.host);
     this.render();
   }
 

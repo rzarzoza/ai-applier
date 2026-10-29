@@ -242,13 +242,30 @@ export function readValue(field: FieldSpec): FieldValue {
       return names.length === 0 ? null : names.length === 1 ? names[0]! : names;
     }
     case "combobox": {
-      if (el instanceof HTMLInputElement) return el.value;
-      const child = el.querySelector("input");
-      return child && child.value ? child.value : (el.textContent ?? "").replace(/\s+/g, " ").trim();
+      const input = el instanceof HTMLInputElement ? el : el.querySelector("input");
+      if (input?.value) return input.value;
+      const picked = selectedChips(el);
+      if (picked.length) return picked.length === 1 ? picked[0]! : picked;
+      return el instanceof HTMLInputElement ? "" : (el.textContent ?? "").replace(/\s+/g, " ").trim();
     }
     default:
       return (el as HTMLInputElement).value;
   }
+}
+
+/** react-select style pickers show the picked value(s) beside an emptied search box. */
+const CHIP = '[class*="singleValue" i], [class*="single-value" i], [class*="multiValue__label" i], [class*="multi-value__label" i]';
+
+/** The values a select-like combobox shows as picked (from the nearest wrapper holding them, at most 4 levels up). */
+function selectedChips(el: HTMLElement): string[] {
+  for (let a: HTMLElement | null = el, d = 0; a && d < 5; a = a.parentElement, d++) {
+    // Never a wrapper around another picker: its chips are that field's.
+    if (a.querySelectorAll("[role=combobox]").length > 1) break;
+    const chips = Array.from(a.querySelectorAll(CHIP)).map(c => (c.textContent ?? "").replace(/\s+/g, " ").trim()).filter(Boolean);
+    if (chips.length) return chips;
+    if (a.matches("label, fieldset, form")) break;
+  }
+  return [];
 }
 
 /** Whether a value is empty (nothing typed, nothing picked). */

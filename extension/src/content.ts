@@ -10,6 +10,7 @@ import type { FieldSpec } from "../../src/forms/types.js";
 import { fillField, isEmpty, isForbidden, membersOf, readValue, sameValue, type FieldValue } from "./fill.js";
 import { send, type ApiResult, type ResumeFile, type TabRequest, type TabState } from "./messages.js";
 import { Panel, PANEL_HOST_ID, type LeftItem } from "./panel.js";
+import { refineFields } from "./refine.js";
 import { findFormScope, isApplicationPage, markScope, pageJob } from "./scope.js";
 
 const MIN_FIELDS = 3;
@@ -20,6 +21,9 @@ const NOT_SUBMIT = /linkedin|indeed|autofill|with google|upload|attach|sign in|l
 /** How long after a submit click the form gets to refuse it (validation errors) before it counts as sent. */
 const SUBMIT_CHECK_MS = 2500;
 const SUBMIT_DELAY_MS = 4000;
+/** How long the page must stay unchanged before the extension starts (or looks for new fields). */
+const QUIET_MS = 700;
+const MAX_WAIT_MS = 3000;
 /** A combobox showing one of these shows no value. */
 const PLACEHOLDER = /^(select|choose|pick|start typing|search)\b.*|^-+$/i;
 
@@ -48,7 +52,7 @@ let busy = false;
 let filling = false;
 let resumeFile: Promise<File | null> | null = null;
 
-const outlined = new Map<HTMLElement, string>();
+const outlined = new Map<HTMLElement, SavedOutline>();
 const visible = (e: Element) => e.checkVisibility({ visibilityProperty: true }) && e.getClientRects().length > 0;
 
 async function bg<T>(msg: Parameters<typeof send>[0]): Promise<T | null> {
@@ -76,28 +80,48 @@ function targetOf(spec: FieldSpec): HTMLElement | null {
     return el.closest<HTMLElement>("fieldset, [role=radiogroup], [role=group]") ?? el.parentElement;
   }
   if (spec.kind === "checkbox") return el.closest<HTMLElement>("label") ?? el;
+  if (spec.kind === "combobox" && el instanceof HTMLInputElement) {
+    // A react-select style picker: its visible box, not the narrow search input inside it.
+    for (let a = el.parentElement, d = 0; a && d < 4; a = a.parentElement, d++) {
+      if (a.querySelectorAll("[role=combobox]").length > 1) break;
+      if (/(^|[\s_-])control(\s|$)|__control/i.test(a.getAttribute("class") ?? "")) return a;
+    }
+  }
   if (!visible(el)) {
     for (let a = el.parentElement, d = 0; a && d < 3; a = a.parentElement, d++) if (visible(a)) return a;
   }
   return el;
 }
 
+/** The outline a control had before the extension marked it, to put back. */
+interface SavedOutline { outline: string; outlinePriority: string; offset: string }
+
+function restore(el: HTMLElement, prev: SavedOutline): void {
+  el.style.setProperty("outline", prev.outline, prev.outlinePriority);
+  if (!prev.outline) el.style.removeProperty("outline");
+  if (prev.offset) el.style.setProperty("outline-offset", prev.offset);
+  else el.style.removeProperty("outline-offset");
+}
+
 function outline(spec: FieldSpec, color: string | null): void {
   const t = targetOf(spec);
   if (!t) return;
-  if (!outlined.has(t)) outlined.set(t, t.style.outline);
+  if (!outlined.has(t)) {
+    outlined.set(t, { outline: t.style.getPropertyValue("outline"), outlinePriority: t.style.getPropertyPriority("outline"), offset: t.style.getPropertyValue("outline-offset") });
+  }
   if (color) {
-    t.style.outline = `2px solid ${color}`;
-    t.style.outlineOffset = "2px";
+    // Important, so a site rule like "outline: none !important" on its pickers doesn't hide it; drawn inside the box,
+    // so a wrapper with overflow hidden doesn't clip it.
+    t.style.setProperty("outline", `2px solid ${color}`, "important");
+    t.style.setProperty("outline-offset", "-2px", "important");
   } else {
-    t.style.outline = outlined.get(t) ?? "";
-    t.style.outlineOffset = "";
+    restore(t, outlined.get(t)!);
     outlined.delete(t);
   }
 }
 
 function clearOutlines(): void {
-  for (const [el, prev] of outlined) { el.style.outline = prev; el.style.outlineOffset = ""; }
+  for (const [el, prev] of outlined) restore(el, prev);
   outlined.clear();
 }
 
@@ -153,7 +177,7 @@ function renderSoon(): void {
 
 /** The application's fields inside the scope, never a password box or the panel's own controls. */
 function scan(selector: string): FieldSpec[] {
-  return collectFields(selector).filter(f => {
+  return refineFields(collectFields(selector)).filter(f => {
     const m = membersOf(f.id);
     return m.length && !m.some(isForbidden) && !m.some(e => e.closest(`#${PANEL_HOST_ID}`));
   });
@@ -193,6 +217,8 @@ async function resolveAndFill(s: Session, specs: FieldSpec[]): Promise<void> {
   s.phase = "done";
   s.message = undefined;
   render();
+  // The page re-rendered the form while it was being filled: start over on the new one.
+  if (!s.scope.isConnected) recheck = true;
 }
 
 /** Starts on this page's application form; with `force` (the popup's "Fill this page"), on any form, starting over. */
@@ -219,6 +245,7 @@ async function activate(force: boolean): Promise<boolean> {
     return true;
   } finally {
     busy = false;
+    afterBusy();
   }
 }
 
@@ -370,11 +397,12 @@ let pausedHere = false;
 
 /** After the page changes: start once a form shows, follow a single-page app to its next page, fill fields that appear. */
 async function onPageChange(): Promise<void> {
-  if (busy || filling || pausedHere) return;
+  if (pausedHere) return;
+  // The page changed while filling: look again once that's done.
+  if (busy || filling) { recheck = true; return; }
   const s = session;
-  if (s && ((s.url !== location.href && !s.submitId) || !s.scope.isConnected)) {
-    teardown();
-  }
+  // A single-page app moved on, or the page re-rendered the form (a framework hydrating the page replaces it).
+  if (s && ((s.url !== location.href && !s.submitId) || !s.scope.isConnected)) teardown();
   if (!session) {
     if (autoPage()) await activate(false);
     return;
@@ -383,8 +411,25 @@ async function onPageChange(): Promise<void> {
   const fresh = scan(session.selector).filter(f => !session!.fields.has(f.id));
   if (fresh.length) {
     busy = true;
-    try { await resolveAndFill(session, fresh); } finally { busy = false; }
+    try { await resolveAndFill(session, fresh); } finally { busy = false; afterBusy(); }
   }
+}
+
+let recheck = false;
+/** Runs the check the page asked for while the extension was busy. */
+function afterBusy(): void {
+  if (!recheck) return;
+  recheck = false;
+  scheduleScan(300);
+}
+
+let scanSince = 0;
+/** Looks at the page once it has been quiet for `ms`, or after MAX_WAIT_MS of constant change (an animated page). */
+function scheduleScan(ms: number): void {
+  const now = Date.now();
+  if (scanTimer) clearTimeout(scanTimer);
+  else scanSince = now;
+  scanTimer = setTimeout(() => { scanTimer = null; void onPageChange(); }, now - scanSince > MAX_WAIT_MS ? 0 : ms);
 }
 
 let watching = false;
@@ -393,8 +438,7 @@ function watch(): void {
   watching = true;
   const observer = new MutationObserver(records => {
     if (records.every(r => r.target instanceof Element && r.target.closest(`#${PANEL_HOST_ID}`))) return;
-    if (scanTimer) clearTimeout(scanTimer);
-    scanTimer = setTimeout(() => { scanTimer = null; void onPageChange(); }, 600);
+    scheduleScan(QUIET_MS);
   });
   observer.observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ["hidden", "style", "class", "aria-hidden"] });
 }
@@ -417,6 +461,8 @@ void (async () => {
   if (!autoPage()) return;
   pausedHere = (await bg<boolean>({ type: "site-paused", host: location.hostname })) === true;
   if (pausedHere) return;
+  // Start once the page has settled: a page that hydrates (React, Remix) re-renders its form right after loading,
+  // which would drop whatever was filled before it. The observer restarts the wait on every change.
   watch();
-  await activate(false);
+  scheduleScan(QUIET_MS);
 })();

@@ -156,3 +156,48 @@ test("the application form is picked over a site search box, and only known ATS 
   ];
   for (const [url, want] of urls) expect(await page.evaluate(u => (window as unknown as { __aa: AaTestApi }).__aa.isApplicationPage(u), url), url).toBe(want);
 });
+
+test("a react-select style picker reads as the value it shows, not its emptied search box", async () => {
+  await page.setContent(`<form>
+    <label id="g-l" for="g">Gender</label>
+    <div class="select__control"><div class="select__value-container">
+      <div class="select__single-value">Male</div>
+      <div class="select__input-container"><input id="g" role="combobox" aria-labelledby="g-l" value=""></div>
+    </div></div>
+    <label id="v-l" for="v">Veteran Status</label>
+    <div class="select__control"><div class="select__value-container">
+      <div class="select__placeholder">Select...</div>
+      <div class="select__input-container"><input id="v" role="combobox" aria-labelledby="v-l" value=""></div>
+    </div></div>
+  </form>`);
+  await page.addScriptTag({ content: bundle });
+  const values = await page.evaluate(() => {
+    const aa = (window as unknown as { __aa: AaTestApi }).__aa;
+    return aa.collect("form").map(f => [f.label, aa.read(f)]);
+  });
+  expect(values).toEqual([["Gender", "Male"], ["Veteran Status", ""]]);
+});
+
+test("uploads take their group's label and pickers drop their placeholder, as the runner's Greenhouse handler does", async () => {
+  await page.setContent(`<form>
+    <label for="a">A</label><input id="a"><label for="b">B</label><input id="b">
+    <div role="group" aria-labelledby="upload-label-resume" aria-required="true">
+      <div id="upload-label-resume">Resume/CV<span>*</span></div>
+      <button type="button">Attach</button><label for="resume">Attach</label><input id="resume" type="file" style="position:absolute;width:1px;height:1px;opacity:0">
+    </div>
+    <div role="group" aria-labelledby="upload-label-cover">
+      <div id="upload-label-cover">Cover Letter</div>
+      <button type="button">Attach</button><label for="cover">Attach</label><input id="cover" type="file" style="position:absolute;width:1px;height:1px;opacity:0">
+    </div>
+    <label id="g-label" for="gender">Gender</label>
+    <div class="select__control"><div id="react-select-gender-placeholder" class="select__placeholder">Select...</div>
+      <input id="gender" role="combobox" aria-labelledby="g-label" aria-describedby="react-select-gender-placeholder"></div>
+  </form>`);
+  await page.addScriptTag({ content: bundle });
+  const fields = await page.evaluate(() => (window as unknown as { __aa: AaTestApi }).__aa.collect("form"));
+  expect(fields.filter(f => f.kind !== "text").map(({ id: _id, ...f }) => f)).toEqual([
+    { label: "Resume/CV", kind: "file", required: true },
+    { label: "Cover Letter", kind: "file", required: false },
+    { label: "Gender", kind: "combobox", required: false },
+  ]);
+});
