@@ -12,8 +12,30 @@ export function collectFields(scope: string): FieldSpec[] {
   const squash = (s: string | null | undefined) => (s ?? "").replace(/\s+/g, " ").trim();
   const isVisible = (e: Element) =>
     e.checkVisibility({ visibilityProperty: true }) && (e.getClientRects().length > 0);
-  const textOfIds = (ids: string | null) =>
-    squash((ids ?? "").split(/\s+/).filter(Boolean).map(i => document.getElementById(i)?.textContent ?? "").join(" "));
+  // Open shadow roots are searched too: web-component forms (SmartRecruiters' spl-* elements) keep their inputs and
+  // labels inside them. Ids and label[for] resolve within the element's own root first.
+  const deepAll = (root: ParentNode, selector: string): Element[] => {
+    const found: Element[] = [];
+    const visit = (r: ParentNode) => {
+      for (const e of Array.from(r.querySelectorAll("*"))) {
+        if (e.matches(selector)) found.push(e);
+        if (e.shadowRoot) visit(e.shadowRoot);
+      }
+    };
+    visit(root);
+    return found;
+  };
+  const rootOf = (el: Node) => el.getRootNode() as Document | ShadowRoot;
+  const hostOf = (el: Node): Element | null => { const r = el.getRootNode(); return r instanceof ShadowRoot ? r.host : null; };
+  const byId = (ctx: Element, id: string) => rootOf(ctx).getElementById(id) ?? document.getElementById(id);
+  const labelsFor = (ctx: Element, id: string) => Array.from(rootOf(ctx).querySelectorAll("label")).filter(l => l.getAttribute("for") === id);
+  /** Like closest(), but climbs out of shadow roots through their hosts. */
+  const closestDeep = (el: Element, selector: string): Element | null => {
+    for (let n: Element | null = el; n; n = n.parentElement ?? hostOf(n)) if (n.matches(selector)) return n;
+    return null;
+  };
+  const textOfIds = (ids: string | null, ctx: Element) =>
+    squash((ids ?? "").split(/\s+/).filter(Boolean).map(i => byId(ctx, i)?.textContent ?? "").join(" "));
   const hasControl = (e: Element) => !!e.querySelector("input, select, textarea, button");
   const ownLabelText = (label: Element) => {
     const clone = label.cloneNode(true) as Element;
@@ -28,33 +50,42 @@ export function collectFields(scope: string): FieldSpec[] {
         const t = squash(p.textContent);
         if (t) return t;
       }
-      node = node.parentElement;
+      node = node.parentElement ?? hostOf(node);
+    }
+    return "";
+  };
+  /** A control inside a web component: the label its host carries (label/aria-label attribute, or a label[for] it). */
+  const hostLabel = (el: Element): string => {
+    for (let h = hostOf(el); h; h = hostOf(h)) {
+      const t = squash(h.getAttribute("label")) || squash(h.getAttribute("aria-label"))
+        || (h.id ? labelsFor(h, h.id).map(ownLabelText).find(Boolean) ?? "" : "");
+      if (t) return t;
     }
     return "";
   };
   const labelFor = (el: Element): string => {
-    const byIds = textOfIds(el.getAttribute("aria-labelledby"));
+    const byIds = textOfIds(el.getAttribute("aria-labelledby"), el);
     if (byIds) return byIds;
     const forId = el.getAttribute("id");
     if (forId) {
-      const l = Array.from(document.querySelectorAll("label")).find(x => x.getAttribute("for") === forId);
+      const l = labelsFor(el, forId)[0];
       if (l && ownLabelText(l)) return ownLabelText(l);
     }
     const wrap = el.closest("label");
     if (wrap && ownLabelText(wrap)) return ownLabelText(wrap);
     const aria = squash(el.getAttribute("aria-label"));
     if (aria) return aria;
-    return groupLabel(el) || precedingText(el);
+    return hostLabel(el) || groupLabel(el) || precedingText(el);
   };
   const groupContainer = (el: Element) => el.closest("fieldset, [role=radiogroup], [role=group]");
   const groupLabel = (el: Element): string => {
     const g = groupContainer(el);
     if (!g) return "";
-    return textOfIds(g.getAttribute("aria-labelledby")) ||
+    return textOfIds(g.getAttribute("aria-labelledby"), g) ||
       squash(g.querySelector(":scope > legend")?.textContent) || squash(g.getAttribute("aria-label"));
   };
   const describe = (el: Element): string => {
-    const byIds = textOfIds(el.getAttribute("aria-describedby"));
+    const byIds = textOfIds(el.getAttribute("aria-describedby"), el);
     if (byIds) return byIds;
     const sib = el.closest("label")?.nextElementSibling ?? el.nextElementSibling;
     if (sib && sib.matches(".hint, .help, .description, small, [class*=help], [class*=hint]")) return squash(sib.textContent);
@@ -62,7 +93,7 @@ export function collectFields(scope: string): FieldSpec[] {
   };
   const hasVisibleTrigger = (el: Element) => {
     const id = el.getAttribute("id");
-    const labels = [el.closest("label"), ...(id ? Array.from(document.querySelectorAll("label")).filter(l => l.getAttribute("for") === id) : [])];
+    const labels = [el.closest("label"), ...(id ? labelsFor(el, id) : [])];
     if (labels.some(l => l && isVisible(l))) return true;
     for (let a = el.parentElement, depth = 0; a && depth < 3 && a !== scopeEl; a = a.parentElement, depth++) {
       if (Array.from(a.querySelectorAll("button, [role=button], label")).some(t => t !== el && !t.contains(el) && !t.matches(`label[for]:not([for="${id ?? ""}"])`) && isVisible(t))) return true;
@@ -71,14 +102,14 @@ export function collectFields(scope: string): FieldSpec[] {
   };
 
   let counter = 0;
-  document.querySelectorAll("[data-aa-id]").forEach(e => {
+  deepAll(document, "[data-aa-id]").forEach(e => {
     const n = Number(/^f(\d+)$/.exec(e.getAttribute("data-aa-id") ?? "")?.[1]);
     if (n > counter) counter = n;
   });
 
   type Ctl = HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement | HTMLElement;
-  const controls = Array.from(scopeEl.querySelectorAll<Ctl>("input, select, textarea, [role=combobox]")).filter(e => {
-    if (e.closest('[aria-hidden="true"]')) return false;
+  const controls = (deepAll(scopeEl, "input, select, textarea, [role=combobox]") as Ctl[]).filter(e => {
+    if (closestDeep(e, '[aria-hidden="true"]')) return false;
     if (e instanceof HTMLInputElement && ["hidden", "submit", "button", "reset", "image"].includes(e.type)) return false;
     if (e instanceof HTMLInputElement && e.type === "file") return isVisible(e) || hasVisibleTrigger(e);
     return isVisible(e);
@@ -108,8 +139,8 @@ export function collectFields(scope: string): FieldSpec[] {
   };
   const setOpt = (el: HTMLInputElement) => {
     const l = el.closest("label") ? ownLabelText(el.closest("label")!)
-      : (el.id ? Array.from(document.querySelectorAll("label")).filter(x => x.getAttribute("for") === el.id).map(ownLabelText).find(Boolean) : "") ||
-        squash(el.getAttribute("aria-label")) || textOfIds(el.getAttribute("aria-labelledby"));
+      : (el.id ? labelsFor(el, el.id).map(ownLabelText).find(Boolean) : "") ||
+        squash(el.getAttribute("aria-label")) || textOfIds(el.getAttribute("aria-labelledby"), el);
     el.setAttribute("data-aa-opt", l || el.value);
     return l || el.value;
   };
@@ -130,7 +161,7 @@ export function collectFields(scope: string): FieldSpec[] {
         description = [groupLabel(first), describe(first)].filter(Boolean).join(" - ");
       } else {
         rawLabel = groupLabel(first) || precedingText(first);
-        description = g ? textOfIds(g.getAttribute("aria-describedby")) : "";
+        description = g ? textOfIds(g.getAttribute("aria-describedby"), g) : "";
       }
       const required = members.some(m => m.required || m.getAttribute("aria-required") === "true") || g?.getAttribute("aria-required") === "true";
       finish({ id, kind, rawLabel, required, ...(kind === "checkbox" ? {} : { options }), ...(description ? { description } : {}) });

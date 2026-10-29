@@ -1,0 +1,117 @@
+<!doctype html>
+<html>
+<head><title>Software Engineer Intern - Acme</title></head>
+<body>
+<!--
+  Like SmartRecruiters' one-click apply (oneclick-ui): no <form>, and every control lives inside an open shadow root of
+  an spl-* custom element, rendered a moment after load. Hosts hear only composed events from their inputs (a host
+  listener records what reached it in window.__hostValues). Submitting posts the values to /submit and shows thanks.
+-->
+<header><nav><input type="search" aria-label="Search jobs" name="q"></nav></header>
+<main><div id="app">Loading…</div></main>
+<script>
+(function () {
+  window.__hostValues = {};
+  var record = function (host, name, value) { window.__hostValues[name] = value; host.value = value; };
+
+  // <spl-input label name type required>: a label[for] and an input inside the shadow root; `nolabel` keeps the label
+  // only on the host's attribute (the shadow has none).
+  customElements.define("spl-input", class extends HTMLElement {
+    connectedCallback() {
+      var root = this.attachShadow({ mode: "open" });
+      var name = this.getAttribute("name");
+      var label = this.hasAttribute("nolabel") ? "" : '<label for="i">' + this.getAttribute("label") + (this.hasAttribute("required") ? " *" : "") + "</label>";
+      root.innerHTML = label + '<input id="i" type="' + (this.getAttribute("type") || "text") + '"' + (this.hasAttribute("required") ? " required" : "") +
+        ' placeholder="' + (this.getAttribute("placeholder") || "") + '">';
+      var host = this;
+      this.addEventListener("input", function (e) { record(host, name, e.composedPath()[0].value); });
+    }
+  });
+
+  // <spl-phone-field>: a country-code select and a tel input labelled by an element in the same shadow root.
+  customElements.define("spl-phone-field", class extends HTMLElement {
+    connectedCallback() {
+      var root = this.attachShadow({ mode: "open" });
+      root.innerHTML = '<span id="pl">Phone</span><select aria-label="Country code"><option value="">Code</option>' +
+        '<option value="us">+1 United States</option><option value="mx">+52 Mexico</option></select>' +
+        '<input id="p" type="tel" aria-labelledby="pl">';
+      var host = this;
+      this.addEventListener("input", function (e) { var t = e.composedPath()[0]; if (t.tagName === "INPUT") record(host, "phone", t.value); });
+      this.addEventListener("change", function (e) { var t = e.composedPath()[0]; if (t.tagName === "SELECT") record(host, "code", t.value); });
+    }
+  });
+
+  // <spl-autocomplete label="City">: a search box (role=combobox) whose suggestions render inside the shadow root.
+  customElements.define("spl-autocomplete", class extends HTMLElement {
+    connectedCallback() {
+      var root = this.attachShadow({ mode: "open" });
+      root.innerHTML = '<label for="c">City *</label><input id="c" role="combobox" aria-controls="cl" aria-expanded="false" autocomplete="off">' +
+        '<ul id="cl" role="listbox" hidden></ul>';
+      var places = ["Houston, Missouri, United States", "Houston, Texas, United States", "Houston County, Alabama, United States", "Austin, Texas, United States"];
+      var input = root.getElementById("c"), list = root.getElementById("cl"), host = this;
+      input.addEventListener("input", function () {
+        var q = input.value.toLowerCase();
+        list.innerHTML = "";
+        setTimeout(function () {
+          places.filter(function (p) { return q && p.toLowerCase().indexOf(q.split(",")[0].trim()) >= 0; }).forEach(function (p) {
+            var li = document.createElement("li");
+            li.setAttribute("role", "option");
+            li.textContent = p;
+            li.addEventListener("click", function () { input.value = p; list.hidden = true; record(host, "city", p); });
+            list.appendChild(li);
+          });
+          list.hidden = !list.children.length;
+        }, 150);
+      });
+    }
+  });
+
+  // <spl-dropzone>: the file input sits in a group labelled "Resume"; its own label is only the button's.
+  customElements.define("spl-dropzone", class extends HTMLElement {
+    connectedCallback() {
+      var root = this.attachShadow({ mode: "open" });
+      root.innerHTML = '<div role="group" aria-labelledby="dz"><span id="dz">Resume</span>' +
+        '<button type="button" id="pick">Choose file</button><label for="f" hidden>Attach</label>' +
+        '<input id="f" type="file" style="position:absolute;width:1px;height:1px;opacity:0"></div>';
+      var host = this, input = root.getElementById("f");
+      input.addEventListener("change", function () { record(host, "resume", input.files.length ? input.files[0].name : ""); });
+    }
+  });
+
+  // <spl-button>: a <button> with a slot; the words are the host's light-DOM text.
+  customElements.define("spl-button", class extends HTMLElement {
+    connectedCallback() {
+      this.attachShadow({ mode: "open" }).innerHTML = '<button type="button"><slot></slot></button>';
+    }
+  });
+
+  setTimeout(function () {
+    var app = document.getElementById("app");
+    app.innerHTML =
+      '<h1>Software Engineer Intern</h1>' +
+      '<section class="fields">' +
+      '<spl-input label="First name" name="first" required></spl-input>' +
+      '<spl-input label="Last name" name="last" required></spl-input>' +
+      '<spl-input label="Email" name="email" type="email" required></spl-input>' +
+      '<spl-input label="Confirm your email" name="email2" type="email" required></spl-input>' +
+      '<spl-autocomplete></spl-autocomplete>' +
+      '<spl-phone-field></spl-phone-field>' +
+      '<spl-input label="LinkedIn" name="linkedin" type="url" nolabel placeholder="https://"></spl-input>' +
+      '<spl-input label="How did you hear about us?" name="hear" required></spl-input>' +
+      '<spl-dropzone></spl-dropzone>' +
+      '</section>' +
+      '<div id="err" role="alert"></div>' +
+      '<spl-button id="submit">Submit application</spl-button>';
+    document.getElementById("submit").addEventListener("click", function () {
+      var v = window.__hostValues;
+      var missing = ["first", "last", "email", "email2", "city", "hear"].filter(function (k) { return !v[k]; });
+      if (missing.length) { document.getElementById("err").textContent = "Please fill in: " + missing.join(", "); return; }
+      fetch("/submit", { method: "POST", body: JSON.stringify(v) }).then(function () {
+        app.innerHTML = "<h2>Thank you for applying</h2>";
+      });
+    });
+  }, 800);
+})();
+</script>
+</body>
+</html>

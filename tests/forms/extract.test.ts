@@ -51,3 +51,16 @@ test("skips aria-hidden controls such as react-select's hidden required mirror",
   </form>`);
   expect((await extractFields(page)).map(f => [f.label, f.kind])).toEqual([["Country", "combobox"]]);
 });
+
+test("sees fields inside open shadow roots, labelled within their own root or by their host", async () => {
+  await page.setContent(readFileSync(new URL("../fixtures/forms/shadow-ats.html", import.meta.url), "utf8"));
+  await page.waitForFunction(() => !!document.querySelector("spl-dropzone")?.shadowRoot);
+  const f = await extractFields(page, "main");
+  expect(f.map(x => [x.label, x.kind])).toEqual([
+    ["First name", "text"], ["Last name", "text"], ["Email", "email"], ["Confirm your email", "email"], ["City", "combobox"],
+    ["Country code", "select"], ["Phone", "tel"], ["LinkedIn", "url"], ["How did you hear about us?", "text"], ["Attach", "file"],
+  ]);
+  expect(new Set(f.map(x => x.id)).size).toBe(f.length);
+  // Playwright's locators pierce open shadow roots, so the runner's fill finds them by data-aa-id.
+  for (const x of f) expect(await page.locator(`[data-aa-id="${x.id}"]`).count(), x.label).toBeGreaterThan(0);
+});
