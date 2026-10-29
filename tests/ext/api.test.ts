@@ -6,7 +6,7 @@ import { approveAnswer, createQuestion, getOverrides, getQuestion, listQuestions
 import { openDb } from "../../src/db/db.js";
 import { companyFromUrl, getExtToken } from "../../src/ext/api.js";
 import { findJobByUrl, findJobForPage, postingKey } from "../../src/ext/match.js";
-import type { ResolveResponse } from "../../src/ext/protocol.js";
+import type { AdaptResponse, ResolveResponse } from "../../src/ext/protocol.js";
 import type { FieldSpec } from "../../src/forms/types.js";
 import { getJob, setStatus, upsertPosting } from "../../src/jobs/repo.js";
 import { saveProfile } from "../../src/profile/profile.js";
@@ -293,4 +293,41 @@ test("SmartRecruiters: a one-click form is its own posting, named after its comp
   expect([a.created, b.created]).toEqual([true, true]);
   expect(a.jobId).not.toBe(b.jobId);
   expect(getJob(db, a.jobId)?.company).toBe("Acme");
+});
+
+test("resolve hands the extension the profile's place and degree status for its own option matching", async () => {
+  const { db, call } = setup();
+  saveProfile(db, { city: "Houston", state: "Texas", country: "USA", graduationMonth: "2999-05" });
+  const res = await call("/ext/resolve", { body: { url: "https://acme.test/apply", title: "Intern", company: "Acme", fields: [field("f1", "First Name")] } });
+  expect((await res.json() as ResolveResponse).hints).toEqual({ place: { city: "Houston", state: "Texas", country: "USA" }, inProgress: true });
+});
+
+test("adapt maps a value onto the options a control showed, as the runner's recovery does", async () => {
+  const { llm, call } = setup();
+  llm.on("adapt", () => ({ option: "Yes, I am authorized" }));
+  const ask = async (body: Record<string, unknown>) => (await call("/ext/adapt", { body: { url: "https://acme.test/apply", company: "Acme", ...body } })).json() as Promise<AdaptResponse>;
+  // A degree by its level, without the LLM.
+  expect(await ask({ field: field("d", "Degree", "combobox"), value: "B.S.", options: ["Associate's", "Bachelor's Degree", "Master's Degree"], source: "profile", entity: true }))
+    .toEqual({ answer: { type: "option", option: "Bachelor's Degree" }, otherAllowed: true });
+  // A qualified option, by the LLM (which sees the question).
+  expect(await ask({ field: field("a", "Are you authorized to work in the US?", "combobox"), value: "Yes", options: ["Yes, I am authorized", "No"], source: "profile" }))
+    .toEqual({ answer: { type: "option", option: "Yes, I am authorized" }, otherAllowed: false });
+  // Never an option outside the list.
+  llm.on("adapt", () => ({ option: "Something else" }));
+  expect(await ask({ field: field("g", "Gender", "combobox"), value: "Male", options: ["Female", "Other"], source: "profile" }))
+    .toEqual({ answer: null, otherAllowed: false });
+  expect((await call("/ext/adapt", { body: { url: "x" } })).status).toBe(400);
+});
+
+test("adapt: a school the list lacks is searched under other names first, then takes the list's Other", async () => {
+  const { llm, call } = setup();
+  llm.on("adapt", () => ({ option: null })).on("variants", () => ({ variants: ["William Marsh Rice University", "Rice"] }));
+  const body = { url: "https://acme.test/apply", company: "Acme", field: field("s", "School", "combobox"), value: "Rice University",
+    options: ["Harvard University", "Other (School Not Listed)"], source: "profile", entity: true };
+  expect(await (await call("/ext/adapt", { body })).json()).toEqual({ answer: null, otherAllowed: true, variants: ["William Marsh Rice University", "Rice"] });
+  expect(await (await call("/ext/adapt", { body: { ...body, final: true } })).json())
+    .toEqual({ answer: { type: "option", option: "Other (School Not Listed)" }, other: "Rice University", otherAllowed: true });
+  // A place never falls back to Other.
+  expect(await (await call("/ext/adapt", { body: { ...body, field: field("l", "Location (City)", "combobox"), value: "Houston, Texas", final: true } })).json())
+    .toEqual({ answer: null, otherAllowed: false });
 });

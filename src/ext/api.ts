@@ -3,11 +3,12 @@ import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import type { Hono } from "hono";
 import { z } from "zod";
-import { adaptAnswer } from "../answers/adapt.js";
+import { adaptAnswer, nameVariants } from "../answers/adapt.js";
 import { addVariant, clearBlockersForJob, createQuestion, getQuestion, listQuestions, resolveNeedsYouForJob, setOverride } from "../answers/bank.js";
 import { classifyFields, normalizeLabel, withCompanyPlaceholder } from "../answers/classify.js";
 import { degreeInProgress } from "../answers/degree.js";
 import { answerQuestion } from "../answers/inbox.js";
+import { findOtherOption, otherEligible } from "../answers/other.js";
 import { resolveFields, type Resolution } from "../answers/resolve.js";
 import { atsNameFromUrl } from "../ats/registry.js";
 import type { Db } from "../db/db.js";
@@ -22,7 +23,7 @@ import { getJson, getSettings, setJson } from "../settings.js";
 import { normalizeUrl } from "../sources/normalize.js";
 import { findJobForPage } from "./match.js";
 import {
-  TOKEN_HEADER, type ExtAnswer, type ExtResolution, type LearnResponse, type LearnValue, type ResolveResponse, type StatusResponse,
+  TOKEN_HEADER, type AdaptResponse, type ExtAnswer, type ExtHints, type ExtResolution, type LearnResponse, type LearnValue, type ResolveResponse, type StatusResponse,
   type SubmittedResponse,
 } from "./protocol.js";
 
@@ -75,6 +76,11 @@ const LearnSchema = z.object({
     source: str(40).optional(), questionId: z.number().int().optional(),
   })).max(MAX_FIELDS),
 });
+const AdaptSchema = z.object({
+  url: str(4000), referrer: str(4000).optional(), title: str(1000).optional(), company: str(500).optional(),
+  field: FieldSpecSchema, value: z.union([str(20000), z.array(str(2000)).max(200)]), options: z.array(str(2000)).max(2000),
+  source: str(40).optional(), entity: z.boolean().optional(), final: z.boolean().optional(),
+});
 const SubmittedSchema = z.object({
   url: str(4000), referrer: str(4000).optional(), title: str(1000).default(""), company: str(500).default(""), resumeUsed: str(500).optional(), coverLetterUsed: str(500).optional(),
   answers: z.array(z.object({ label: str(2000), value: Value })).max(MAX_FIELDS).optional(),
@@ -110,7 +116,10 @@ async function forExtension(deps: ExtDeps, fields: FieldSpec[], resolutions: Res
   for (const r of resolutions) {
     switch (r.status) {
       case "filled":
-        out.push({ fieldId: r.fieldId, status: "filled", answer: toExt(r.answer), source: r.source, ...(r.other ? { other: r.other } : {}) });
+        out.push({
+          fieldId: r.fieldId, status: "filled", answer: toExt(r.answer), source: r.source,
+          ...(r.other ? { other: r.other } : {}), ...(r.entity ? { entity: true as const } : {}),
+        });
         break;
       case "skip":
         out.push({ fieldId: r.fieldId, status: "skip" });
@@ -252,6 +261,40 @@ export function submitted(deps: ExtDeps, body: z.infer<typeof SubmittedSchema>):
   return { ok: true, jobId: job.id, created, already: false };
 }
 
+/** What the extension's own option matching needs from the profile. */
+export function extHints(p: Profile, now = new Date()): ExtHints {
+  return { place: { city: p.city ?? null, state: p.state ?? null, country: p.country ?? null }, inProgress: degreeInProgress(p.graduationMonth, now) };
+}
+
+/**
+ * Maps a value the extension couldn't match onto the options a control showed, as the runner's recovery does
+ * (runner.ts fillOne): adaptAnswer first (never an option outside the list, never "Other" for a real value). A name
+ * the list lacks (otherEligible) first gets other names to search by (a searchable control, before `final`), then the
+ * list's "Other" option, with the real value for the box it reveals.
+ */
+export async function adapt(deps: ExtDeps, body: z.infer<typeof AdaptSchema>): Promise<AdaptResponse> {
+  const { db, llm } = deps;
+  const job = findJobForPage(db, body.url, body.referrer);
+  const ctx = jobContext(job, body.url, body.title ?? "", body.company);
+  const options = [...new Set(body.options.map(o => o.replace(/\s+/g, " ").trim()).filter(Boolean))];
+  const field = { ...body.field, options } as FieldSpec;
+  const value = body.value;
+  const text = Array.isArray(value) ? value.join(", ") : value;
+  const otherAllowed = otherEligible(field, { source: body.source ?? "", answer: { type: "text", text }, ...(body.entity ? { entity: true } : {}) });
+  if (options.length) {
+    const profile = getProfile(db);
+    const adapted = await adaptAnswer(llm, value, field, ctx, { inProgress: degreeInProgress(profile.graduationMonth) });
+    if (adapted && adapted.type !== "file") return { answer: adapted, otherAllowed };
+  }
+  if (!otherAllowed) return { answer: null, otherAllowed };
+  if (!body.final && field.kind === "combobox") {
+    const variants = await nameVariants(llm, text, field, ctx).catch(() => [] as string[]);
+    return { answer: null, otherAllowed, variants };
+  }
+  const other = findOtherOption(options);
+  return other ? { answer: { type: "option", option: other }, other: text, otherAllowed } : { answer: null, otherAllowed };
+}
+
 /** Its name for upload: the file's own name unless it is the app's stored resume.pdf. */
 function resumeName(p: Profile): string {
   const base = path.basename(p.resumePath ?? "resume.pdf");
@@ -314,10 +357,21 @@ export function extRoutes(app: Hono, deps: ExtDeps): void {
       const out: ResolveResponse = {
         resolutions: await forExtension(deps, fields, resolutions, ctx, getProfile(db)),
         job: { id: job?.id ?? null, company: ctx.company, title: ctx.title },
+        hints: extHints(getProfile(db)),
       };
       return c.json(out);
     } catch (e) {
       return c.json({ ok: false, error: `Couldn't work out the answers: ${e instanceof Error ? e.message : String(e)}` }, 502);
+    }
+  });
+
+  app.post("/ext/adapt", async c => {
+    const body = await parse(AdaptSchema, c.req.raw);
+    if (!body) return c.json({ ok: false, error: "Bad request" }, 400);
+    try {
+      return c.json(await adapt(deps, body));
+    } catch (e) {
+      return c.json({ ok: false, error: `Couldn't map the answer: ${e instanceof Error ? e.message : String(e)}` }, 502);
     }
   });
 
