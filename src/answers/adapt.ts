@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { FieldAnswer, FieldSpec, JobContext } from "../forms/types.js";
 import type { Llm } from "../llm/llm.js";
+import { COUNTRY_LABEL, isKnownCountry, pickCountry } from "./country.js";
 import { isDegreeQuestion, pickDegree, degreeCompatible, type DegreeHints } from "./degree.js";
 import { isOtherOption } from "./other.js";
 import { isLocationAnswer, locationQueries, norm, parsePlace, pickLocation, placeMatches, yesNo } from "./location.js";
@@ -142,6 +143,11 @@ export async function adaptAnswer(llm: Llm, value: string | boolean | string[], 
     }
     // A degree never lands on an option of another level ("Master's" for "B.S."), whether by containment or the LLM.
     const fits = (o: string) => mayStandFor(value, o) && (!degree || degreeCompatible(flat as string, o));
+    // A country under another of its names ("USA" -> "United States +1"; a bare "+1" -> the United States).
+    if (typeof flat === "string" && (COUNTRY_LABEL.test(field.label) || isKnownCountry(flat))) {
+      const country = pickCountry(flat, options);
+      if (country && fits(country)) return { type: "option", option: country };
+    }
     const picked = pickOption(flat, options);
     if (picked && fits(picked)) return { type: "option", option: picked };
     const out = await llm.structured({

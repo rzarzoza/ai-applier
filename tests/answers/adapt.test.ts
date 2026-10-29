@@ -138,3 +138,13 @@ test("adaptAnswer never maps a real value onto an Other-like option, whoever pro
   expect(await adaptAnswer(rice, "Rice University", school(["William Marsh Rice University", "Other"]), job))
     .toEqual({ type: "option", option: "William Marsh Rice University" });
 });
+
+test("a country maps onto its option under any of its names, without the LLM", async () => {
+  const llm = new FakeLlm();
+  const sel = (label: string, options: string[]): FieldSpec => ({ id: "c", label, kind: "select", required: true, options });
+  const job = { jobId: "j", company: "Acme", title: "Intern", location: "", term: null };
+  expect(await adaptAnswer(llm, "USA", sel("Country", ["+1 United States", "+52 Mexico"]), job)).toEqual({ type: "option", option: "+1 United States" });
+  expect(await adaptAnswer(llm, "United States of America", sel("Phone country", ["Canada (+1)", "United States (+1)"]), job)).toEqual({ type: "option", option: "United States (+1)" });
+  expect(await adaptAnswer(llm, "+1", sel("Country code", ["Canada +1", "United States +1"]), job)).toEqual({ type: "option", option: "United States +1" });
+  expect(llm.calls).toHaveLength(0);
+});
