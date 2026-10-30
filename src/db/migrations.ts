@@ -96,4 +96,35 @@ export const migrations: string[] = [
   ALTER TABLE job_blockers ADD COLUMN field_kind TEXT;`,
   `ALTER TABLE job_blockers ADD COLUMN field_description TEXT;
   ALTER TABLE questions ADD COLUMN draft_basis TEXT;`,
+  // AI cost: every LLM call (local ones too, at $0), cached LLM answers, and a counter that changes whenever the answer
+  // bank's questions change (match results are cached per revision; a wording added to a matched question doesn't
+  // change it, so the same form matched again is free). The background applier is turned off
+  // for every install: it only runs once the user turns it on.
+  `CREATE TABLE llm_usage (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    at TEXT NOT NULL,
+    task TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    model TEXT NOT NULL,
+    input_tokens INTEGER NOT NULL,
+    output_tokens INTEGER NOT NULL,
+    cache_read INTEGER NOT NULL,
+    cache_write INTEGER NOT NULL DEFAULT 0,
+    cost_usd REAL NOT NULL,
+    job_id TEXT
+  );
+  CREATE INDEX idx_llm_usage_at ON llm_usage (at);
+  CREATE INDEX idx_llm_usage_job ON llm_usage (job_id);
+  CREATE TABLE llm_cache (
+    key TEXT PRIMARY KEY,
+    task TEXT NOT NULL,
+    value_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  );
+  CREATE TABLE bank_revision (id INTEGER PRIMARY KEY CHECK (id = 1), rev INTEGER NOT NULL);
+  INSERT INTO bank_revision (id, rev) VALUES (1, 0);
+  CREATE TRIGGER bank_rev_q_insert AFTER INSERT ON questions BEGIN UPDATE bank_revision SET rev = rev + 1; END;
+  CREATE TRIGGER bank_rev_q_delete AFTER DELETE ON questions BEGIN UPDATE bank_revision SET rev = rev + 1; END;
+  CREATE TRIGGER bank_rev_q_update AFTER UPDATE OF canonical, kind, is_factual, options ON questions BEGIN UPDATE bank_revision SET rev = rev + 1; END;
+  UPDATE kv SET value = json_set(value, '$.backgroundApplier', json('false')) WHERE key = 'settings' AND json_valid(value);`,
 ];

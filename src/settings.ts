@@ -17,7 +17,26 @@ export interface Settings {
   dailyLimit: number | null;
   pollMinutes: number;
   paused: boolean;
+  /**
+   * Whether the scheduler takes queued jobs on its own (off by default: the app only applies when the user asks, or
+   * through the browser extension). `paused` still pauses it when on.
+   */
+  backgroundApplier: boolean;
+  /** Where each kind of AI task runs (see llm/routed.ts): "fast" (classify, match, adapt...) and "write" (drafts...). */
+  aiFast: AiProvider;
+  aiWrite: AiProvider;
+  /** The local model (Ollama). */
+  ollamaUrl: string;
+  ollamaModel: string;
+  /** When the local model can't be reached: use Claude (within the daily budget) or leave the field for the user. */
+  aiLocalOff: "claude" | "leave";
+  /** Claude spend allowed per day, in US dollars; once reached, Claude calls stop until tomorrow. */
+  aiDailyBudgetUsd: number;
 }
+
+export type AiProvider = "local" | "claude";
+export const DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434";
+export const DEFAULT_OLLAMA_MODEL = "qwen2.5:14b";
 
 export const DEFAULT_SETTINGS: Settings = {
   reviewMode: "off",
@@ -25,6 +44,14 @@ export const DEFAULT_SETTINGS: Settings = {
   dailyLimit: null,
   pollMinutes: 30,
   paused: false,
+  backgroundApplier: false,
+  // Everything runs on the local model by default: Claude is only called once the user picks it in Settings.
+  aiFast: "local",
+  aiWrite: "local",
+  ollamaUrl: DEFAULT_OLLAMA_URL,
+  ollamaModel: DEFAULT_OLLAMA_MODEL,
+  aiLocalOff: "leave",
+  aiDailyBudgetUsd: 1,
 };
 
 const SETTINGS_KEY = "settings";
