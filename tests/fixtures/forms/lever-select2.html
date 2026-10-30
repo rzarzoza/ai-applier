@@ -16,7 +16,11 @@
   <li class="application-question"><label><div class="application-label">Email<span class="required">✱</span></div>
     <div class="application-field"><input type="email" name="email" required></div></label></li>
   <li class="application-question"><label><div class="application-label">Current location<span class="required">✱</span></div>
-    <div class="application-field"><input type="text" name="location" id="location-input" autocomplete="off"></div></label></li>
+    <div class="application-field"><input class="location-input" type="text" name="location" id="location-input" maxlength="100" autocomplete="off">
+      <input id="selected-location" type="hidden" name="selectedLocation" value="">
+      <div class="dropdown-container" style="display: none;"><div class="dropdown-results"></div>
+        <div class="dropdown-no-results" style="display: none;">No location found. Try entering a different location</div>
+        <div class="dropdown-loading-results" style="display: none;"><span>Loading</span></div></div></div></label></li>
   <li class="application-question custom-question"><div class="application-label full-width">University<span class="required">✱</span></div>
     <div class="application-field full-width">
       <select class="select2-hidden-accessible" name="cards[u][field0]" tabindex="-1" aria-hidden="true" required><option value=""></option></select>
@@ -39,6 +43,38 @@
 <button type="button" id="btn-submit">Submit application</button>
 </form>
 <script>
+// Lever's structured location (js/retrieveLocations.js, seen live Oct 2026): a keydown starts a 500 ms debounced
+// search; results are div.dropdown-location rows (no ARIA roles) picked on mousedown, which fills the box and the hidden
+// selectedLocation; a blur while the dropdown is open and nothing was picked EMPTIES the box.
+(function () {
+  var PLACES = ["Houston, TX, USA", "Houston, MO, USA", "Houston, BC, Canada"];
+  var input = document.getElementById("location-input"), hidden = document.getElementById("selected-location");
+  var box = document.querySelector(".dropdown-container"), results = box.querySelector(".dropdown-results");
+  var loading = box.querySelector(".dropdown-loading-results"), timer = null;
+  input.addEventListener("input", function () { box.style.display = "flex"; });
+  input.addEventListener("keydown", function () {
+    clearTimeout(timer);
+    timer = setTimeout(function () {
+      loading.style.display = ""; results.innerHTML = "";
+      setTimeout(function () {
+        loading.style.display = "none";
+        var q = input.value.toLowerCase().split(",")[0].trim();
+        PLACES.filter(function (p) { return q && p.toLowerCase().indexOf(q) === 0; }).forEach(function (p, i) {
+          var d = document.createElement("div"); d.className = "dropdown-location"; d.id = "location-" + i; d.textContent = p; results.appendChild(d);
+        });
+      }, 300);
+    }, 500);
+  });
+  input.addEventListener("blur", function () {
+    if (box.style.display !== "none") { box.style.display = "none"; results.innerHTML = ""; input.value = ""; hidden.value = ""; }
+  });
+  document.addEventListener("mousedown", function (e) {
+    var row = e.target.closest && e.target.closest(".dropdown-location");
+    if (!row) return;
+    box.style.display = "none"; input.value = row.textContent; hidden.value = JSON.stringify({ name: row.textContent }); results.innerHTML = "";
+    window.__values.location = row.textContent;
+  });
+})();
 (function () {
   window.__values = {};
   var UNIS = ["Rice University", "Rice University (Jones Graduate School)", "University of Houston", "Harvard University", "Other (School Not Listed)"];

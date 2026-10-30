@@ -135,7 +135,11 @@ test("Lever: select2 university search, cards radios, EEO selects, and the plain
   expect(await page.inputValue("select.select2-hidden-accessible")).toBe("Rice University");
   expect(await page.textContent(".select2-selection__rendered")).toBe("Rice University");
   expect(await page.locator(".select2-container--open").count()).toBe(0);
-  expect(await fill(by(fields, "Current location"), text("Houston, Texas"))).toMatchObject({ ok: true, value: "Houston, Texas" });
+  // Lever's location only keeps a suggestion picked from its dropdown (a blur clears typed text): Houston in Texas is picked.
+  expect(await fill(by(fields, "Current location"), text("Houston, Texas"))).toMatchObject({ ok: true, value: "Houston, TX, USA" });
+  expect(await page.inputValue("#selected-location")).toBe(JSON.stringify({ name: "Houston, TX, USA" }));
+  // A place it doesn't list is reported, not counted as filled with an emptied box.
+  expect(await fill(by(fields, "Current location"), text("Springfield, Texas"))).toMatchObject({ ok: false });
   expect(await fill(by(fields, "Are you authorized to work in the US?"), { type: "option", option: "Yes" })).toMatchObject({ ok: true, value: "Yes" });
   expect(await fill(by(fields, "Gender"), { type: "option", option: "Male" })).toMatchObject({ ok: true, value: "Male" });
   // "I am not a protected veteran" isn't an option: the app maps it (here: the stub names the option).

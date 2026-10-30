@@ -81,7 +81,8 @@ export function typeSearch(input: TextBox, text: string): void {
   key(input, last, "keyup");
 }
 
-const OPTION = '[role=option], [role=treeitem], li.select2-results__option';
+/** Option rows: ARIA options, select2 results, and Lever's location suggestions (plain divs, no ARIA). */
+const OPTION = '[role=option], [role=treeitem], li.select2-results__option, .dropdown-location';
 const NOT_OPTION = '.select2-results__message, .loading-results, .select2-results__option--load-more, [role=group], [aria-disabled="true"]';
 const LOADING = '[class*="loading" i], .loading-results, [aria-busy="true"]';
 /** react-select style chips showing what is picked; Workday's multiselect pills. */
@@ -162,6 +163,11 @@ export class Combo {
       if (opts.length) return opts;
     }
     if (this.kind === "select2") return [];
+    // Suggestions rendered beside the box without ARIA (Lever's location dropdown).
+    if (this.kind === "typeahead") {
+      const opts = clean(deepQueryAll(this.shell, OPTION));
+      if (opts.length) return opts;
+    }
     // A popup rendered elsewhere (Workday's listbox, a portal menu): the visible listbox nearest to the control.
     const boxes = deepQueryAll(document, "[role=listbox]").filter(l => isVisible(l) && !l.closest("#ai-applier-panel-host"));
     if (boxes.length) {
@@ -228,6 +234,13 @@ export class Combo {
     if (input) blur(input);
     if (this.kind === "select2" && this.isOpen()) press(this.box);
   }
+}
+
+/** Whether a text box has a suggestion list beside it (shown or not yet): its search may take a moment to answer. */
+export function hasSuggestions(input: HTMLElement): boolean {
+  const shell = shellOf(input);
+  return !!input.getAttribute("aria-controls") || /^(list|both)$/i.test(input.getAttribute("aria-autocomplete") ?? "")
+    || !!shell.querySelector('[role=listbox], .dropdown-container, .dropdown-results, [class*="autocomplete" i], [class*="suggest" i]');
 }
 
 /** react-select's control box around its input (class `*__control` / `*-control`), if any. */

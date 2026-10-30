@@ -13,7 +13,7 @@ import type { AdaptResponse, ExtAnswer, ExtHints } from "../../src/ext/protocol.
 import type { FieldSpec } from "../../src/forms/types.js";
 import { deepQueryAll } from "./dom.js";
 import {
-  blur, Combo, fire, focus, inputEvent, key, isYesNoPair, isVisible, norm, pickOption, PLACEHOLDER, selectedChips, setNativeValue, setYesNo,
+  blur, Combo, fire, focus, hasSuggestions, inputEvent, key, isYesNoPair, isVisible, norm, pickOption, PLACEHOLDER, selectedChips, setNativeValue, setYesNo,
   sleep, squash, typeSearch, watchOptions, yesNoValue,
 } from "./widgets.js";
 
@@ -161,8 +161,10 @@ export async function fillField(field: FieldSpec, answer: ExtAnswer, deps: FillD
           const target = placeValue(field.label, text, deps.hints?.place);
           typeSearch(el, text);
           const c = new Combo(el);
+          // A box with a suggestion list may search after a debounce (Lever: 500 ms, then the request): give it time.
+          const suggests = hasSuggestions(el);
           const opt = await watchOptions(c, {
-            waitMs: Math.min(deps.optionWaitMs ?? 2500, 1500), emptyMs: 700,
+            waitMs: suggests ? Math.max(deps.optionWaitMs ?? 4000, 2500) : 1500, emptyMs: suggests ? 1800 : 400,
             choose: texts => {
               const p = isLocationAnswer(field, text) ? pickLocation(target, texts) : texts.find(t => norm(t) === norm(text)) ?? null;
               return p === null ? null : { index: texts.indexOf(p), sure: false };
@@ -170,6 +172,9 @@ export async function fillField(field: FieldSpec, answer: ExtAnswer, deps: FillD
           }, new Set());
           if (opt) await pickOption(c, opt);
           else { fire(el, "change"); blur(el); }
+          await sleep(50);
+          // Some boxes only keep a suggestion picked from their list (Lever's location empties itself on blur).
+          if (!el.value.trim()) return { ok: false, error: `The box didn't keep "${text}": pick one of its suggestions` };
           break;
         }
         typeInto(el, el instanceof HTMLTextAreaElement ? text : text.replace(/\s*[\r\n]+\s*/g, " "));
