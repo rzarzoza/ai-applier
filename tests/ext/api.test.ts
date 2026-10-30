@@ -349,3 +349,14 @@ test("an option the user picked in place of the app's answer is remembered for t
   const again = await (await call("/ext/resolve", { body: { url: "https://other.test/apply", title: "Intern", company: "Acme", fields: [discipline] } })).json() as ResolveResponse;
   expect(again.resolutions[0]).toMatchObject({ status: "filled", answer: { type: "text", text: "Computer Science" }, source: "profile" });
 });
+
+test("a long native list (Lever's 3,000+ universities) is taken, and a refused body says which field", async () => {
+  const { call } = setup();
+  const options = Array.from({ length: 3301 }, (_, i) => `University ${i}`);
+  const res = await call("/ext/resolve", { body: { url: "https://jobs.lever.co/acme/1/apply", title: "Intern", company: "Acme",
+    fields: [field("u", "Which university are you currently attending?", "select", true, { options })] } });
+  expect(res.status).toBe(200);
+  const bad = await call("/ext/resolve", { body: { url: "https://x.test", fields: [field("u", "U", "select", true, { options: Array.from({ length: 5001 }, (_, i) => `o${i}`) })] } });
+  expect(bad.status).toBe(400);
+  expect((await bad.json() as { error: string }).error).toMatch(/^Bad request: fields\.0\.options: /);
+});

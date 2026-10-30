@@ -66,23 +66,25 @@ export interface ExtDeps {
 }
 
 const MAX_FIELDS = 300;
+/** A native list may be long (Lever lists 3,000+ universities); the extension trims to this many. */
+export const MAX_OPTIONS = 5000;
 const str = (max: number) => z.string().max(max);
 const FieldSpecSchema = z.object({
   id: str(64), label: str(2000), kind: z.enum(["text", "textarea", "email", "tel", "url", "number", "date", "select", "combobox", "radio", "checkbox", "checkbox-group", "file"]),
-  required: z.boolean(), options: z.array(str(2000)).max(1000).optional(), maxLength: z.number().optional(), description: str(4000).optional(),
+  required: z.boolean(), options: z.array(str(2000)).max(MAX_OPTIONS).optional(), maxLength: z.number().optional(), description: str(4000).optional(),
 });
 const ResolveSchema = z.object({ url: str(4000), referrer: str(4000).optional(), title: str(1000).default(""), company: str(500).optional(), fields: z.array(FieldSpecSchema).max(MAX_FIELDS) });
 const Value = z.union([str(20000), z.array(str(2000)).max(200), z.boolean()]);
 const LearnSchema = z.object({
   url: str(4000), referrer: str(4000).optional(), title: str(1000).optional(), company: str(500).optional(),
   answers: z.array(z.object({
-    label: str(2000), kind: FieldSpecSchema.shape.kind, options: z.array(str(2000)).max(1000).optional(), value: Value,
+    label: str(2000), kind: FieldSpecSchema.shape.kind, options: z.array(str(2000)).max(MAX_OPTIONS).optional(), value: Value,
     source: str(40).optional(), questionId: z.number().int().optional(), replaced: str(2000).optional(),
   })).max(MAX_FIELDS),
 });
 const AdaptSchema = z.object({
   url: str(4000), referrer: str(4000).optional(), title: str(1000).optional(), company: str(500).optional(),
-  field: FieldSpecSchema, value: z.union([str(20000), z.array(str(2000)).max(200)]), options: z.array(str(2000)).max(2000),
+  field: FieldSpecSchema, value: z.union([str(20000), z.array(str(2000)).max(200)]), options: z.array(str(2000)).max(MAX_OPTIONS),
   source: str(40).optional(), entity: z.boolean().optional(), final: z.boolean().optional(),
 });
 const SubmittedSchema = z.object({
@@ -347,11 +349,14 @@ export function extRoutes(app: Hono, deps: ExtDeps): void {
     for (const [k, v] of Object.entries(cors)) c.res.headers.set(k, v);
   });
 
-  const parse = async <T extends z.ZodTypeAny>(schema: T, req: Request): Promise<z.infer<T> | null> => {
+  /** The body, or why it was refused ("Bad request: fields.20.options: ..."), so a refusal can be traced to its field. */
+  const parse = async <T extends z.ZodTypeAny>(schema: T, req: Request): Promise<{ data: z.infer<T> } | { error: string }> => {
     try {
       const r = schema.safeParse(await req.json());
-      return r.success ? r.data : null;
-    } catch { return null; }
+      if (r.success) return { data: r.data };
+      const issue = r.error.issues[0];
+      return { error: issue ? `Bad request: ${issue.path.join(".")}: ${issue.message}` : "Bad request" };
+    } catch { return { error: "Bad request: not JSON" }; }
   };
 
   app.get("/ext/status", c => {
@@ -370,8 +375,9 @@ export function extRoutes(app: Hono, deps: ExtDeps): void {
   });
 
   app.post("/ext/resolve", async c => {
-    const body = await parse(ResolveSchema, c.req.raw);
-    if (!body) return c.json({ ok: false, error: "Bad request" }, 400);
+    const parsed = await parse(ResolveSchema, c.req.raw);
+    if ("error" in parsed) return c.json({ ok: false, error: parsed.error }, 400);
+    const body = parsed.data;
     const job = findJobForPage(db, body.url, body.referrer);
     const ctx = jobContext(job, body.url, body.title, body.company);
     const fields = body.fields as FieldSpec[];
@@ -389,8 +395,9 @@ export function extRoutes(app: Hono, deps: ExtDeps): void {
   });
 
   app.post("/ext/adapt", async c => {
-    const body = await parse(AdaptSchema, c.req.raw);
-    if (!body) return c.json({ ok: false, error: "Bad request" }, 400);
+    const parsed = await parse(AdaptSchema, c.req.raw);
+    if ("error" in parsed) return c.json({ ok: false, error: parsed.error }, 400);
+    const body = parsed.data;
     try {
       return c.json(await adapt(deps, body));
     } catch (e) {
@@ -399,14 +406,16 @@ export function extRoutes(app: Hono, deps: ExtDeps): void {
   });
 
   app.post("/ext/learn", async c => {
-    const body = await parse(LearnSchema, c.req.raw);
-    if (!body) return c.json({ ok: false, error: "Bad request" }, 400);
+    const parsed = await parse(LearnSchema, c.req.raw);
+    if ("error" in parsed) return c.json({ ok: false, error: parsed.error }, 400);
+    const body = parsed.data;
     return c.json(await learn(deps, body));
   });
 
   app.post("/ext/submitted", async c => {
-    const body = await parse(SubmittedSchema, c.req.raw);
-    if (!body) return c.json({ ok: false, error: "Bad request" }, 400);
+    const parsed = await parse(SubmittedSchema, c.req.raw);
+    if ("error" in parsed) return c.json({ ok: false, error: parsed.error }, 400);
+    const body = parsed.data;
     return c.json(submitted(deps, body));
   });
 }
