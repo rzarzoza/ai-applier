@@ -7,7 +7,8 @@ import { HANDLERS } from "./ats/registry.js";
 import type { AtsHandler } from "./ats/types.js";
 import { openDb } from "./db/db.js";
 import { canOpenLive, getJob } from "./jobs/repo.js";
-import { ClaudeLlm, type Llm } from "./llm/llm.js";
+import { ClaudeLlm, type Llm, type Provider } from "./llm/llm.js";
+import { claudeInUse, RoutedLlm } from "./llm/routed.js";
 import { paths, setDataDir } from "./paths.js";
 import { JobLocks, SerialQueue } from "./scheduler.js";
 import { getSecret, setSecret } from "./secrets.js";
@@ -36,8 +37,15 @@ export interface StartOptions {
   startLoops?: boolean;
   /** Keychain access; defaults to the real macOS Keychain. Tests inject fakes. */
   secrets?: Secrets;
-  /** The LLM and the ATS handlers; default to Claude and the real handlers. Tests and local checks inject fakes. */
+  /**
+   * The LLM and the ATS handlers; default to the routed LLM (the local model or Claude, as Settings say) and the real
+   * handlers. Tests and local checks inject fakes.
+   */
   llm?: Llm;
+  /** Builds a Claude model behind the router (tests inject a spy; the default uses the Keychain's API key). */
+  claude?(model: string, apiKey: string | undefined): Provider;
+  /** Builds the local model behind the router (tests inject a fake; defaults to Ollama at Settings' URL). */
+  ollama?(baseUrl: string, model: string): Provider;
   handlers?: AtsHandler[];
   /** With startLoops, whether the sources are polled too (default true). Tests that only run jobs turn it off. */
   pollSources?: boolean;
@@ -64,15 +72,25 @@ export async function startApp(opts: StartOptions = {}): Promise<{ url: string; 
   clearRunnerCurrent(db);
   const secrets: Secrets = opts.secrets ?? { get: getSecret, set: setSecret };
 
-  // The app talks to the LLM through this wrapper, so a key saved in Settings takes effect without a restart.
-  let current: Llm = new ClaudeLlm();
-  const refreshLlm = async () => {
-    let apiKey: string | undefined;
-    try { apiKey = (await secrets.get(API_KEY_NAME)) ?? undefined; } catch (e) { log(`Could not read the API key from the Keychain: ${errText(e)}`); }
-    current = new ClaudeLlm({ apiKey });
-  };
-  await refreshLlm();
-  const llm: Llm = opts.llm ?? { structured: req => current.structured(req) };
+  // Each request goes to the model Settings choose for its task (the local model by default; Claude only when the user
+  // picks it). The API key is read from the Keychain only once a request actually goes to Claude, and again after a
+  // new key is saved in Settings.
+  let apiKey: Promise<string | undefined> | null = null;
+  const readKey = () => (apiKey ??= secrets.get(API_KEY_NAME).then(k => k ?? undefined, (e: unknown) => {
+    log(`Could not read the API key from the Keychain: ${errText(e)}`);
+    apiKey = null;
+    return undefined;
+  }));
+  const refreshLlm = () => { apiKey = null; };
+  const makeClaude = opts.claude ?? ((model: string, key: string | undefined) => new ClaudeLlm({ apiKey: key, model }));
+  const llm: Llm = opts.llm ?? new RoutedLlm({
+    db,
+    claude: model => ({
+      kind: "claude",
+      run: async req => makeClaude(model, await readKey()).run(req),
+    }),
+    ollama: opts.ollama,
+  });
 
   // Tracker syncs never touch the browser, so they skip the serial queue; two never overlap.
   let syncing: Promise<SyncResult> | null = null;
@@ -99,7 +117,8 @@ export async function startApp(opts: StartOptions = {}): Promise<{ url: string; 
     db, llm, browser, locks, notify: macNotify, now: () => new Date(), handlers: opts.handlers ?? HANDLERS,
     onSubmitted: () => { void runSync(); },
     hasApiKey: async () => {
-      if (process.env.ANTHROPIC_API_KEY) return true;
+      // Without Claude in Settings, no key is needed.
+      if (!claudeInUse(getSettings(db)) || process.env.ANTHROPIC_API_KEY) return true;
       // A Keychain that can't be read is not proof the key is missing; a run will halt if it is.
       try { return !!(await secrets.get(API_KEY_NAME)); } catch { return true; }
     },
@@ -209,7 +228,10 @@ export async function startApp(opts: StartOptions = {}): Promise<{ url: string; 
     loops.push((async () => {
       while (!stopped) {
         let ran = false;
-        try { ran = (await runQueued(() => runNext(runnerDeps()), "auto")) !== null; } catch (e) { log(`Runner error: ${errText(e)}`); }
+        // The background applier only takes jobs once the user turns it on (off by default).
+        if (getSettings(db).backgroundApplier) {
+          try { ran = (await runQueued(() => runNext(runnerDeps()), "auto")) !== null; } catch (e) { log(`Runner error: ${errText(e)}`); }
+        }
         if (!ran && !stopped) await sleep(IDLE_SLEEP_MS);
       }
     })());

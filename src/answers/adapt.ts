@@ -1,10 +1,12 @@
+import { createHash } from "node:crypto";
 import { z } from "zod";
 import type { FieldAnswer, FieldSpec, JobContext } from "../forms/types.js";
-import type { Llm } from "../llm/llm.js";
+import { orNull, type Llm, type StructuredRequest } from "../llm/llm.js";
 import { COUNTRY_LABEL, isKnownCountry, pickCountry } from "./country.js";
 import { isDegreeQuestion, pickDegree, degreeCompatible, type DegreeHints } from "./degree.js";
 import { isOtherOption } from "./other.js";
 import { isLocationAnswer, locationQueries, norm, parsePlace, pickLocation, placeMatches, yesNo } from "./location.js";
+import { topOptions } from "./rank.js";
 
 export { isLocationAnswer, locationQueries, pickLocation };
 
@@ -85,6 +87,22 @@ function fieldContext(field: FieldSpec, job: JobContext) {
   return { question: field.label, description: field.description ?? null, company: job.company, jobTitle: job.title };
 }
 
+/**
+ * One adapt request: answered from the cache when the same value was mapped onto the same field (label, description,
+ * options, limit) before, at most 30 options long, and null when the AI can't answer (the field is then left for the
+ * user). The company is not part of the key: mapping "Yes" onto a question's options doesn't depend on it.
+ */
+function askAdapt<T>(llm: Llm, req: Omit<StructuredRequest<T>, "name" | "effort" | "cacheKey">, field: FieldSpec, kind: string, value: unknown, options: string[]): Promise<T | null> {
+  const key = createHash("sha1")
+    .update(JSON.stringify([kind, value, field.label, field.description ?? "", [...options].sort(), field.maxLength ?? null]))
+    .digest("hex");
+  return orNull(llm.structured({ ...req, name: "adapt", effort: "low", cacheKey: `adapt:${key}` }));
+}
+
+/** Words of the stored value an option is ranked against. */
+const targets = (value: string | boolean | string[]): string[] =>
+  Array.isArray(value) ? [value.join(" "), ...value] : [asText(value)];
+
 /** What the caller knows beyond the field itself (see answers/degree.ts). */
 export type AdaptHints = DegreeHints;
 
@@ -111,11 +129,12 @@ export async function adaptAnswer(llm: Llm, value: string | boolean | string[], 
       : typeof value === "string" ? value.split(/[,;\n]/).map(s => s.trim()).filter(Boolean) : [value];
     const picked = parts.map(p => pickOption(p, options));
     if (picked.length && picked.every((p, i) => p !== null && mayStandFor(parts[i]!, p))) return { type: "options", options: [...new Set(picked as string[])] };
-    const out = await llm.structured({
-      name: "adapt", schema: OptionsSchema, system: ADAPT_OPTIONS_SYSTEM, effort: "low",
-      content: JSON.stringify({ ...fieldContext(field, job), options, storedAnswer: asText(value) }),
-    });
-    const chosen = out.options ?? [];
+    const shown = topOptions([...targets(value), ...parts.map(p => asText(p))], options.filter(o => mayStandFor(value, o)));
+    const out = await askAdapt(llm, {
+      schema: OptionsSchema, system: ADAPT_OPTIONS_SYSTEM,
+      content: JSON.stringify({ ...fieldContext(field, job), options: shown, storedAnswer: asText(value) }),
+    }, field, "options", value, shown);
+    const chosen = out?.options ?? [];
     if (!chosen.length || !chosen.every(o => options.includes(o) && mayStandFor(value, o))) return null;
     return { type: "options", options: [...new Set(chosen)] };
   }
@@ -126,11 +145,15 @@ export async function adaptAnswer(llm: Llm, value: string | boolean | string[], 
     const picked = pickLocation(value, options);
     if (picked && mayStandFor(value, picked)) return { type: "option", option: picked };
     const place = parsePlace(value);
-    const out = await llm.structured({
-      name: "adapt", schema: OptionSchema, system: ADAPT_OPTION_SYSTEM, effort: "low",
-      content: JSON.stringify({ ...fieldContext(field, job), options, storedAnswer: value }),
-    });
-    const ok = out.option !== null && options.includes(out.option) && !!place && placeMatches(place, out.option) && mayStandFor(value, out.option);
+    if (!place) return null;
+    // Only options naming the place can be accepted below, so only those are worth sending.
+    const shown = topOptions(targets(value), options.filter(o => placeMatches(place, o) && mayStandFor(value, o)));
+    if (!shown.length) return null;
+    const out = await askAdapt(llm, {
+      schema: OptionSchema, system: ADAPT_OPTION_SYSTEM,
+      content: JSON.stringify({ ...fieldContext(field, job), options: shown, storedAnswer: value }),
+    }, field, "location", value, shown);
+    const ok = !!out && out.option !== null && options.includes(out.option) && !!place && placeMatches(place, out.option) && mayStandFor(value, out.option);
     return ok ? { type: "option", option: out.option! } : null;
   }
 
@@ -150,11 +173,14 @@ export async function adaptAnswer(llm: Llm, value: string | boolean | string[], 
     }
     const picked = pickOption(flat, options);
     if (picked && fits(picked)) return { type: "option", option: picked };
-    const out = await llm.structured({
-      name: "adapt", schema: OptionSchema, system: ADAPT_OPTION_SYSTEM, effort: "low",
-      content: JSON.stringify({ ...fieldContext(field, job), options, storedAnswer: asText(value) }),
-    });
-    return out.option !== null && options.includes(out.option) && fits(out.option) ? { type: "option", option: out.option } : null;
+    // Only options that may stand for the value (never "Other", never another degree level) can be accepted.
+    const shown = topOptions(targets(value), options.filter(fits));
+    if (!shown.length) return null;
+    const out = await askAdapt(llm, {
+      schema: OptionSchema, system: ADAPT_OPTION_SYSTEM,
+      content: JSON.stringify({ ...fieldContext(field, job), options: shown, storedAnswer: asText(value) }),
+    }, field, "option", value, shown);
+    return out && out.option !== null && shown.includes(out.option) && fits(out.option) ? { type: "option", option: out.option } : null;
   }
 
   // A combobox with no known options is a typeahead: type the value and let the filler pick.
@@ -163,11 +189,11 @@ export async function adaptAnswer(llm: Llm, value: string | boolean | string[], 
     if (!text) return null;
     const max = field.maxLength;
     if (!max || text.length <= max) return { type: "text", text };
-    const out = await llm.structured({
-      name: "adapt", schema: TextSchema, system: SHORTEN_SYSTEM, effort: "low",
+    const out = await askAdapt(llm, {
+      schema: TextSchema, system: SHORTEN_SYSTEM,
       content: JSON.stringify({ ...fieldContext(field, job), maxCharacters: max, answer: text }),
-    });
-    const short = out.text.trim();
+    }, field, "shorten", text, []);
+    const short = out?.text.trim() ?? "";
     return short && short.length <= max ? { type: "text", text: short } : null;
   }
 
@@ -181,12 +207,17 @@ You receive the form's question and a name the applicant gave. Return up to 3 ot
 
 const VariantsSchema = z.object({ variants: z.array(z.string()) });
 
-/** Up to three other names the same entity may be listed under, to search a list with (one low-effort LLM call). */
+/**
+ * Up to three other names the same entity may be listed under, to search a list with (one low-effort LLM call, cached
+ * per name and question; none when the AI can't answer).
+ */
 export async function nameVariants(llm: Llm, value: string, field: FieldSpec, job: JobContext): Promise<string[]> {
-  const out = await llm.structured({
-    name: "variants", schema: VariantsSchema, system: VARIANTS_SYSTEM, effort: "low",
+  const key = createHash("sha1").update(JSON.stringify([norm(value), field.label])).digest("hex");
+  const out = await orNull(llm.structured({
+    name: "variants", schema: VariantsSchema, system: VARIANTS_SYSTEM, effort: "low", cacheKey: `variants:${key}`,
     content: JSON.stringify({ ...fieldContext(field, job), name: value }),
-  });
+  }));
+  if (!out) return [];
   const seen = new Set([norm(value)]);
   return out.variants.map(v => v.trim()).filter(v => {
     const n = norm(v);

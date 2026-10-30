@@ -2,8 +2,9 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import type { Db } from "../db/db.js";
 import type { FieldSpec, JobContext } from "../forms/types.js";
-import type { Llm } from "../llm/llm.js";
+import { LlmUnavailableError, type Llm } from "../llm/llm.js";
 import { PROFILE_KEY_DESCRIPTIONS, type ProfileKey } from "../profile/profile.js";
+import { MAX_LLM_OPTIONS } from "./rank.js";
 
 export type FieldCategory = "profile" | "derived" | "consent-required" | "optin-optional" | "resume" | "cover-letter" | "question";
 export type DerivedKey = "workedAtCompany" | "appliedToCompany" | "jobLocation" | "jobTerm";
@@ -37,7 +38,7 @@ const ClassifySchema = z.object({
 
 const CLASSIFY_SYSTEM = `You classify the fields of a job application form so an app can fill them for one applicant.
 
-For each field you receive its id, label, input kind, whether it is required, its options (if any) and a description (if any). Return one entry per field id with:
+For each field you receive its id, label, input kind, whether it is required, its options (if any; a long list is cut short, with optionCount giving its full length) and a description (if any). Return one entry per field id with:
 
 category, one of:
 - "profile": the field asks directly for one of the applicant's stored facts listed under profileKeys, including yes/no versions of them (for example "Are you Hispanic or Latino?" is hispanicLatino; "Will you now or in the future require sponsorship?" is requiresSponsorship). Set profileKey to that key. Use it only when the stored fact answers the field exactly as asked; a question about a different scope or time frame is a "question". Mind polarity: if a "yes" to the field would mean the stored fact is false (for example "Are you able to work without sponsorship?" against requiresSponsorship), classify it as "question" instead. A field asking to repeat a stored fact to confirm it ("Confirm your email", "Re-enter email address") is that same fact's profileKey. The country or dialing-code picker beside a phone number (options like "+1" or "United States (+1)") is country.
@@ -104,9 +105,21 @@ function sanitize(raw: Raw, field: FieldSpec, company: string): Classification {
   }
 }
 
+/** Fields classified per LLM request. */
+const CLASSIFY_CHUNK = 10;
+
 /** Used when the classifier leaves a field out: treat it as a factual question so nothing is guessed. */
 const fallback = (field: FieldSpec): Classification =>
   ({ category: "question", canonicalQuestion: field.label.trim(), isFactual: true, isCompanySpecific: false });
+
+async function unlessUnavailable<T>(p: Promise<T>): Promise<T | null> {
+  try {
+    return await p;
+  } catch (err) {
+    if (err instanceof LlmUnavailableError) return null;
+    throw err;
+  }
+}
 
 /**
  * Classifies every field, reading from field_cache first and making at most one LLM call for the
@@ -126,27 +139,45 @@ export async function classifyFields(db: Db, llm: Llm, fields: FieldSpec[], job:
   if (missing.size === 0) return result;
 
   const toAsk = [...missing.values()].map(group => group[0]!);
-  const out = await llm.structured({
-    name: "classify",
-    schema: ClassifySchema,
-    system: CLASSIFY_SYSTEM,
-    effort: "low",
-    content: JSON.stringify({
-      company: job.company,
-      jobTitle: job.title,
-      profileKeys: Object.fromEntries(CLASSIFIABLE_PROFILE_KEYS.map(k => [k, PROFILE_KEY_DESCRIPTIONS[k]])),
-      fields: toAsk.map(f => ({
-        id: f.id, label: f.label, kind: f.kind, required: f.required, options: f.options ?? null, description: f.description ?? null,
-      })),
-    }),
-  });
-
-  const byId = new Map(out.fields.map(r => [r.id, r]));
+  const profileKeys = Object.fromEntries(CLASSIFIABLE_PROFILE_KEYS.map(k => [k, PROFILE_KEY_DESCRIPTIONS[k]]));
   const insert = db.prepare("INSERT OR REPLACE INTO field_cache (key, classification_json, created_at) VALUES (?, ?, ?)");
-  for (const [key, group] of missing) {
+  const keyOf = new Map([...missing].map(([key, group]) => [group[0]!.id, key]));
+  const byId = new Map<string, Raw>();
+  // A few fields per request, so a local model answers each well within its time limit; each part is cached as soon as
+  // it is classified.
+  for (let i = 0; i < toAsk.length; i += CLASSIFY_CHUNK) {
+    const part = toAsk.slice(i, i + CLASSIFY_CHUNK);
+    // When no model is available (the local one is off or too slow, or today's Claude budget is spent), the fields not
+    // classified yet get the fallback (not cached: they are classified for real next time). An unusable answer still
+    // fails the request.
+    const out = await unlessUnavailable(llm.structured({
+      name: "classify",
+      schema: ClassifySchema,
+      system: CLASSIFY_SYSTEM,
+      effort: "low",
+      content: JSON.stringify({
+        company: job.company,
+        jobTitle: job.title,
+        profileKeys,
+        fields: part.map(f => ({
+          id: f.id, label: f.label, kind: f.kind, required: f.required, options: f.options?.slice(0, MAX_LLM_OPTIONS) ?? null,
+          ...(f.options && f.options.length > MAX_LLM_OPTIONS ? { optionCount: f.options.length } : {}), description: f.description ?? null,
+        })),
+      }),
+    }));
+    if (!out) break;
+    const asked = new Set(part.map(f => f.id));
+    for (const raw of out.fields) {
+      if (!asked.has(raw.id) || byId.has(raw.id)) continue;
+      byId.set(raw.id, raw);
+      const field = part.find(f => f.id === raw.id)!;
+      insert.run(keyOf.get(raw.id)!, JSON.stringify(sanitize(raw, field, job.company)), new Date().toISOString());
+    }
+  }
+
+  for (const group of missing.values()) {
     const raw = byId.get(group[0]!.id);
     const c = raw ? sanitize(raw, group[0]!, job.company) : fallback(group[0]!);
-    if (raw) insert.run(key, JSON.stringify(c), new Date().toISOString());
     for (const field of group) result.set(field.id, c);
   }
   return result;

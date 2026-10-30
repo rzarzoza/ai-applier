@@ -17,6 +17,8 @@ import { getJob, setAts, setStatus, setUsedDocuments } from "../jobs/repo.js";
 import { roleKey } from "../jobs/role-key.js";
 import type { Job } from "../jobs/types.js";
 import type { Llm } from "../llm/llm.js";
+import { withAiScope } from "../llm/meter.js";
+import { BUDGET_NOTICE } from "../llm/routed.js";
 import { getProfile, type Profile } from "../profile/profile.js";
 import { saveRecord } from "../runner/records.js";
 import { getJson, getSettings, setJson } from "../settings.js";
@@ -270,6 +272,8 @@ export function submitted(deps: ExtDeps, body: z.infer<typeof SubmittedSchema>):
         date_posted, active, status, role_key, updated_at, degrees) VALUES (?, 'extension', ?, ?, ?, '[]', NULL, '[]', ?, ?, ?, 1, 'new', ?, ?, NULL)`)
       .run(id, urlNorm, company, title, body.url, urlNorm, now, roleKey(company, title, []), now);
     setAts(db, id, atsNameFromUrl(body.url));
+    // The AI calls made while filling this page (metered under the page's URL) belong to the new application.
+    db.prepare("UPDATE llm_usage SET job_id = ? WHERE job_id = ?").run(id, jobContext(null, body.url, "", undefined).jobId);
     job = getJob(db, id)!;
     created = true;
   }
@@ -318,6 +322,13 @@ export async function adapt(deps: ExtDeps, body: z.infer<typeof AdaptSchema>): P
   }
   const other = findOtherOption(options);
   return other ? { answer: { type: "option", option: other }, other: text, otherAllowed } : { answer: null, otherAllowed };
+}
+
+/** The panel's line when the AI left fields for the user: the budget, or why the local model couldn't answer. */
+export function aiNotice(notices: string[]): string | null {
+  if (!notices.length) return null;
+  if (notices.includes(BUDGET_NOTICE)) return `${BUDGET_NOTICE} — the fields the AI would answer are left for you.`;
+  return `The AI couldn't answer some fields (${notices[0]}) — they're left for you.`;
 }
 
 /** Its name for upload: the file's own name unless it is the app's stored resume.pdf. */
@@ -382,11 +393,14 @@ export function extRoutes(app: Hono, deps: ExtDeps): void {
     const ctx = jobContext(job, body.url, body.title, body.company);
     const fields = body.fields as FieldSpec[];
     try {
-      const resolutions = await resolveFields({ db, llm: deps.llm }, fields, ctx);
+      const { result: resolutions, notices } = await withAiScope(job?.id ?? ctx.jobId, async () =>
+        forExtension(deps, fields, await resolveFields({ db, llm: deps.llm }, fields, ctx), ctx, getProfile(db)));
+      const notice = aiNotice(notices);
       const out: ResolveResponse = {
-        resolutions: await forExtension(deps, fields, resolutions, ctx, getProfile(db)),
+        resolutions,
         job: { id: job?.id ?? null, company: ctx.company, title: ctx.title },
         hints: extHints(getProfile(db)),
+        ...(notice ? { notice } : {}),
       };
       return c.json(out);
     } catch (e) {
@@ -399,7 +413,9 @@ export function extRoutes(app: Hono, deps: ExtDeps): void {
     if ("error" in parsed) return c.json({ ok: false, error: parsed.error }, 400);
     const body = parsed.data;
     try {
-      return c.json(await adapt(deps, body));
+      const job = findJobForPage(db, body.url, body.referrer);
+      const { result } = await withAiScope(job?.id ?? jobContext(job, body.url, body.title ?? "", body.company).jobId, () => adapt(deps, body));
+      return c.json(result);
     } catch (e) {
       return c.json({ ok: false, error: `Couldn't map the answer: ${e instanceof Error ? e.message : String(e)}` }, 502);
     }

@@ -1,7 +1,8 @@
 import { z } from "zod";
 import type { FieldSpec, JobContext } from "../forms/types.js";
-import type { Llm } from "../llm/llm.js";
+import { orNull, type Llm } from "../llm/llm.js";
 import type { Profile } from "../profile/profile.js";
+import { MAX_LLM_OPTIONS, topOptions } from "./rank.js";
 
 const DRAFT_SYSTEM = `You draft answers to job application questions for one applicant, writing in their first-person voice.
 
@@ -64,21 +65,32 @@ function applicantContext(profile: Profile): string {
   return `<resume>\n${profile.resumeText?.trim() || "(no resume text available)"}\n</resume>\n\n<profile>\n${JSON.stringify(facts, null, 2)}\n</profile>`;
 }
 
-const fieldInfo = (field: FieldSpec) => ({ label: field.label, kind: field.kind, options: field.options ?? null, maxLength: field.maxLength ?? null });
-const factFieldInfo = (field: FieldSpec) => ({ ...fieldInfo(field), description: field.description ?? null });
+/** The profile's facts as text, to pick which options of a long list are worth showing. */
+const profileWords = (profile: Profile): string[] =>
+  Object.entries(profile).filter(([k, v]) => !EXCLUDED.includes(k as keyof Profile) && v !== null && k !== "resumeText")
+    .flatMap(([, v]) => (Array.isArray(v) ? v.map(String) : [String(v)]));
+
+/** The field as the LLM sees it: a long option list is cut to the 30 options closest to the applicant's profile. */
+const fieldInfo = (field: FieldSpec, profile?: Profile) => ({
+  label: field.label, kind: field.kind,
+  options: field.options ? (field.options.length > MAX_LLM_OPTIONS && profile ? topOptions(profileWords(profile), field.options) : field.options.slice(0, MAX_LLM_OPTIONS)) : null,
+  maxLength: field.maxLength ?? null,
+});
+const factFieldInfo = (field: FieldSpec, profile: Profile) => ({ ...fieldInfo(field, profile), description: field.description ?? null });
 const jobInfo = (job: JobContext) => ({ company: job.company, title: job.title, location: job.location, term: job.term, description: job.description ?? null });
 
+/** A draft from the resume and profile, or not answerable (also when the AI can't answer: the user writes it). */
 export async function draftAnswer(llm: Llm, profile: Profile, canonical: string, field: FieldSpec, job: JobContext): Promise<{ answerable: boolean; draft: string | null }> {
-  const out = await llm.structured({
+  const out = await orNull(llm.structured({
     name: "draft",
     schema: DraftSchema,
     system: DRAFT_SYSTEM,
     cachedContext: applicantContext(profile),
     effort: "medium",
-    content: JSON.stringify({ question: canonical, field: fieldInfo(field), job: jobInfo(job) }),
-  });
-  const draft = out.draft?.trim() || null;
-  return out.answerable && draft ? { answerable: true, draft } : { answerable: false, draft: null };
+    content: JSON.stringify({ question: canonical, field: fieldInfo(field, profile), job: jobInfo(job) }),
+  }));
+  const draft = out?.draft?.trim() || null;
+  return out?.answerable && draft ? { answerable: true, draft } : { answerable: false, draft: null };
 }
 
 /**
@@ -87,15 +99,16 @@ export async function draftAnswer(llm: Llm, profile: Profile, canonical: string,
  */
 export async function factAnswer(llm: Llm, profile: Profile, canonical: string, field: FieldSpec, job: JobContext):
   Promise<{ answerable: boolean; answer: string | null; basis: string | null }> {
-  const out = await llm.structured({
+  const out = await orNull(llm.structured({
     name: "fact",
     schema: FactSchema,
     system: FACT_SYSTEM,
     cachedContext: applicantContext(profile),
     effort: "low",
-    content: JSON.stringify({ question: canonical, field: factFieldInfo(field), job: jobInfo(job) }),
-  });
+    content: JSON.stringify({ question: canonical, field: factFieldInfo(field, profile), job: jobInfo(job) }),
+  }));
   const none = { answerable: false, answer: null, basis: null };
+  if (!out) return none;
   const answer = out.answer?.trim() || null;
   if (!out.answerable || !answer) return none;
   if (field.options?.length && !field.options.includes(answer)) return none;
@@ -117,16 +130,17 @@ export async function reviseDraft(llm: Llm, profile: Profile, canonical: string,
   return out.draft.trim();
 }
 
-export async function fillTemplate(llm: Llm, profile: Profile, template: string, field: FieldSpec, job: JobContext): Promise<string> {
-  const out = await llm.structured({
+/** The template rewritten for this job, or null when the AI can't answer (the field is then left for the user). */
+export async function fillTemplate(llm: Llm, profile: Profile, template: string, field: FieldSpec, job: JobContext): Promise<string | null> {
+  const out = await orNull(llm.structured({
     name: "template",
     schema: TemplateSchema,
     system: TEMPLATE_SYSTEM,
     cachedContext: applicantContext(profile),
     effort: "medium",
-    content: JSON.stringify({ template, field: fieldInfo(field), job: jobInfo(job) }),
-  });
-  return out.text.trim();
+    content: JSON.stringify({ template, field: fieldInfo(field, profile), job: jobInfo(job) }),
+  }));
+  return out?.text.trim() || null;
 }
 
 // --- a backstop for the location and right-to-work rules in FACT_SYSTEM ---

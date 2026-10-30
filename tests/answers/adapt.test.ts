@@ -107,7 +107,8 @@ test("adaptAnswer maps a place only onto that place; an LLM pick lacking the cit
   expect(await adaptAnswer(llm1, "Houston, Texas", loc(["Other Cast, Bihar, India", "Houston County, Alabama"]), job)).toBeNull();
   const llm2 = new FakeLlm().on("adapt", () => ({ option: "Houston County, Alabama" }));
   expect(await adaptAnswer(llm2, "Houston, Texas", loc(["Other Cast, Bihar, India", "Houston County, Alabama"]), job)).toBeNull();
-  expect(llm2.calls).toHaveLength(1);
+  // No option names Houston, Texas, so none could be accepted: the LLM isn't asked at all.
+  expect(llm2.calls).toHaveLength(0);
   // An LLM pick naming the city and state is kept.
   const llm3 = new FakeLlm().on("adapt", () => ({ option: "Greater Houston Area, TX" }));
   expect(await adaptAnswer(llm3, "Houston, Texas", loc(["Greater Houston Area, TX", "Austin, TX"]), job))

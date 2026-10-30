@@ -19,6 +19,7 @@ import {
 } from "../jobs/repo.js";
 import type { Job, JobStatus } from "../jobs/types.js";
 import { llmHaltReason, type Llm } from "../llm/llm.js";
+import { withAiScope } from "../llm/meter.js";
 import { getFilters } from "../filters/filters.js";
 import { getProfile } from "../profile/profile.js";
 import { getSettings, haltRunner, type Settings } from "../settings.js";
@@ -136,6 +137,11 @@ const couldNotFill = (f: { field: FieldSpec; reason?: string }) =>
  * While it runs, the job and its current step are kept in kv `runnerCurrent` for the dashboard.
  */
 export async function runJob(deps: RunnerDeps, jobId: string, mode: RunMode = "auto", opts: RunOptions = {}): Promise<JobStatus> {
+  // Every AI call of this run is metered against the job (its cost shows on the job's page).
+  return (await withAiScope(jobId, () => runJobLocked(deps, jobId, mode, opts))).result;
+}
+
+async function runJobLocked(deps: RunnerDeps, jobId: string, mode: RunMode, opts: RunOptions): Promise<JobStatus> {
   const locks = deps.locks;
   if (!locks) return runLocked(deps, jobId, mode, opts);
   // A rebuild never waits: the job is someone else's right now. Any other run waits for a rebuild of its job to end.

@@ -8,7 +8,7 @@ import { addVariant, createQuestion, getOverrides, getQuestion, incrementUse, li
 import { degreeInProgress } from "./degree.js";
 import { classifyFields, normalizeLabel, withCompanyPlaceholder, type Classification, type DerivedKey } from "./classify.js";
 import { draftAnswer, factAnswer, fillTemplate } from "./draft.js";
-import { matchQuestion } from "./match.js";
+import { matchQuestions } from "./match.js";
 import { entityProfileField, findOtherOption } from "./other.js";
 
 export type FillSource = "override" | "profile" | "derived" | "consent" | "resume" | "bank" | "template";
@@ -28,7 +28,13 @@ export type Resolution =
   /** A required file upload the app has no file for (the resume when none is uploaded, or any other file). */
   | { fieldId: string; status: "needs-file"; resume: boolean };
 
-interface Ctx { db: Db; llm: Llm; profile: Profile; job: JobContext }
+interface Ctx {
+  db: Db; llm: Llm; profile: Profile; job: JobContext;
+  /** Each question field's bank match, found for the whole form in one go (see matchQuestions). */
+  matches: Map<string, number | null>;
+  /** Questions created while resolving this form, by normalized wording: a form asking one twice reuses the first. */
+  created: Map<string, Question>;
+}
 
 type Value = string | boolean | string[] | null;
 
@@ -69,12 +75,23 @@ export async function resolveFields(deps: { db: Db; llm: Llm }, fields: FieldSpe
 
   const toClassify = fields.filter(f => !settled(f));
   const classes = toClassify.length ? await classifyFields(db, llm, toClassify, job) : new Map<string, Classification>();
-  const ctx: Ctx = { db, llm, profile: getProfile(db), job };
+  // Every question this form asks the bank about, matched in one request.
+  const asking = toClassify.filter(f => goesToBank(f, classes.get(f.id)!));
+  const matches = asking.length
+    ? await matchQuestions(db, llm, asking.map(f => ({ key: f.id, canonical: canonicalOf(f, classes.get(f.id)!), isFactual: classes.get(f.id)!.isFactual, label: f.label })), listQuestions(db))
+    : new Map<string, number | null>();
+  const ctx: Ctx = { db, llm, profile: getProfile(db), job, matches, created: new Map() };
 
   const out: Resolution[] = [];
   for (const field of fields) out.push(settled(field) ?? await byCategory(ctx, field, classes.get(field.id)!));
   return out;
 }
+
+/** Whether byCategory takes the field to the answer bank (fromBank). */
+const goesToBank = (field: FieldSpec, c: Classification) =>
+  field.kind !== "file" && (c.category === "question" || (c.category === "cover-letter" && field.required));
+const canonicalOf = (field: FieldSpec, c: Classification) => c.canonicalQuestion ?? cleanLabel(field.label);
+const wording = (s: string) => s.toLowerCase().replace(/[^a-z0-9{}]+/g, " ").trim();
 
 async function byCategory(ctx: Ctx, field: FieldSpec, c: Classification): Promise<Resolution> {
   // The only file the app holds is the resume; no typed answer can stand in for an upload.
@@ -190,11 +207,11 @@ async function unresolvedFact(ctx: Ctx, field: FieldSpec): Promise<Resolution> {
 /** The question path: reuse a matching bank entry, or create one (drafted when it's open-ended). */
 async function fromBank(ctx: Ctx, field: FieldSpec, c: Classification): Promise<Resolution> {
   const { db, llm, profile, job } = ctx;
-  const canonical = c.canonicalQuestion ?? cleanLabel(field.label);
+  const canonical = canonicalOf(field, c);
   const isFactual = c.isFactual;
 
-  const matchId = await matchQuestion(llm, canonical, isFactual, listQuestions(db), field.label);
-  const matched = matchId === null ? null : getQuestion(db, matchId);
+  const matchId = ctx.matches.get(field.id) ?? null;
+  const matched = (matchId === null ? null : getQuestion(db, matchId)) ?? sameAsEarlier(ctx, canonical);
   if (matched) {
     addVariant(db, matched.id, field.label);
     return fromMatched(ctx, field, matched, isFactual);
@@ -204,6 +221,7 @@ async function fromBank(ctx: Ctx, field: FieldSpec, c: Classification): Promise<
   const create = (draft: string | null, draftBasis: string | null = null) => {
     const q = createQuestion(db, { canonical, kind: isFactual ? "global" : kind, isFactual, options: field.options ?? null, draft, draftBasis });
     addVariant(db, q.id, field.label);
+    ctx.created.set(wording(canonical), q);
     return q;
   };
 
@@ -224,13 +242,19 @@ async function fromBank(ctx: Ctx, field: FieldSpec, c: Classification): Promise<
   return field.required ? blocked(field, q.id, "missing") : skip(field);
 }
 
+/** A question this form already created with the same wording (it was matched before that question existed). */
+function sameAsEarlier(ctx: Ctx, canonical: string): Question | null {
+  const q = ctx.created.get(wording(canonical));
+  return q ? getQuestion(ctx.db, q.id) : null;
+}
+
 async function fromMatched(ctx: Ctx, field: FieldSpec, q: Question, isFactual: boolean): Promise<Resolution> {
   const { db, llm, profile, job } = ctx;
   if (q.status === "draft") return blocked(field, q.id, "approval");
   if (q.status === "approved" && q.answer !== null) {
     const isTemplate = q.kind === "template";
     const text = isTemplate ? await fillTemplate(llm, profile, q.answer, field, job) : q.answer;
-    const answer = await adaptAnswer(llm, text, field, job, hintsFor(ctx));
+    const answer = text === null ? null : await adaptAnswer(llm, text, field, job, hintsFor(ctx));
     if (answer) {
       incrementUse(db, q.id);
       return filled(field, answer, isTemplate ? "template" : "bank");

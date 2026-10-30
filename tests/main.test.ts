@@ -108,7 +108,7 @@ test("a stale Applying now pointer from the last session is cleared at startup",
 test("a rebuild from the dashboard runs right away while an auto run is still in progress", async () => {
   const dataDir = mkdtempSync(path.join(tmpdir(), "ai-applier-main-"));
   const seed = openDb(path.join(dataDir, "app.db"));
-  saveSettings(seed, { paused: false });
+  saveSettings(seed, { paused: false, backgroundApplier: true });
   saveProfile(seed, { firstName: "Luis", lastName: "Hernandez", email: "luis@example.com" });
   const add = (n: string, url: string) => upsertPosting(seed, { sourceId: "s", listingId: n, company: `Co ${n}`, title: "Software Engineer Intern",
     locations: ["Austin, TX"], category: "Software", terms: ["Summer 2027"], degrees: [], sponsorship: null, url, datePosted: new Date(), active: true }).job;

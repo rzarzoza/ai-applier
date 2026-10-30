@@ -34,6 +34,8 @@ export interface ResolveResponse {
   job: { id: string | null; company: string; title: string };
   /** What the extension's own option matching needs from the profile (see answers/choose.ts). */
   hints?: ExtHints;
+  /** Why the AI left some fields for the user ("AI budget reached for today", the local model is off...), when it did. */
+  notice?: string;
 }
 
 export interface ExtHints {

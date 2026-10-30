@@ -326,7 +326,8 @@ async function resolveAndFill(s: Session, specs: FieldSpec[]): Promise<void> {
   }
   s.manual = manualSections(s.scope);
   s.phase = "done";
-  s.message = undefined;
+  // The AI left fields for the user (budget reached, local model off): say so in the panel.
+  s.message = r.data.notice;
   render();
   // The page re-rendered the form while it was being filled: start over on the new one.
   if (!s.scope.isConnected) recheck = true;
