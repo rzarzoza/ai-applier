@@ -2,6 +2,7 @@ import { describe, expect, test, vi } from "vitest";
 import { adaptAnswer } from "../../src/answers/adapt.js";
 import { approveAnswer, createQuestion, listQuestions } from "../../src/answers/bank.js";
 import { MAX_LLM_OPTIONS, topOptions } from "../../src/answers/rank.js";
+import { matchQuestions } from "../../src/answers/match.js";
 import { resolveFields } from "../../src/answers/resolve.js";
 import { openDb, type Db } from "../../src/db/db.js";
 import { adapt, getExtToken } from "../../src/ext/api.js";
@@ -202,5 +203,43 @@ describe("daily budget reached", () => {
     expect(body.resolutions[0]).toMatchObject({ status: "needs-you", reason: "missing" });
     expect(body.notice).toMatch(/^AI budget reached for today/);
     expect(claude).not.toHaveBeenCalled();
+  });
+});
+
+describe("guards against a weaker model's mistakes", () => {
+  test("a factual question is not matched to a saved one about another fact, even with high confidence", async () => {
+    const db = openDb(":memory:");
+    const auth = createQuestion(db, { canonical: "Are you legally authorized to work in the United States?", kind: "global", isFactual: true });
+    const sponsor = createQuestion(db, { canonical: "Will you now or in the future require visa sponsorship?", kind: "global", isFactual: true });
+    const llm = new FakeLlm().on("match", req => {
+      const body = JSON.parse(String(req.content)) as { newQuestions: { key: string; question: string }[] };
+      return { matches: body.newQuestions.map(q => ({ key: q.key, matchId: q.question.includes("visa") ? sponsor.id : auth.id, confidence: "high" })) };
+    });
+    const out = await matchQuestions(db, llm, [
+      { key: "sanctions", canonical: "Do you have U.S. citizenship or permanent residency, or reside in the U.S.?", isFactual: true,
+        label: "If you selected a response to the prior question other than none of the above, please confirm whether any of the following also applies to you." },
+      { key: "visa", canonical: "Do you need a visa to work here?", isFactual: true },
+    ], listQuestions(db));
+    expect(out.get("sanctions")).toBeNull();
+    expect(out.get("visa")).toBe(sponsor.id);
+  });
+
+  test("only an upload asking for the resume gets the resume; a transcript upload is left for the user", async () => {
+    const db = openDb(":memory:");
+    saveProfile(db, { resumePath: "/tmp/resume.pdf" });
+    const llm = new FakeLlm()
+      .on("classify", req => ({
+        fields: (JSON.parse(String(req.content)) as { fields: { id: string }[] }).fields.map(f => ({
+          id: f.id, category: "resume", profileKey: null, derivedKey: null, canonicalQuestion: null, isFactual: false, isCompanySpecific: false,
+        })),
+      }))
+      .on("match", () => ({ matchId: null, confidence: "low" }))
+      .on("fact", () => ({ answerable: false, answer: null, basis: null }));
+    const out = await resolveFields({ db, llm }, [
+      { id: "r", label: "Resume/CV", kind: "file", required: true },
+      { id: "t", label: "Please provide a transcript of your undergraduate studies", kind: "file", required: true },
+    ], job);
+    expect(out[0]).toMatchObject({ status: "filled", answer: { type: "file", path: "/tmp/resume.pdf" } });
+    expect(out[1]).toMatchObject({ status: "needs-file", resume: false });
   });
 });

@@ -30,6 +30,14 @@ confidence: "high" when the saved answer would certainly be correct for the new 
 
 const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9{}]+/g, " ").trim();
 
+/**
+ * A factual question is only matched to a saved one whose wording shares at least this much with it (trigram
+ * similarity of the new question or its label against the saved wordings). A backstop for models that "match" a
+ * different fact: a local model matched an export-sanctions question (0.14) to work authorization; paraphrases of the
+ * same fact ("Do you need a visa to work here?" / "Will you now or in the future require visa sponsorship?") score 0.18+.
+ */
+const FACTUAL_MIN_SIMILARITY = 0.16;
+
 /** Labels shorter than this ("Please explain", "Other") say too little to match on wording alone. */
 const MIN_SHORTCUT_WORDS = 4;
 
@@ -50,9 +58,17 @@ function bankRevision(db: Db): number {
 const cacheKey = (canonical: string, isFactual: boolean, rev: number) =>
   `match:${createHash("sha1").update(`${norm(canonical)}|${isFactual ? 1 : 0}|${rev}`).digest("hex")}`;
 
-const accepted = (out: Out, shortlist: Question[], isFactual: boolean): number | null => {
-  if (out.matchId === null || !shortlist.some(q => q.id === out.matchId)) return null;
-  return out.confidence === "high" || (out.confidence === "medium" && !isFactual) ? out.matchId : null;
+/** How much of the saved question's wordings the new question (or its label) shares. */
+const wordingSimilarity = (item: MatchItem, q: Question) => {
+  const mine = [item.canonical, item.label ?? ""].filter(Boolean).map(trigrams);
+  return Math.max(0, ...[q.canonical, ...q.variants].map(t => trigrams(t)).flatMap(t => mine.map(m => similarity(m, t))));
+};
+
+const accepted = (out: Out, shortlist: Question[], item: MatchItem): number | null => {
+  const q = out.matchId === null ? undefined : shortlist.find(x => x.id === out.matchId);
+  if (!q) return null;
+  if (item.isFactual && wordingSimilarity(item, q) < FACTUAL_MIN_SIMILARITY) return null;
+  return out.confidence === "high" || (out.confidence === "medium" && !item.isFactual) ? q.id : null;
 };
 
 /**
@@ -82,7 +98,7 @@ export async function matchQuestions(db: Db, llm: Llm, items: MatchItem[], candi
       .map(x => x.q);
     const key = cacheKey(item.canonical, item.isFactual, rev);
     const hit = CachedSchema.safeParse(readLlmCache(db, key));
-    if (hit.success) { result.set(item.key, accepted(hit.data, shortlist, item.isFactual)); continue; }
+    if (hit.success) { result.set(item.key, accepted(hit.data, shortlist, item)); continue; }
     ask.push({ item, shortlist, cache: key });
   }
   if (!ask.length) return result;
@@ -110,7 +126,7 @@ export async function matchQuestions(db: Db, llm: Llm, items: MatchItem[], candi
     if (!m) return;
     const raw: Out = { matchId: m.matchId, confidence: m.confidence };
     writeLlmCache(db, a.cache, "match", raw);
-    result.set(a.item.key, accepted(raw, a.shortlist, a.item.isFactual));
+    result.set(a.item.key, accepted(raw, a.shortlist, a.item));
   });
   return result;
 }

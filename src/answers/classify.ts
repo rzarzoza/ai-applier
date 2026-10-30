@@ -100,10 +100,18 @@ function sanitize(raw: Raw, field: FieldSpec, company: string): Classification {
     case "question":
     case "cover-letter":
       return { ...base, category: raw.category, canonicalQuestion: canonical };
+    case "resume":
+      // Only an upload that asks for the resume gets it: a local model filed transcript and work-sample uploads here.
+      if (field.kind === "file" && !RESUME_LABEL.test(`${field.label} ${field.description ?? ""}`)) {
+        return { category: "question", canonicalQuestion: canonical, isFactual: true, isCompanySpecific: raw.isCompanySpecific };
+      }
+      return { ...base, category: raw.category };
     default:
       return { ...base, category: raw.category };
   }
 }
+
+const RESUME_LABEL = /(?<![a-z])(resume|résumé|cv|curriculum vitae)(?![a-z])/i;
 
 /** Fields classified per LLM request. */
 const CLASSIFY_CHUNK = 10;
