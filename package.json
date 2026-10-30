@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "tsx watch src/main.ts",
     "start": "tsx src/main.ts",
-    "test": "vitest run",
+    "test": "vitest run --maxWorkers=2",
     "test:live": "LIVE=1 vitest run tests/live",
     "typecheck": "tsc --noEmit",
     "build:ext": "node scripts/build-ext.mjs"
