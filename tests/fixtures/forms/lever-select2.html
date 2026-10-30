@@ -1,0 +1,143 @@
+<!doctype html>
+<html>
+<head><title>Mini - Software Engineer Intern</title></head>
+<body>
+<!--
+  Lever's apply page as the runner's handler documents it (ats/lever.ts): li.application-question > .application-label
+  (+ span.required "✱"); "Current location" is a plain text box; the university question is a select2 picker
+  (hidden select.select2-hidden-accessible + span.select2-selection[role=combobox]); select2 opens on mousedown, puts
+  its search box and results (li.select2-results__option[role=treeitem], ajax with a "Searching…" row) in a dropdown
+  appended to <body>, and picks on mouseup. Custom question "cards" are radios; EEO questions are native selects.
+-->
+<form id="application-form">
+<ul>
+  <li class="application-question"><label><div class="application-label">Full name<span class="required">✱</span></div>
+    <div class="application-field"><input type="text" name="name" required></div></label></li>
+  <li class="application-question"><label><div class="application-label">Email<span class="required">✱</span></div>
+    <div class="application-field"><input type="email" name="email" required></div></label></li>
+  <li class="application-question"><label><div class="application-label">Current location<span class="required">✱</span></div>
+    <div class="application-field"><input class="location-input" type="text" name="location" id="location-input" maxlength="100" autocomplete="off">
+      <input id="selected-location" type="hidden" name="selectedLocation" value="">
+      <div class="dropdown-container" style="display: none;"><div class="dropdown-results"></div>
+        <div class="dropdown-no-results" style="display: none;">No location found. Try entering a different location</div>
+        <div class="dropdown-loading-results" style="display: none;"><span>Loading</span></div></div></div></label></li>
+  <li class="application-question custom-question"><div class="application-label full-width">University<span class="required">✱</span></div>
+    <div class="application-field full-width">
+      <select class="select2-hidden-accessible" name="cards[u][field0]" tabindex="-1" aria-hidden="true" required><option value=""></option></select>
+      <span class="select2 select2-container select2-container--default" dir="ltr" style="width: 300px;"><span class="selection">
+        <span class="select2-selection select2-selection--single" role="combobox" aria-haspopup="true" aria-expanded="false" tabindex="0" aria-labelledby="select2-u-container">
+          <span class="select2-selection__rendered" id="select2-u-container" role="textbox" aria-readonly="true"><span class="select2-selection__placeholder">Select...</span></span>
+          <span class="select2-selection__arrow" role="presentation"><b role="presentation"></b></span>
+        </span></span><span class="dropdown-wrapper" aria-hidden="true"></span></span>
+    </div></li>
+  <li class="application-question custom-question"><div class="application-label full-width">Are you authorized to work in the US?<span class="required">✱</span></div>
+    <div class="application-field full-width"><ul data-qa="multiple-choice">
+      <li><label><input type="radio" name="cards[a][field1]" value="Yes"><span class="application-answer-alternative">Yes</span></label></li>
+      <li><label><input type="radio" name="cards[a][field1]" value="No"><span class="application-answer-alternative">No</span></label></li>
+    </ul></div></li>
+  <li class="application-question"><label><div class="application-label">Gender</div>
+    <div class="application-field"><select name="eeo[gender]"><option value="">Select ...</option><option value="Male">Male</option><option value="Female">Female</option><option value="Decline to self-identify">Decline to self-identify</option></select></div></label></li>
+  <li class="application-question"><label><div class="application-label">Veteran status</div>
+    <div class="application-field"><select name="eeo[veteran]"><option value="">Select ...</option><option value="v">I am a veteran</option><option value="nv">I am not a veteran</option><option value="d">Decline to self-identify</option></select></div></label></li>
+</ul>
+<button type="button" id="btn-submit">Submit application</button>
+</form>
+<script>
+// Lever's structured location (js/retrieveLocations.js, seen live Oct 2026): a keydown starts a 500 ms debounced
+// search; results are div.dropdown-location rows (no ARIA roles) picked on mousedown, which fills the box and the hidden
+// selectedLocation; a blur while the dropdown is open and nothing was picked EMPTIES the box.
+(function () {
+  var PLACES = ["Houston, TX, USA", "Houston, MO, USA", "Houston, BC, Canada"];
+  var input = document.getElementById("location-input"), hidden = document.getElementById("selected-location");
+  var box = document.querySelector(".dropdown-container"), results = box.querySelector(".dropdown-results");
+  var loading = box.querySelector(".dropdown-loading-results"), timer = null;
+  input.addEventListener("input", function () { box.style.display = "flex"; });
+  input.addEventListener("keydown", function () {
+    clearTimeout(timer);
+    timer = setTimeout(function () {
+      loading.style.display = ""; results.innerHTML = "";
+      setTimeout(function () {
+        loading.style.display = "none";
+        var q = input.value.toLowerCase().split(",")[0].trim();
+        PLACES.filter(function (p) { return q && p.toLowerCase().indexOf(q) === 0; }).forEach(function (p, i) {
+          var d = document.createElement("div"); d.className = "dropdown-location"; d.id = "location-" + i; d.textContent = p; results.appendChild(d);
+        });
+      }, 300);
+    }, 500);
+  });
+  input.addEventListener("blur", function () {
+    if (box.style.display !== "none") { box.style.display = "none"; results.innerHTML = ""; input.value = ""; hidden.value = ""; }
+  });
+  document.addEventListener("mousedown", function (e) {
+    var row = e.target.closest && e.target.closest(".dropdown-location");
+    if (!row) return;
+    box.style.display = "none"; input.value = row.textContent; hidden.value = JSON.stringify({ name: row.textContent }); results.innerHTML = "";
+    window.__values.location = row.textContent;
+  });
+})();
+(function () {
+  window.__values = {};
+  var UNIS = ["Rice University", "Rice University (Jones Graduate School)", "University of Houston", "Harvard University", "Other (School Not Listed)"];
+  var select = document.querySelector("select.select2-hidden-accessible");
+  var container = select.nextElementSibling;
+  var selection = container.querySelector(".select2-selection");
+  var rendered = container.querySelector(".select2-selection__rendered");
+  var drop = null, seq = 0;
+  function close() {
+    if (!drop) return;
+    drop.remove(); drop = null;
+    container.classList.remove("select2-container--open");
+    selection.setAttribute("aria-expanded", "false");
+    selection.removeAttribute("aria-owns");
+  }
+  function results(items, message) {
+    var ul = drop.querySelector("ul");
+    ul.innerHTML = "";
+    if (message) { var m = document.createElement("li"); m.setAttribute("role", "treeitem"); m.className = message.cls; m.textContent = message.text; ul.appendChild(m); return; }
+    items.forEach(function (t) {
+      var li = document.createElement("li");
+      li.className = "select2-results__option";
+      li.setAttribute("role", "treeitem");
+      li.setAttribute("aria-selected", "false");
+      li.textContent = t;
+      li.addEventListener("mouseup", function () {
+        select.innerHTML = '<option value=""></option><option value="' + t + '" selected>' + t + "</option>";
+        select.dispatchEvent(new Event("change", { bubbles: true }));
+        rendered.textContent = t; rendered.title = t;
+        window.__values.university = t;
+        close();
+      });
+      ul.appendChild(li);
+    });
+  }
+  function open() {
+    drop = document.createElement("span");
+    drop.className = "select2-container select2-container--default select2-container--open";
+    drop.style.cssText = "position:absolute;top:400px;left:20px;width:300px;background:#fff";
+    drop.innerHTML = '<span class="select2-dropdown select2-dropdown--below"><span class="select2-search select2-search--dropdown">' +
+      '<input class="select2-search__field" type="search" tabindex="0" autocomplete="off" role="textbox"></span>' +
+      '<span class="select2-results"><ul class="select2-results__options" role="tree" id="select2-u-results" aria-expanded="true" aria-hidden="false"></ul></span></span>';
+    document.body.appendChild(drop);
+    container.classList.add("select2-container--open");
+    selection.setAttribute("aria-expanded", "true");
+    selection.setAttribute("aria-owns", "select2-u-results");
+    results([], { cls: "select2-results__option select2-results__message", text: "Please enter 1 or more characters" });
+    var search = drop.querySelector("input");
+    search.focus();
+    search.addEventListener("input", function () {
+      var q = search.value.trim().toLowerCase(), mine = ++seq;
+      if (!q) { results([], { cls: "select2-results__option select2-results__message", text: "Please enter 1 or more characters" }); return; }
+      results([], { cls: "select2-results__option loading-results", text: "Searching…" });
+      setTimeout(function () {
+        if (mine !== seq || !drop) return;
+        var hits = UNIS.filter(function (u) { return u.toLowerCase().indexOf(q) >= 0; });
+        if (hits.length) results(hits); else results([], { cls: "select2-results__option select2-results__message", text: "No results found" });
+      }, 300);
+    });
+    search.addEventListener("keydown", function (e) { if (e.key === "Escape") close(); });
+  }
+  selection.addEventListener("mousedown", function (e) { e.preventDefault(); if (drop) close(); else open(); });
+})();
+</script>
+</body>
+</html>

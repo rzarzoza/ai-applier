@@ -1,0 +1,347 @@
+<!doctype html>
+<html>
+<head><title>Mini ATS - Software Engineer Intern</title></head>
+<body>
+<section id="description">
+  <h1>Software Engineer Intern</h1>
+  <p>Build developer tools at Mini Co with a small, friendly team.</p>
+</section>
+
+<form id="app" onsubmit="return false">
+  <label for="first">First Name</label>
+  <input id="first" name="first" type="text" required>
+
+  <label for="email">Email</label>
+  <input id="email" name="email" type="email" required>
+
+  <label for="phone">Phone</label>
+  <input id="phone" name="phone" type="tel" required>
+
+  <label for="reloc">Are you willing to relocate?</label>
+  <select id="reloc" name="reloc" required>
+    <option value="">Select...</option>
+    <option value="y">Yes</option>
+    <option value="n">No</option>
+  </select>
+
+  <label for="project">Tell us about a project you are proud of</label>
+  <textarea id="project" name="project"></textarea>
+
+  <label><input type="checkbox" name="certify" required> I certify that the information above is accurate</label>
+  <label><input type="checkbox" name="sms"> Text me about new roles</label>
+
+  <button type="button" id="submit">Submit application</button>
+</form>
+
+<div id="challenge" hidden>
+  <iframe title="captcha challenge" srcdoc="<p>Select every bus</p>"></iframe>
+  <button type="button" id="solve">Solve</button>
+</div>
+<div id="oops" hidden>Something went wrong on our side</div>
+<div id="thanks" hidden><h2>Thank you for applying</h2></div>
+
+<script>
+(function () {
+  var params = new URLSearchParams(location.search);
+  var form = document.getElementById("app");
+  var phone = document.getElementById("phone");
+
+  // ?sabotage=1: the first-name box refuses to keep a value.
+  if (params.has("sabotage")) {
+    document.getElementById("first").addEventListener("input", function (e) { e.target.value = ""; });
+  }
+
+  // ?conditional=1: answering "Yes" to relocation reveals a required follow-up question.
+  if (params.has("conditional")) {
+    document.getElementById("reloc").addEventListener("change", function (e) {
+      if (e.target.value !== "y" || document.getElementById("cities")) return;
+      var submit = document.getElementById("submit");
+      var label = document.createElement("label");
+      label.htmlFor = "cities";
+      label.textContent = "Which cities would you consider?";
+      var input = document.createElement("input");
+      input.id = "cities";
+      input.name = "cities";
+      input.type = "text";
+      input.required = true;
+      form.insertBefore(label, submit);
+      form.insertBefore(input, submit);
+    });
+  }
+
+  // ?degree=1: after First Name, a required react-select-like "Degree" combobox. Its options are
+  // "Associate's Degree", "Bachelor's Degree", "Master's Degree" (no "B.S."): opening it with an empty box shows them
+  // all, typing filters them (contains, any case), and clicking one picks it. Typed text that was not picked is cleared
+  // when the box loses focus or on Escape, like react-select. &lazy=1: nothing shows until something is typed.
+  if (params.has("degree")) {
+    var lazy = params.has("lazy");
+    var degrees = ["Associate's Degree", "Bachelor's Degree", "Master's Degree"];
+    var chosen = "";
+    var dLabel = document.createElement("label");
+    dLabel.htmlFor = "degree";
+    dLabel.textContent = "Degree";
+    var dInput = document.createElement("input");
+    dInput.id = "degree";
+    dInput.name = "degree";
+    dInput.type = "text";
+    dInput.required = true;
+    dInput.autocomplete = "off";
+    dInput.setAttribute("role", "combobox");
+    dInput.setAttribute("aria-controls", "degree-list");
+    var dList = document.createElement("div");
+    dList.id = "degree-list";
+    dList.setAttribute("role", "listbox");
+    dList.hidden = true;
+    // Keeps focus in the box while an option is clicked (react-select does the same).
+    dList.addEventListener("mousedown", function (e) { e.preventDefault(); });
+    var emailLabel = document.querySelector('label[for="email"]');
+    form.insertBefore(dLabel, emailLabel);
+    form.insertBefore(dInput, emailLabel);
+    form.insertBefore(dList, emailLabel);
+    var render = function () {
+      var q = dInput.value.toLowerCase();
+      dList.innerHTML = "";
+      if (lazy && !q) { dList.hidden = true; return; }
+      degrees.filter(function (d) { return d.toLowerCase().indexOf(q) >= 0; }).forEach(function (d) {
+        var o = document.createElement("div");
+        o.setAttribute("role", "option");
+        o.textContent = d;
+        o.addEventListener("click", function () { chosen = d; dInput.value = d; dList.hidden = true; });
+        dList.appendChild(o);
+      });
+      dList.hidden = !dList.children.length;
+    };
+    var close = function () { dInput.value = chosen; dList.hidden = true; };
+    dInput.addEventListener("click", render);
+    dInput.addEventListener("input", render);
+    dInput.addEventListener("blur", close);
+    dInput.addEventListener("keydown", function (e) { if (e.key === "Escape") close(); });
+  }
+
+  // A react-select-like combobox inserted before `before`: `optionsFor(typed)` lists the options to show for the typed
+  // text, clicking one picks it (and calls `onPick`), typed text that was not picked is cleared on blur or Escape.
+  // Returns the listbox, after which any follow-up box goes.
+  function combo(id, labelText, optionsFor, onPick, before) {
+    var chosen = "";
+    var label = document.createElement("label");
+    label.htmlFor = id;
+    label.textContent = labelText;
+    var input = document.createElement("input");
+    input.id = id;
+    input.name = id;
+    input.type = "text";
+    input.required = true;
+    input.autocomplete = "off";
+    input.setAttribute("role", "combobox");
+    input.setAttribute("aria-controls", id + "-list");
+    var list = document.createElement("div");
+    list.id = id + "-list";
+    list.setAttribute("role", "listbox");
+    list.hidden = true;
+    list.addEventListener("mousedown", function (e) { e.preventDefault(); });
+    form.insertBefore(label, before);
+    form.insertBefore(input, before);
+    form.insertBefore(list, before);
+    var render = function () {
+      list.innerHTML = "";
+      optionsFor(input.value.toLowerCase()).forEach(function (d) {
+        var o = document.createElement("div");
+        o.setAttribute("role", "option");
+        o.textContent = d;
+        o.addEventListener("click", function () { chosen = d; input.value = d; list.hidden = true; if (onPick) onPick(d); });
+        list.appendChild(o);
+      });
+      list.hidden = !list.children.length;
+    };
+    var close = function () { input.value = chosen; list.hidden = true; };
+    input.addEventListener("click", render);
+    input.addEventListener("input", render);
+    input.addEventListener("blur", close);
+    input.addEventListener("keydown", function (e) { if (e.key === "Escape") close(); });
+    return list;
+  }
+
+  // Inserts a text box (label + input) right after `after`.
+  function textBox(id, labelText, required, after) {
+    var label = document.createElement("label");
+    label.htmlFor = id;
+    label.textContent = labelText;
+    var input = document.createElement("input");
+    input.id = id;
+    input.name = id;
+    input.type = "text";
+    input.required = required;
+    after.after(label);
+    label.after(input);
+  }
+
+  // ?school=...: a required "School" question after First Name, whose list never has "Rice University" as such.
+  //   combo:  a combobox listing Harvard, Stanford and "Other"; picking "Other" reveals a required "Please specify your
+  //           school" box right after it.
+  //   lazy:   a combobox showing nothing until something is typed, then at most 5 schools containing the typed text;
+  //           "Other" only shows once "oth..." is typed. Picking "Other" reveals the same box. &rice=1 adds
+  //           "Rice Univ. (Houston, TX)", which typing "R" alone never shows (the list is cut at 5).
+  //   nobox:  like combo, but picking "Other" reveals nothing.
+  //   select: a native select with Harvard, Stanford and "Other (please specify)", followed by an optional
+  //           "If other, school name" box that is always there.
+  //   both:   a native select with Harvard, "Rice University" and "Other".
+  var school = params.get("school");
+  if (school) {
+    var anchor = document.querySelector('label[for="email"]');
+    var reveal = function (list) {
+      return function (d) { if (d === "Other" && !document.getElementById("school_other")) textBox("school_other", "Please specify your school", true, list); };
+    };
+    if (school === "combo" || school === "nobox") {
+      var fixed = ["Harvard University", "Stanford University", "Other"];
+      var holder = { list: null };
+      holder.list = combo("school", "School", function (q) { return fixed.filter(function (d) { return d.toLowerCase().indexOf(q) >= 0; }); },
+        school === "combo" ? function (d) { reveal(holder.list)(d); } : null, anchor);
+    } else if (school === "lazy") {
+      var many = ["Radford University", "Ramapo College", "Reed College", "Regis University", "Rensselaer Polytechnic Institute"]
+        .concat(params.has("rice") ? ["Rice Univ. (Houston, TX)"] : [], ["Rutgers University", "Harvard University", "Stanford University"]);
+      var lazyHolder = { list: null };
+      lazyHolder.list = combo("school", "School", function (q) {
+        if (!q) return [];
+        var out = many.filter(function (d) { return d.toLowerCase().indexOf(q) >= 0; }).slice(0, 5);
+        if (q.length >= 3 && "other".indexOf(q) === 0) out.push("Other");
+        return out;
+      }, function (d) { reveal(lazyHolder.list)(d); }, anchor);
+    } else {
+      var sLabel = document.createElement("label");
+      sLabel.htmlFor = "school";
+      sLabel.textContent = "School";
+      var sel = document.createElement("select");
+      sel.id = "school";
+      sel.name = "school";
+      sel.required = true;
+      var opts = school === "both" ? ["Harvard University", "Rice University", "Other"] : ["Harvard University", "Stanford University", "Other (please specify)"];
+      [""].concat(opts).forEach(function (o) {
+        var op = document.createElement("option");
+        op.value = o;
+        op.textContent = o || "Select...";
+        sel.appendChild(op);
+      });
+      form.insertBefore(sLabel, anchor);
+      form.insertBefore(sel, anchor);
+      if (school === "select") textBox("school_other", "If other, school name", false, sel);
+    }
+  }
+
+  // ?edu=select: a required native select "Degree" after First Name with High School, Associate's, Bachelors Degree,
+  //   Masters Degree, PhD and Other (no "B.S.").
+  // ?edu=radio: a required radio group "Highest level of education completed" with High School, Undergraduate,
+  //   Graduate and Other.
+  var edu = params.get("edu");
+  if (edu) {
+    var eduAnchor = document.querySelector('label[for="email"]');
+    if (edu === "select") {
+      var eLabel = document.createElement("label");
+      eLabel.htmlFor = "degree";
+      eLabel.textContent = "Degree";
+      var eSel = document.createElement("select");
+      eSel.id = "degree";
+      eSel.name = "degree";
+      eSel.required = true;
+      ["", "High School", "Associate's", "Bachelors Degree", "Masters Degree", "PhD", "Other"].forEach(function (o) {
+        var op = document.createElement("option");
+        op.value = o;
+        op.textContent = o || "Select...";
+        eSel.appendChild(op);
+      });
+      form.insertBefore(eLabel, eduAnchor);
+      form.insertBefore(eSel, eduAnchor);
+    } else {
+      var fs = document.createElement("fieldset");
+      var legend = document.createElement("legend");
+      legend.textContent = "Highest level of education completed";
+      fs.appendChild(legend);
+      ["High School", "Undergraduate", "Graduate", "Other"].forEach(function (o, i) {
+        var l = document.createElement("label");
+        var r = document.createElement("input");
+        r.type = "radio";
+        r.name = "level";
+        r.value = o;
+        if (i === 0) r.required = true;
+        l.appendChild(r);
+        l.appendChild(document.createTextNode(" " + o));
+        fs.appendChild(l);
+      });
+      form.insertBefore(fs, eduAnchor);
+    }
+  }
+
+  // ?auth=1: a required "Are you authorized to work in the US?" combobox offering Yes, No and Other.
+  if (params.has("auth")) {
+    combo("auth", "Are you authorized to work in the US?", function (q) {
+      return ["Yes", "No", "Other"].filter(function (d) { return d.toLowerCase().indexOf(q) >= 0; });
+    }, null, document.querySelector('label[for="email"]'));
+  }
+
+  // ?file=<label>: adds a required file upload with that label (e.g. "Resume/CV" or "Transcript").
+  if (params.has("file")) {
+    var submitBtn = document.getElementById("submit");
+    var fileLabel = document.createElement("label");
+    fileLabel.htmlFor = "upload";
+    fileLabel.textContent = params.get("file");
+    var fileInput = document.createElement("input");
+    fileInput.id = "upload";
+    fileInput.name = "upload";
+    fileInput.type = "file";
+    fileInput.required = true;
+    form.insertBefore(fileLabel, submitBtn);
+    form.insertBefore(fileInput, submitBtn);
+
+    // &parse=1: like Lever, choosing a file shows "Analyzing resume…", and ~500ms later the "parser" clears the
+    // first name and overwrites the email with what it read from the resume, then hides the indicator. Submit does
+    // nothing while it is analyzing.
+    if (params.has("parse")) {
+      var analyzing = document.createElement("div");
+      analyzing.id = "analyzing";
+      analyzing.textContent = "Analyzing resume…";
+      analyzing.hidden = true;
+      form.insertBefore(analyzing, submitBtn);
+      fileInput.addEventListener("change", function () {
+        analyzing.hidden = false;
+        setTimeout(function () {
+          document.getElementById("first").value = "";
+          document.getElementById("email").value = "parsed@resume.example";
+          analyzing.hidden = true;
+        }, 500);
+      });
+    }
+  }
+
+  function send() {
+    var data = {};
+    new FormData(form).forEach(function (v, k) { data[k] = String(v); });
+    fetch("/submit", { method: "POST", body: JSON.stringify(data) }).then(function () {
+      form.hidden = true;
+      document.getElementById("thanks").hidden = false;
+    });
+  }
+
+  document.getElementById("submit").addEventListener("click", function () {
+    document.querySelectorAll(".error").forEach(function (e) { e.remove(); });
+    if (params.has("silent")) return;
+    var busy = document.getElementById("analyzing");
+    if (busy && !busy.hidden) return;
+    if (params.has("oops")) { document.getElementById("oops").hidden = false; return; }
+    if (!/^\d+$/.test(phone.value)) {
+      var s = document.createElement("span");
+      s.className = "error";
+      s.textContent = "Invalid phone";
+      phone.after(s);
+      return;
+    }
+    if (params.has("captcha")) { document.getElementById("challenge").hidden = false; return; }
+    send();
+  });
+
+  document.getElementById("solve").addEventListener("click", function () {
+    document.getElementById("challenge").hidden = true;
+    send();
+  });
+})();
+</script>
+</body>
+</html>

@@ -850,6 +850,80 @@ test("runNext returns null when paused", async () => {});
 
 ---
 
+### Task 18: Application tracker spreadsheet (CSV + optional Google Sheet)
+
+Spec §4.11 (added 2026-10-28 at the user's request).
+
+**Files:**
+- Create: `src/tracker/rows.ts`, `src/tracker/csv.ts`, `src/tracker/sheets.ts`, `src/tracker/sync.ts`
+- Modify: `src/runner/runner.ts` (record which resume and cover letter were used), `src/db/migrations.ts`, `src/web/pages/settings.tsx` + `src/web/server.ts` (tracker settings + Sync now), `src/main.ts` (wire the syncer)
+- Test: `tests/tracker/rows.test.ts`, `tests/tracker/csv.test.ts`, `tests/tracker/sheets.test.ts`, `tests/tracker/sync.test.ts`, `tests/web/settings.test.ts` (extend)
+
+**Interfaces:**
+- Consumes:
+  - jobs repo (Task 4)
+  - records and snapshots (Task 13)
+  - `runJob` end states (Task 13)
+  - settings and `secrets.ts` (Tasks 1, 16)
+  - `startApp` (Task 17)
+- Produces:
+  - **Migration:** add columns `resume_used TEXT` and `cover_letter_used TEXT` to `jobs`. When the runner reaches `submitted`, it sets these:
+    - `resume_used`: the basename of the resume file it uploaded.
+    - `cover_letter_used`: the cover-letter file basename; or `"written answer"` if a cover-letter text field was filled; otherwise `"none"`.
+  - **`rows.ts`:**
+    - `TRACKER_HEADERS = ["Date applied", "Company", "Job title", "Posting link", "Location", "Resume used", "Cover letter used", "Status", "Application system"]`
+    - `trackerRows(db): string[][]` returns the jobs with status `submitted` or `applied-manually`, newest first. Dates are `YYYY-MM-DD` in local time, taken from `submittedAt`, falling back to `updatedAt` for applied-manually. Location is `chosenLocation`. Application system is `atsNameFromUrl(url)`. Unknown values are an empty string.
+  - **`csv.ts`:** `writeTrackerCsv(db, file = path.join(paths.dataDir, "applications.csv")): void`. Writes the full file as RFC 4180 (quote fields containing `,`, `"` or newlines; double the quotes) through a temp file plus rename.
+  - **`sheets.ts`:** `interface SheetsClient { replaceTab(spreadsheetId: string, tab: string, rows: string[][]): Promise<void> }` and `googleSheetsClient(serviceAccountJson: string): SheetsClient`.
+    - Uses `google-auth-library` with a JWT for scope `https://www.googleapis.com/auth/spreadsheets`, then `fetch` against the Sheets REST API:
+      1. Create the tab if it's missing (`batchUpdate addSheet`).
+      2. `values:clear` on `<tab>`.
+      3. `values:update` at `<tab>!A1` with `valueInputOption=RAW`.
+    - `spreadsheetIdFromUrl(url: string): string | null` parses `/spreadsheets/d/<id>/`.
+  - **`sync.ts`:** `syncTracker(db, deps: { sheets?: SheetsClient; now(): Date }): Promise<{ csv: true; sheet: "ok" | "skipped" | "error"; error?: string }>`.
+    - Always writes the CSV.
+    - If the settings key `trackerSheetUrl` and the Keychain secret `google-service-account` are both set, calls `replaceTab(id, "Applications", [TRACKER_HEADERS, ...rows])`.
+    - Stores `{ lastSyncAt, lastError }` under the kv key `trackerSync`.
+    - Never throws.
+  - **Wiring:**
+    - `RunnerDeps` gains an optional `onSubmitted?(jobId: string): void`. The runner calls it after a job ends `submitted`, and the applied-manually route calls it too.
+    - In `startApp` it calls `syncTracker` without awaiting it in the runner path, and errors are swallowed into `trackerSync`.
+  - **Settings tab:**
+    - **Tracker spreadsheet** section with:
+      - a Google Sheet URL field
+      - a service-account key upload (a JSON file stored with `setSecret("google-service-account", …)`, never on disk)
+      - the service account's `client_email` shown so the user knows whom to share the Sheet with
+      - the last sync time and error
+      - a **Sync now** button (`POST /tracker/sync`)
+      - a link to download the CSV (`GET /tracker.csv`)
+
+- [ ] **Step 1: Write failing tests**
+
+```ts
+test("trackerRows lists submitted + applied-manually jobs with all columns", () => {
+  // seed: one submitted (resume_used "resume.pdf", cover "none"), one applied-manually, one queued
+  const rows = trackerRows(db);
+  expect(rows).toHaveLength(2);
+  expect(rows[0]).toEqual(["2026-10-28", "Acme", "Software Engineer Intern", "https://job-boards.greenhouse.io/acme/jobs/1", "NYC", "resume.pdf", "none", "submitted", "greenhouse"]);
+});
+test("CSV quotes commas and quotes and is rewritten, not appended", () => { /* write twice → same content; title 'Intern, "AI"' → "Intern, ""AI""" */ });
+test("syncTracker writes CSV and skips the sheet when not configured", async () => {
+  expect(await syncTracker(db, { now })).toMatchObject({ csv: true, sheet: "skipped" });
+});
+test("syncTracker sends headers + rows to replaceTab and records success", async () => { /* fake SheetsClient captures args */ });
+test("a failing sheet client is reported, not thrown", async () => {
+  const r = await syncTracker(db, { sheets: { replaceTab: async () => { throw new Error("403 PERMISSION_DENIED") } }, now });
+  expect(r).toMatchObject({ sheet: "error", error: expect.stringContaining("403") });
+});
+test("spreadsheetIdFromUrl", () => expect(spreadsheetIdFromUrl("https://docs.google.com/spreadsheets/d/abc123/edit#gid=0")).toBe("abc123"));
+test("runner records resume_used and cover_letter_used on submit and calls onSubmitted", async () => {});
+```
+
+- [ ] **Step 2: Run** → FAIL. **Step 3: Implement** (`pnpm add google-auth-library`). **Step 4: Run** `pnpm test && pnpm typecheck` → PASS.
+- [ ] **Step 5: Commit** `feat: application tracker spreadsheet (CSV + Google Sheets sync)`
+
+---
+
 ## Self-review notes
 
 - **Spec coverage.** Each spec section maps to these tasks:

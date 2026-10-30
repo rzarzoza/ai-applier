@@ -1,0 +1,195 @@
+<!doctype html>
+<html>
+<head><title>Job Application for Software Engineer Intern at Mini</title>
+<style>
+  .select__menu { border: 1px solid #ccc; max-height: 300px; overflow: auto; }
+  .select__option { padding: 4px; }
+  .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+</style>
+</head>
+<body>
+<!--
+  Greenhouse's job-boards form as seen live (Oct 2026): every picker is react-select v5 (`.select-shell` >
+  `.select__control` > `input.select__input[role=combobox]`, a menu `#react-select-<id>-listbox[role=listbox]` of
+  `[role=option]` while open, the picked value as `.select__single-value` / `.select__multi-value__label`), the phone's
+  Country picker lists "United States +1"..., Location (City) is an async geocoder, and education School / Degree /
+  Discipline are async searches. The mock follows react-select's event handling: the control opens on mousedown, the
+  input's input event filters (or searches), an option's click picks it, Escape / blur close and clear the typed text.
+  What each picker holds is mirrored in window.__values.
+-->
+<form id="application-form" class="application--form">
+  <div class="field-wrapper"><label id="first_name-label" for="first_name">First Name<span aria-hidden="true">*</span></label>
+    <input id="first_name" type="text" aria-required="true"></div>
+  <div class="field-wrapper"><label id="email-label" for="email">Email<span aria-hidden="true">*</span></label>
+    <input id="email" type="text" aria-required="true"></div>
+  <fieldset class="phone-input"><legend class="visually-hidden">Phone</legend>
+    <div class="phone-input__country" data-select="country" data-label="Country" data-required="1"></div>
+    <div class="phone-input__phone"><label id="phone-label" for="phone">Phone</label><input id="phone" type="tel"></div>
+  </fieldset>
+  <div data-select="candidate-location" data-label="Location (City)" data-required="1"></div>
+  <div data-select="question_1" data-label="Will you now or in the future require sponsorship?" data-required="1"></div>
+  <div data-select="question_2" data-label="Which languages do you speak?" data-multi="1"></div>
+  <div data-select="school--0" data-label="School" data-required="1"></div>
+  <div data-select="degree--0" data-label="Degree" data-required="1"></div>
+  <div data-select="discipline--0" data-label="Discipline"></div>
+  <div data-select="gender" data-label="Gender"></div>
+  <button type="submit">Submit application</button>
+</form>
+<script>
+(function () {
+  window.__values = {};
+  window.__searches = {};
+  var COUNTRIES = ["United States +1", "Afghanistan +93", "Åland Islands +358", "American Samoa +1", "Canada +1", "Mexico +52",
+    "United Arab Emirates +971", "United Kingdom +44", "United States Minor Outlying Islands +1"];
+  var FLAGS = { "United States +1": "us", "Canada +1": "ca", "Mexico +52": "mx" };
+  var PLACES = ["Houston, Texas, United States", "South Houston, Texas, United States", "Houston, Scotland, United Kingdom",
+    "Houston, Mississippi, United States", "Houston, British Columbia, Canada", "Houston County, Alabama, United States",
+    "Austin, Texas, United States"];
+  var SCHOOLS = ["Harvard University", "Stanford University", "University of Houston", "Rice University", "Rice University - Jones School", "Other"];
+  var DEGREES = ["High School", "Associate's Degree", "Bachelor's Degree", "Master's Degree", "Doctor of Philosophy (Ph.D.)", "Other"];
+  var DISCIPLINES = ["Computer Engineering", "Computer Science", "Mathematics", "Physics"];
+  var contains = function (q) { return function (o) { return o.toLowerCase().indexOf(q.toLowerCase().trim()) >= 0; }; };
+  var CONFIG = {
+    "country": { options: COUNTRIES },
+    "candidate-location": { load: function (q) {
+      var parts = q.toLowerCase().split(",").map(function (s) { return s.trim(); });
+      if (!parts[0]) return [];
+      return PLACES.filter(function (p) {
+        var ps = p.toLowerCase().split(",").map(function (s) { return s.trim(); });
+        if (ps[0].indexOf(parts[0]) < 0) return false;
+        return !parts[1] || ps.slice(1).some(function (x) { return x.indexOf(parts[1]) === 0 || (parts[1].length === 2 && parts[1] === "tx" && x === "texas"); });
+      });
+    }, delay: 500 },
+    "question_1": { options: ["Yes", "No"] },
+    "question_2": { options: ["English", "Spanish", "French", "Mandarin"], multi: true },
+    "school--0": { load: function (q) { return q.trim() ? SCHOOLS.filter(contains(q)) : []; }, delay: 300 },
+    "degree--0": { load: function (q) { return q.trim() ? DEGREES.filter(contains(q)) : []; }, delay: 300 },
+    "discipline--0": { load: function (q) { return q.trim() ? DISCIPLINES.filter(contains(q)) : []; }, delay: 300 },
+    "gender": { options: ["Male", "Female", "Decline To Self Identify"] },
+  };
+
+  document.querySelectorAll("[data-select]").forEach(function (host) {
+    var id = host.getAttribute("data-select");
+    var cfg = CONFIG[id];
+    var multi = !!cfg.multi;
+    var req = host.hasAttribute("data-required");
+    var listId = "react-select-" + id + "-listbox";
+    host.innerHTML =
+      '<div class="select"><div class="select__container">' +
+      '<label id="' + id + '-label" for="' + id + '" class="label select__label">' + host.getAttribute("data-label") + (req ? '<span aria-hidden="true">*</span>' : "") + '</label>' +
+      '<div class="select-shell remix-css-b62m3t-container"><div>' +
+      '<div class="select__control remix-css-13cymwt-control"><div class="select__value-container">' +
+      '<div class="select__placeholder" id="react-select-' + id + '-placeholder">Select...</div>' +
+      '<div class="select__input-container"><input class="select__input" autocomplete="off" id="' + id + '" type="text" tabindex="0"' +
+      ' aria-autocomplete="list" aria-expanded="false" aria-haspopup="true" aria-labelledby="' + id + '-label" aria-required="' + req + '"' +
+      ' role="combobox" aria-describedby="react-select-' + id + '-placeholder" value=""></div></div>' +
+      '<div class="select__indicators"><button type="button" class="icon-button" aria-label="Toggle flyout" tabindex="-1">v</button></div></div></div>' +
+      '<div class="menu-slot"></div></div>' +
+      '<input aria-hidden="true" tabindex="-1" class="visually-hidden" name="' + id + '"' + (req ? " required" : "") + ' value=""></div></div>';
+    var input = host.querySelector("input.select__input");
+    var control = host.querySelector(".select__control");
+    var valueBox = host.querySelector(".select__value-container");
+    var placeholder = host.querySelector(".select__placeholder");
+    var indicators = host.querySelector(".select__indicators");
+    var slot = host.querySelector(".menu-slot");
+    var mirror = host.querySelector("input[aria-hidden]");
+    var state = { open: false, focused: false, selected: [], options: cfg.options ? cfg.options.slice() : [], loading: false, focus: -1, seq: 0 };
+
+    function shown() {
+      if (cfg.options) { var q = input.value; return cfg.options.filter(function (o) { return !q || o.toLowerCase().indexOf(q.toLowerCase()) >= 0; }); }
+      return state.options;
+    }
+    function render() {
+      valueBox.querySelectorAll(".select__single-value, .select__multi-value").forEach(function (n) { n.remove(); });
+      placeholder.style.display = state.selected.length || input.value ? "none" : "";
+      state.selected.forEach(function (v) {
+        var d = document.createElement("div");
+        if (multi) {
+          d.className = "select__multi-value";
+          d.innerHTML = '<div class="select__multi-value__label"></div><div class="select__multi-value__remove" role="button" aria-label="Remove">x</div>';
+          d.firstChild.textContent = v;
+        } else { d.className = "select__single-value"; d.textContent = v; }
+        valueBox.insertBefore(d, valueBox.lastElementChild);
+      });
+      var li = indicators.querySelector(".select__loading-indicator");
+      if (state.loading && !li) { li = document.createElement("div"); li.className = "select__loading-indicator"; li.textContent = "…"; indicators.prepend(li); }
+      if (!state.loading && li) li.remove();
+      input.setAttribute("aria-expanded", String(state.open));
+      slot.innerHTML = "";
+      if (!state.open) { input.removeAttribute("aria-controls"); return; }
+      input.setAttribute("aria-controls", listId);
+      var menu = document.createElement("div");
+      menu.className = "select__menu";
+      menu.addEventListener("mousedown", function (e) { e.preventDefault(); e.stopPropagation(); });
+      var list = document.createElement("div");
+      list.className = "select__menu-list";
+      list.setAttribute("role", "listbox");
+      list.setAttribute("aria-multiselectable", String(multi));
+      list.id = listId;
+      var opts = shown().filter(function (o) { return !multi || state.selected.indexOf(o) < 0; });
+      if (state.loading) list.innerHTML = '<div class="select__menu-notice select__menu-notice--loading">Loading...</div>';
+      else if (!opts.length) list.innerHTML = '<div class="select__menu-notice select__menu-notice--no-options">No options</div>';
+      opts.forEach(function (o, i) {
+        var d = document.createElement("div");
+        d.className = "select__option" + (i === state.focus ? " select__option--is-focused" : "");
+        d.id = "react-select-" + id + "-option-" + i;
+        d.setAttribute("role", "option");
+        d.setAttribute("aria-disabled", "false");
+        if (id === "country") d.innerHTML = '<div class="iti__flag iti__' + (FLAGS[o] || "xx") + '"></div>';
+        d.appendChild(document.createTextNode(o));
+        d.addEventListener("click", function () { pick(o); });
+        list.appendChild(d);
+      });
+      menu.appendChild(list);
+      slot.appendChild(menu);
+    }
+    function open() { state.open = true; render(); }
+    function close() { state.open = false; state.focus = -1; input.setAttribute("aria-activedescendant", ""); setInput(""); render(); }
+    function setInput(v) {
+      var setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set;
+      setter.call(input, v);
+      input.parentElement.setAttribute("data-value", v);
+    }
+    function pick(o) {
+      state.selected = multi ? state.selected.concat([o]) : [o];
+      window.__values[id] = multi ? state.selected.slice() : o;
+      mirror.value = state.selected.join(",");
+      close();
+    }
+    control.addEventListener("mousedown", function (e) {
+      if (e.button !== 0) return;
+      if (!state.focused) { input.focus(); open(); }
+      else if (!state.open) open();
+      else if (e.target !== input) close();
+      if (e.target !== input) e.preventDefault();
+    });
+    input.addEventListener("focus", function () { state.focused = true; });
+    input.addEventListener("blur", function () { state.focused = false; close(); });
+    input.addEventListener("input", function () {
+      input.parentElement.setAttribute("data-value", input.value);
+      state.focus = -1;
+      if (cfg.load) {
+        var q = input.value, seq = ++state.seq;
+        (window.__searches[id] = window.__searches[id] || []).push(q);
+        state.loading = true; state.options = [];
+        setTimeout(function () { if (seq !== state.seq) return; state.loading = false; state.options = cfg.load(q); render(); }, cfg.delay);
+      }
+      open();
+    });
+    input.addEventListener("keydown", function (e) {
+      var opts = shown();
+      if (e.key === "ArrowDown") {
+        if (!state.open) { open(); return; }
+        state.focus = Math.min(state.focus + 1, opts.length - 1);
+        render();
+        input.setAttribute("aria-activedescendant", state.focus >= 0 ? "react-select-" + id + "-option-" + state.focus : "");
+        e.preventDefault();
+      } else if (e.key === "Enter" && state.open && state.focus >= 0) { pick(opts[state.focus]); e.preventDefault(); }
+      else if (e.key === "Escape") { close(); }
+    });
+    render();
+  });
+})();
+</script>
+</body>
+</html>

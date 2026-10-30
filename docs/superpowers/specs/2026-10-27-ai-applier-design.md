@@ -294,6 +294,33 @@ Settings.**
 - Settings: portal email/password, IMAP, Claude API key, auto-submit/review,
   daily limit, poll interval, visible/background browser.
 
+### 4.11 Application tracker spreadsheet (added 2026-10-28, user request)
+
+A spreadsheet that tracks every application. It has one row per job in
+status `submitted` or `applied-manually`, with these columns:
+**Date applied · Company · Job title · Posting link · Location · Resume used ·
+Cover letter used · Status · Application system**.
+
+- **Local file, always on:** `DATA_DIR/applications.csv`. It is rewritten in
+  full from the database after every submission, so it never has duplicates.
+  It opens in Excel, Numbers, or Google Sheets.
+- **Google Sheet, optional:** the user pastes a Sheet link in Settings and
+  adds a Google service-account key file, then shares the Sheet with the
+  service account's email. After each submission the app overwrites the tab
+  named `Applications` with the same table. A **Sync now** button runs it on
+  demand.
+- **Column contents:**
+  - **Resume used:** the file name of the resume PDF uploaded to that
+    application.
+  - **Cover letter used:** the cover-letter file name if one was uploaded,
+    "written answer" if a cover-letter text field was filled, otherwise
+    "none".
+  - **Posting link:** the direct application URL.
+- **Sync failures:** a failed Google sync never blocks or fails an
+  application. The last sync time and any error show in Settings.
+  (Claude's calls: service account rather than OAuth; full-table rewrite
+  rather than appending rows.)
+
 ## 5. Constraints
 
 - Runs locally on macOS. Single user. Data stays on the machine except calls to
