@@ -2,6 +2,7 @@ import path from "node:path";
 import { getOverrides } from "../../answers/bank.js";
 import { canDoItNow, canHandFinish } from "../../answers/inbox.js";
 import type { Resolution } from "../../answers/resolve.js";
+import { formatUsd, spendForJob } from "../../llm/meter.js";
 import type { Db } from "../../db/db.js";
 import type { FieldAnswer, FieldSpec } from "../../forms/types.js";
 import { countByStatus, isUnknownSubmission, listJobs } from "../../jobs/repo.js";
@@ -182,6 +183,12 @@ export const NOTICES: Record<string, string> = {
  * The job's page. `live` is the Application panel's state when the job's form can be shown and finished right here (see
  * LivePanel); then Open & finish and Do it now become the panel's Pop out.
  */
+/** What the AI cost for this application (every run and the extension). */
+function AiCost(props: { db: Db; jobId: string }) {
+  const spend = spendForJob(props.db, props.jobId);
+  return <div class="meta">AI cost: {formatUsd(spend.costUsd)} · {spend.calls} {spend.calls === 1 ? "call" : "calls"}</div>;
+}
+
 export function JobDetailPage(props: { db: Db; job: Job; notice?: string; live?: PanelState }) {
   const { db, job, live } = props;
   const { views, screenshot } = fieldViews(db, job);
@@ -202,6 +209,7 @@ export function JobDetailPage(props: { db: Db; job: Job; notice?: string; live?:
               {jobLocation(job)} · posted {shortDate(job.datePosted)} · {job.ats ?? "ATS unknown"} ·{" "}
               {href ? <a href={href} target="_blank" rel="noopener noreferrer">View posting</a> : "no link"}
             </div>
+            <AiCost db={db} jobId={job.id} />
             <div class="row" style="margin-top:8px">
               <StatusChip status={job.status} />
               {job.statusReason ? <span class="meta">{job.statusReason}</span> : null}

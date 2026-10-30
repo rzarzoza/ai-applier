@@ -1,14 +1,26 @@
 import { raw } from "hono/html";
 import type { Child } from "hono/jsx";
 import type { Db } from "../db/db.js";
+import { formatUsd, spendToday, type Spend } from "../llm/meter.js";
+import { budgetReached, claudeInUse } from "../llm/routed.js";
 import { getRunnerHalt, getSettings } from "../settings.js";
 import { Icon } from "./ui.js";
 
-/** The Layout's pause banner props: whether the runner is paused, and why if it paused itself. */
-export function pauseProps(db: Db): { paused: boolean; haltReason: string | null } {
-  const paused = getSettings(db).paused;
-  return { paused, haltReason: paused ? getRunnerHalt(db)?.reason ?? null : null };
+/**
+ * The Layout's top-bar props: whether the runner is paused (and why if it paused itself), today's AI spend, and whether
+ * today's Claude budget is spent (only when Claude is in use).
+ */
+export function pauseProps(db: Db): { paused: boolean; haltReason: string | null; aiSpend: Spend; budgetHit: boolean } {
+  const s = getSettings(db);
+  const paused = s.paused;
+  return {
+    paused, haltReason: paused ? getRunnerHalt(db)?.reason ?? null : null,
+    aiSpend: spendToday(db), budgetHit: claudeInUse(s) && budgetReached(db),
+  };
 }
+
+/** "AI spend today: $0.03 · 12 calls". */
+export const spendLine = (s: Spend) => `AI spend today: ${formatUsd(s.costUsd)} · ${s.calls} ${s.calls === 1 ? "call" : "calls"}`;
 
 const TABS: { href: string; label: string; key: string }[] = [
   { href: "/", label: "Home", key: "home" },
@@ -85,6 +97,8 @@ a:hover { text-decoration: underline; }
 .alert-warning { border-left-color: var(--warning); } .alert-warning .icon { color: var(--warning); }
 .alert-success { border-left-color: var(--success); } .alert-success .icon { color: var(--success); }
 .alert-danger { border-left-color: var(--danger); } .alert-danger .icon { color: var(--danger); }
+.ai-strip { max-width: 1128px; margin: 0 auto; padding: 4px 24px 0; text-align: right; font-size: 12px; }
+.ai-strip a { color: var(--muted); }
 .alert-bar { background: var(--warning-tint); color: var(--text); border-bottom: 1px solid var(--border); }
 .alert-bar-inner { max-width: 1128px; margin: 0 auto; padding: 10px 24px; display: flex; gap: 10px; align-items: center; }
 .alert-bar .icon { color: var(--warning); }
@@ -252,6 +266,7 @@ tr:last-child td { border-bottom: 0; }
   .tab-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
   main { padding: 16px; }
   .alert-bar-inner { padding: 10px 16px; }
+  .ai-strip { padding: 4px 16px 0; }
   .grid-2, .fields-grid { grid-template-columns: minmax(0, 1fr); }
   .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .tiles .tile:last-child { grid-column: span 2; }
@@ -268,13 +283,17 @@ tr:last-child td { border-bottom: 0; }
   tr:last-child { border-bottom: 0; }
   td { border: 0; padding: 2px 16px; }
   td + td { padding-left: 68px; }
+  table.spend td + td { padding-left: 16px; }
   .job-cell { min-width: 0; }
   .reason { max-width: none; }
   .td-hide { display: none; }
 }
 `;
 
-export function Layout(props: { active: string; inboxCount: number; paused?: boolean; haltReason?: string | null; title?: string; children?: Child }) {
+export function Layout(props: {
+  active: string; inboxCount: number; paused?: boolean; haltReason?: string | null; title?: string; children?: Child;
+  aiSpend?: Spend; budgetHit?: boolean;
+}) {
   return (
     <html lang="en">
       <head>
@@ -314,6 +333,15 @@ export function Layout(props: { active: string; inboxCount: number; paused?: boo
             </div>
           </div>
         ) : null}
+        {props.budgetHit ? (
+          <div class="alert-bar" role="status">
+            <div class="alert-bar-inner">
+              <Icon name="alert" size={20} />
+              <span>AI budget reached for today — Claude is off until tomorrow, and the fields it would answer are left for you. Raise the budget in <a href="/settings#ai">Settings</a>.</span>
+            </div>
+          </div>
+        ) : null}
+        {props.aiSpend ? <div class="ai-strip"><a href="/settings#ai">{spendLine(props.aiSpend)}</a></div> : null}
         <main>{props.children}</main>
       </body>
     </html>

@@ -31,20 +31,36 @@ export function NowCard(props: HomeProps) {
   const job = current ? getJob(db, current.jobId) : null;
   const refresh = { id: "now", "hx-get": "/home/now", "hx-trigger": "every 3s", "hx-swap": "outerHTML" };
   if (current && job) return <NowRunning current={current} job={job} now={now} refresh={refresh} />;
-  const paused = getSettings(db).paused;
+  const { paused, backgroundApplier } = getSettings(db);
   const queued = countByStatus(db).queued;
   return (
     <section class="card" {...refresh} aria-live="polite">
-      <div class="card-head"><h2>Applying now</h2></div>
+      <div class="card-head">
+        <h2>Applying now</h2>
+        <BackgroundToggle on={backgroundApplier} />
+      </div>
       <div class="now-idle">
-        <Icon name={paused ? "alert" : "applications"} />
+        <Icon name={!backgroundApplier || paused ? "alert" : "applications"} />
         <div>
-          {paused
-            ? <><strong>Paused</strong> — no new applications start until you turn it off in <a href="/settings">Settings</a>.</>
-            : queued > 0 ? <>Idle — next job starts shortly.</> : <>Idle — nothing is queued right now.</>}
+          {!backgroundApplier
+            ? <><strong>Background applier is off</strong> — queued jobs wait until you turn it on. Apply with the browser extension, or open a job and press Do it now.</>
+            : paused
+              ? <><strong>Paused</strong> — no new applications start until you turn it off in <a href="/settings">Settings</a>.</>
+              : queued > 0 ? <>Idle — next job starts shortly.</> : <>Idle — nothing is queued right now.</>}
         </div>
       </div>
     </section>
+  );
+}
+
+/** The background applier's on/off switch (off by default: then the app never starts a job on its own). */
+export function BackgroundToggle(props: { on: boolean }) {
+  return (
+    <form method="post" action="/runner/background" class="row" style="margin:0;gap:8px;align-items:center">
+      <span class={props.on ? "chip chip-green" : "chip chip-gray"}>Background applier: {props.on ? "on" : "off"}</span>
+      <input type="hidden" name="on" value={props.on ? "0" : "1"} />
+      <button type="submit" title={props.on ? "Stop taking queued jobs on its own" : "Let the app apply to queued jobs on its own"}>{props.on ? "Turn off" : "Turn on"}</button>
+    </form>
   );
 }
 

@@ -16,7 +16,7 @@ import { saveFilters } from "../filters/filters.js";
 import { refilterJobs } from "../sources/poller.js";
 import { addSource, listSources, setSourceEnabled } from "../sources/repo.js";
 import { getSecret, setSecret } from "../secrets.js";
-import { saveSettings, setJson, type Settings } from "../settings.js";
+import { DEFAULT_OLLAMA_MODEL, DEFAULT_OLLAMA_URL, saveSettings, setJson, type Settings } from "../settings.js";
 import { pauseRunner, resumeRunner } from "../runner/pause.js";
 import { writeTrackerCsv } from "../tracker/csv.js";
 import { spreadsheetIdFromUrl } from "../tracker/sheets.js";
@@ -26,7 +26,8 @@ import {
 } from "./pages/applications.js";
 import { BankPage } from "./pages/bank.js";
 import { PROFILE_FIELDS, ProfilePage } from "./pages/profile.js";
-import { SettingsPage } from "./pages/settings.js";
+import { OllamaTestResult, SettingsPage } from "./pages/settings.js";
+import { listOllamaModels } from "../llm/ollama.js";
 import { PreviewFragment, SourcesPage, parseFilterForm, previewCount } from "./pages/sources.js";
 import { ApproveSuggestionsPage, BroughtToFront, CardFragment, InboxPage, OpeningBrowser, OpeningHandFinish, SavedNotice } from "./pages/inbox.js";
 import { HomeLists, HomePage, NowCard } from "./pages/home.js";
@@ -123,6 +124,12 @@ export function createApp(ctx: AppContext): Hono {
   });
   app.post("/runner/resume", c => {
     resumeRunner(db);
+    return c.redirect(back(c.req.header("referer"), c.req.header("host")), 303);
+  });
+  /** Turns the background applier on or off (the dashboard's toggle). */
+  app.post("/runner/background", async c => {
+    const form = await c.req.parseBody();
+    saveSettings(db, { backgroundApplier: str(form.on) === "1" });
     return c.redirect(back(c.req.header("referer"), c.req.header("host")), 303);
   });
 
@@ -459,6 +466,45 @@ export function createApp(ctx: AppContext): Hono {
       });
     } catch (e) {
       return c.text(`Couldn't write the spreadsheet: ${e instanceof Error ? e.message : String(e)}`, 500);
+    }
+  });
+
+  /** An Ollama address: http(s) only, without a trailing slash. */
+  const ollamaUrl = (raw: string): string | null => {
+    try {
+      const u = new URL(raw || DEFAULT_OLLAMA_URL);
+      return u.protocol === "http:" || u.protocol === "https:" ? u.toString().replace(/\/+$/, "") : null;
+    } catch { return null; }
+  };
+
+  app.post("/settings/ai", async c => {
+    const form = await c.req.parseBody();
+    const provider = (v: string) => (v === "claude" ? "claude" : v === "local" ? "local" : null);
+    const aiFast = provider(str(form.aiFast));
+    const aiWrite = provider(str(form.aiWrite));
+    if (!aiFast || !aiWrite) return c.text("Pick Local or Claude for each kind of task", 400);
+    const aiLocalOff = str(form.aiLocalOff) === "claude" ? "claude" : "leave";
+    const url = ollamaUrl(str(form.ollamaUrl));
+    if (!url) return c.text("The Ollama address must be an http:// URL", 400);
+    const budget = Number(str(form.aiDailyBudgetUsd).replace(/^\$/, ""));
+    if (!Number.isFinite(budget) || budget < 0 || budget > 1000) return c.text("The daily AI budget must be an amount from 0 to 1000 dollars", 400);
+    saveSettings(db, {
+      aiFast, aiWrite, aiLocalOff, ollamaUrl: url, ollamaModel: str(form.ollamaModel) || DEFAULT_OLLAMA_MODEL,
+      aiDailyBudgetUsd: Math.round(budget * 100) / 100,
+    });
+    return c.redirect("/settings#ai", 303);
+  });
+
+  /** Settings' "Test connection": lists the models installed in Ollama at the address in the form. */
+  app.post("/settings/ai/test", async c => {
+    const form = await c.req.parseBody();
+    const url = ollamaUrl(str(form.ollamaUrl));
+    const model = str(form.ollamaModel) || DEFAULT_OLLAMA_MODEL;
+    if (!url) return c.html(OllamaTestResult({ error: "the address must be an http:// URL", model }));
+    try {
+      return c.html(OllamaTestResult({ models: await listOllamaModels(url), model }));
+    } catch (e) {
+      return c.html(OllamaTestResult({ error: e instanceof Error ? e.message : String(e), model }));
     }
   });
 

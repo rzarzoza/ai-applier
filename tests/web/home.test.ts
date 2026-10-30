@@ -4,7 +4,7 @@ import { openDb } from "../../src/db/db.js";
 import { HAND_UNCONFIRMED, setAts, setStatus, upsertPosting } from "../../src/jobs/repo.js";
 import type { JobStatus } from "../../src/jobs/types.js";
 import { setRunnerCurrent } from "../../src/runner/current.js";
-import { saveSettings } from "../../src/settings.js";
+import { getSettings, saveSettings } from "../../src/settings.js";
 import type { Posting } from "../../src/sources/types.js";
 import { createApp } from "../../src/web/server.js";
 import { avatarColor, initials } from "../../src/web/ui.js";
@@ -76,6 +76,14 @@ test("the Applying now card shows the runner's current job, step and elapsed tim
 
 test("with nothing running the card is idle, or paused", async () => {
   const { db, app, mk } = setup();
+  // The background applier is off until the user turns it on.
+  const off = await get(app, "/home/now");
+  expect(off).toContain("Background applier is off");
+  expect(off).toContain('action="/runner/background"');
+  expect(off).not.toContain("Idle");
+  await app.request("/runner/background", { method: "POST", body: new URLSearchParams({ on: "1" }) });
+  expect(getSettings(db).backgroundApplier).toBe(true);
+  expect(await get(app, "/home/now")).toContain("Background applier: on");
   expect(await get(app, "/home/now")).toContain("Idle — nothing is queued right now.");
   mk(1, "queued");
   expect(await get(app, "/home/now")).toContain("Idle — next job starts shortly.");
