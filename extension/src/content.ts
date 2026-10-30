@@ -279,7 +279,8 @@ async function resolveAndFill(s: Session, specs: FieldSpec[]): Promise<void> {
   const job = pageJob();
   const r = await bg<ApiResult<ResolveResponse>>({
     type: "api", method: "POST", path: "/ext/resolve",
-    body: { url: location.href, ...referrer(), title: job.title, ...(job.company ? { company: job.company } : {}), fields: specs },
+    // The app takes up to 5,000 options per list (a Lever university list has 3,000+): never fail a form over one.
+    body: { url: location.href, ...referrer(), title: job.title, ...(job.company ? { company: job.company } : {}), fields: specs.map(f => (f.options && f.options.length > 5000 ? { ...f, options: f.options.slice(0, 5000) } : f)) },
   });
   if (session !== s) return;
   if (!r || !r.ok) {

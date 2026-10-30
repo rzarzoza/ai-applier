@@ -59,7 +59,7 @@ const CSS = `
 .status strong { font-weight: 600; }
 .msg { color: var(--muted); font-size: 13px; padding: 0 12px 8px; }
 .msg.err { color: var(--danger); }
-.list { overflow: auto; padding: 0 6px 6px; margin: 0; list-style: none; }
+.list { overflow: auto; padding: 0 6px 6px; margin: 0; list-style: none; flex: 1 1 auto; min-height: 96px; }
 .item { padding: 6px; border-radius: 6px; }
 .item:hover { background: var(--hover); }
 .go { all: unset; cursor: pointer; display: block; width: 100%; }
@@ -72,7 +72,7 @@ button.chip { font: inherit; font-size: 12px; border: 1px solid var(--border); b
   padding: 2px 8px; cursor: pointer; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 button.chip:hover { border-color: var(--primary); color: var(--primary); }
 .section { font-size: 12px; font-weight: 600; color: var(--muted); padding: 6px 12px 2px; text-transform: uppercase; letter-spacing: .03em; }
-details.filled { padding: 0 12px 6px; }
+details.filled { padding: 0 12px 6px; flex: 0 1 auto; max-height: 35%; overflow: auto; }
 details.filled summary { cursor: pointer; color: var(--muted); font-size: 13px; padding: 4px 0; }
 .done { font-size: 12px; padding: 2px 0; overflow-wrap: anywhere; }
 .done .tick { color: var(--success); margin-right: 4px; }
